@@ -24,7 +24,26 @@ SUPPORTED_PROVIDERS = frozenset({"claude", "codex", "opencode"})
 SUPPORTED_AUTH_MODES = frozenset({"access_token", "bearer"})
 SUPPORTED_AI_BEHAVIORS = frozenset({"read", "blind"})
 SUPPORTED_VISIBILITY = frozenset({"chat", "hud"})
-SENSITIVE_KEY_PARTS = ("token", "secret", "password", "authorization", "credential", "jwt")
+SENSITIVE_KEY_PARTS = (
+    "token",
+    "secret",
+    "password",
+    "authorization",
+    "credential",
+    "jwt",
+    "apikey",
+    "privatekey",
+    "cookie",
+    "bearer",
+    "passwd",
+    "passphrase",
+)
+SENSITIVE_EXACT_KEYS = frozenset(
+    {
+        "auth",
+        "authentication",
+    }
+)
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 DEFAULT_BASE_URL = "http://127.0.0.1:3006"
 DEFAULT_AUTH_MODE = "access_token"
@@ -40,6 +59,16 @@ class PolicyError(ValueError):
         super().__init__(message)
         self.code = code
         self.public_message = message
+
+
+def is_sensitive_key(value: Any) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", str(value).lower())
+    return (
+        normalized in SENSITIVE_EXACT_KEYS
+        or normalized.endswith("auth")
+        or normalized.endswith("authentication")
+        or any(part in normalized for part in SENSITIVE_KEY_PARTS)
+    )
 
 
 def _bounded_int(
@@ -137,6 +166,11 @@ def validate_base_url(base_url: str, allow_remote: bool = False) -> str:
         raise PolicyError(
             "非本机 HAPI 地址需要在面板中明确启用远程端点",
             code="remote_opt_in_required",
+        )
+    if not loopback and parsed.scheme.lower() != "https":
+        raise PolicyError(
+            "非本机 HAPI 地址必须使用 HTTPS，避免令牌在网络中明文传输",
+            code="remote_https_required",
         )
     host = parsed.hostname.lower()
     if ":" in host:
@@ -260,9 +294,9 @@ def redact_sensitive(value: Any, *, max_string: int = 512, depth: int = 0) -> An
             if index >= 64:
                 result["_truncated"] = True
                 break
+            sensitive = is_sensitive_key(key)
             text_key = str(key)[:128]
-            lowered = text_key.lower()
-            if any(part in lowered for part in SENSITIVE_KEY_PARTS):
+            if sensitive:
                 result[text_key] = "[REDACTED]"
             else:
                 result[text_key] = redact_sensitive(

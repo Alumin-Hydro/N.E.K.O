@@ -1,21 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import gzip
 import json
 import re
+import threading
 import tomllib
 from collections.abc import AsyncIterator, Callable
+from decimal import Decimal
+from html.parser import HTMLParser
 from pathlib import Path
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+import plugin.plugins.vibe_coding_connector as vibe_coding_module
 from plugin.plugins.vibe_coding_connector import VibeCodingConnectorPlugin
 from plugin.plugins.vibe_coding_connector.client import (
     HapiClient,
     HapiClientConfig,
     HapiClientError,
     SSEEvent,
+    _SSEParser,
     extract_permissions,
 )
 from plugin.plugins.vibe_coding_connector.security import (
@@ -74,15 +84,20 @@ class _Context:
         }
         self.logger = _Logger()
         self.message_queue = None
-        self._effective_config = {
+        self.config = {
             "plugin": {"store": {"enabled": True}, "database": {"enabled": False}},
             "plugin_state": {"backend": "off"},
         }
+        self._effective_config = self.config
         self.pushed: list[dict[str, object]] = []
 
     def push_message(self, **kwargs: object) -> dict[str, object]:
         self.pushed.append(dict(kwargs))
         return {"ok": True}
+
+    async def get_own_config(self, timeout: float = 5.0) -> dict[str, object]:
+        del timeout
+        return {"config": self.config}
 
 
 class _ByteStream(httpx.AsyncByteStream):
@@ -98,6 +113,39 @@ class _ByteStream(httpx.AsyncByteStream):
     async def aclose(self) -> None:
         if self._on_close is not None:
             self._on_close()
+
+
+class _SilentByteStream(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        self.started.set()
+        await self.release.wait()
+        if False:  # pragma: no cover - keep this an async byte iterator
+            yield b""
+
+    async def aclose(self) -> None:
+        self.closed = True
+        self.release.set()
+
+
+class _PanelNumberInputParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.inputs: dict[str, dict[str, str | None]] = {}
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        attributes = dict(attrs)
+        input_id = attributes.get("id")
+        if tag == "input" and attributes.get("type") == "number" and input_id:
+            self.inputs[input_id] = attributes
 
 
 def _client_config(**overrides: object) -> HapiClientConfig:
@@ -129,8 +177,72 @@ def _public(value: object) -> dict[str, object]:
     return value
 
 
+def _encrypt_settings_document(
+    envelope: dict[str, object],
+    document: dict[str, object],
+    *,
+    entry_id: str = "vibe_coding_save_settings",
+) -> dict[str, str]:
+    key_id = envelope["key_id"]
+    public_key_b64 = envelope["public_key_spki_b64"]
+    assert isinstance(key_id, str)
+    assert isinstance(public_key_b64, str)
+    public_key = serialization.load_der_public_key(
+        base64.b64decode(public_key_b64, validate=True)
+    )
+    content_key = AESGCM.generate_key(bit_length=256)
+    iv = b"\x01" * 12
+    binding = f"vibe_coding_connector:{entry_id}:{key_id}".encode()
+    plaintext = json.dumps(
+        document,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    ciphertext = AESGCM(content_key).encrypt(iv, plaintext, binding)
+    wrapped_key = public_key.encrypt(
+        content_key,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=binding,
+        ),
+    )
+    outer = {
+        "v": 1,
+        "wrapped_key": base64.b64encode(wrapped_key).decode(),
+        "iv": base64.b64encode(iv).decode(),
+        "ciphertext": base64.b64encode(ciphertext).decode(),
+    }
+    return {
+        "encrypted_payload": base64.b64encode(
+            json.dumps(outer, separators=(",", ":")).encode()
+        ).decode(),
+        "key_id": key_id,
+    }
+
+
+async def _save_encrypted_settings(
+    plugin: VibeCodingConnectorPlugin,
+    *,
+    settings: dict[str, object] | None = None,
+    token: str = "",
+    clear_token: bool = False,
+) -> object:
+    envelope = await plugin._issue_secret_envelope()
+    return await plugin.save_settings(
+        **_encrypt_settings_document(
+            envelope,
+            {
+                "settings": settings or plugin._settings.to_store(),
+                "token": token,
+                "clear_token": clear_token,
+            },
+        )
+    )
+
+
 def _assert_no_secret_fields(value: object, *, allowed: set[str] | None = None) -> None:
-    allowed = allowed or {"token_configured", "token_last_four"}
+    allowed = allowed or {"token_configured"}
     if isinstance(value, dict):
         for key, item in value.items():
             lowered = str(key).lower()
@@ -209,6 +321,34 @@ def test_lifecycle_and_panel_entries_are_declared() -> None:
     assert hasattr(VibeCodingConnectorPlugin.dashboard_context, "__neko_ui_context__")
 
 
+@pytest.mark.asyncio
+async def test_startup_enables_manifest_store_before_load_and_settings_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    ctx = _Context(PLUGIN_DIR)
+    ctx._effective_config = {
+        "plugin": {"store": {"enabled": False}, "database": {"enabled": False}},
+        "plugin_state": {"backend": "off"},
+    }
+    plugin = VibeCodingConnectorPlugin(ctx)
+    assert plugin.store.enabled is False
+
+    try:
+        started = await plugin.startup()
+        assert started.is_ok()
+        assert plugin.store.enabled is True
+
+        saved = await _save_encrypted_settings(
+            plugin,
+            token="access-secret-1234",
+        )
+        assert saved.is_ok()
+    finally:
+        await plugin.shutdown()
+
+
 def test_default_settings_are_secure_and_public_shape_never_echoes_token() -> None:
     settings = ConnectorSettings()
     public = settings.to_public()
@@ -261,6 +401,17 @@ def test_remote_url_needs_explicit_opt_in_and_normalizes() -> None:
     assert (
         validate_base_url("https://hapi.example.test:8443/", allow_remote=True)
         == "https://hapi.example.test:8443"
+    )
+
+
+def test_remote_url_rejects_plain_http_even_with_explicit_opt_in() -> None:
+    with pytest.raises(PolicyError) as caught:
+        validate_base_url("http://hapi.example.test:3006", allow_remote=True)
+
+    assert caught.value.code == "remote_https_required"
+    assert (
+        validate_base_url("http://127.0.0.1:3006", allow_remote=False)
+        == "http://127.0.0.1:3006"
     )
 
 
@@ -598,6 +749,7 @@ def test_client_reuses_within_loop_but_isolates_clients_between_event_loops() ->
     asyncio.run(client.health())
     assert len(created) == 2
     asyncio.run(client.aclose())
+    assert all(item.is_closed for item in created)
 
 
 @pytest.mark.asyncio
@@ -1020,6 +1172,254 @@ async def test_client_rejects_oversized_success_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_client_rejects_compressed_http_before_decompression() -> None:
+    compressed = gzip.compress(
+        json.dumps(
+            {"sessions": [{"id": "s1", "padding": "x" * 200_000}]}
+        ).encode()
+    )
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "application/json",
+                "content-encoding": "gzip",
+            },
+            content=compressed,
+        )
+
+    transport, _requests = _recording_transport(responder)
+    client = HapiClient(
+        _client_config(auth_mode="bearer", max_response_bytes=16_384),
+        transport=transport,
+    )
+    try:
+        with pytest.raises(HapiClientError) as caught:
+            await client.list_sessions()
+    finally:
+        await client.aclose()
+
+    assert caught.value.code == "unsupported_content_encoding"
+
+
+@pytest.mark.asyncio
+async def test_client_redacts_derived_bearer_from_http_and_sse_values() -> None:
+    derived = "opaque-derived-bearer-7890"
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/auth":
+            return httpx.Response(200, json={"token": derived})
+        if request.url.path == "/api/sessions":
+            return httpx.Response(
+                200,
+                json={
+                    "sessions": [
+                        {
+                            "id": "s1",
+                            "status": derived,
+                            "provider": "codex",
+                            "directory": "/safe/repo",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_ByteStream(
+                [
+                    (
+                        f'data: {{"type":"{derived}","sessionId":"s1",'
+                        f'"text":"prefix {derived} suffix"}}\n\n'
+                    ).encode()
+                ]
+            ),
+        )
+
+    transport, _requests = _recording_transport(responder)
+    client = HapiClient(_client_config(), transport=transport)
+    try:
+        sessions = await client.list_sessions()
+        events = [
+            event
+            async for event in client.iter_events(reconnect=False)
+        ]
+    finally:
+        await client.aclose()
+
+    assert derived not in json.dumps(sessions)
+    assert derived not in json.dumps(
+        [
+            {"event": event.event, "id": event.event_id, "data": event.data}
+            for event in events
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_client_redacts_configured_token_echoed_as_json_scalars() -> None:
+    secret = "12345678"
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(
+                200,
+                json={"status": secret, "protocolVersion": int(secret)},
+            )
+        if request.url.path == "/api/auth":
+            return httpx.Response(200, json={"token": "derived-bearer"})
+        if request.url.path == "/api/sessions":
+            return httpx.Response(
+                200,
+                json={
+                    "sessions": [
+                        {
+                            "id": "s1",
+                            "status": "active",
+                            "updatedAt": int(secret),
+                        }
+                    ]
+                },
+            )
+        raise AssertionError(request.url.path)
+
+    transport, _requests = _recording_transport(responder)
+    client = HapiClient(_client_config(token=secret), transport=transport)
+    try:
+        health = await client.health()
+        sessions = await client.list_sessions()
+    finally:
+        await client.aclose()
+
+    assert secret not in json.dumps(
+        {"health": health, "sessions": sessions},
+        ensure_ascii=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_client_rejects_mapping_values_in_scalar_remote_fields() -> None:
+    machine_secret = "opaque-machine-secret"
+    status_secret = "opaque-status-secret"
+    tool_secret = "opaque-tool-secret"
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/auth":
+            return httpx.Response(200, json={"token": "derived-bearer"})
+        if request.url.path == "/api/machines":
+            return httpx.Response(
+                200,
+                json={
+                    "machines": [
+                        {
+                            "id": "m1",
+                            "name": {"credential": machine_secret},
+                            "online": True,
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/api/sessions":
+            return httpx.Response(
+                200,
+                json={
+                    "sessions": [
+                        {
+                            "id": "s1",
+                            "status": {"credential": status_secret},
+                            "active": True,
+                        }
+                    ]
+                },
+            )
+        raise AssertionError(request.url.path)
+
+    transport, _requests = _recording_transport(responder)
+    client = HapiClient(_client_config(), transport=transport)
+    try:
+        machines = await client.list_machines()
+        sessions = await client.list_sessions()
+    finally:
+        await client.aclose()
+    permissions = extract_permissions(
+        {
+            "requests": {
+                "r1": {
+                    "tool": {"authorization": tool_secret},
+                    "arguments": {},
+                }
+            }
+        }
+    )
+
+    serialized = json.dumps(
+        {
+            "machines": machines,
+            "sessions": sessions,
+            "permissions": permissions,
+        },
+        ensure_ascii=False,
+    )
+    for secret in (machine_secret, status_secret, tool_secret):
+        assert secret not in serialized
+    assert machines[0]["name"] == "m1"
+    assert sessions[0]["status"] == "active"
+    assert permissions[0]["tool"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_client_treats_remote_lifecycle_flags_as_strict_booleans() -> None:
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/auth":
+            return httpx.Response(200, json={"token": "derived-bearer"})
+        if request.url.path == "/api/machines":
+            return httpx.Response(
+                200,
+                json={
+                    "machines": [
+                        {"id": "m1", "online": False},
+                        {"id": "m2", "online": "false"},
+                    ]
+                },
+            )
+        if request.url.path == "/api/sessions":
+            return httpx.Response(
+                200,
+                json={
+                    "sessions": [
+                        {
+                            "id": "s1",
+                            "active": False,
+                            "thinking": False,
+                            "agentState": {"running": False},
+                        },
+                        {
+                            "id": "s2",
+                            "active": "false",
+                            "thinking": "false",
+                            "agentState": {"running": "false"},
+                        },
+                    ]
+                },
+            )
+        raise AssertionError(request.url.path)
+
+    transport, _requests = _recording_transport(responder)
+    client = HapiClient(_client_config(token="false"), transport=transport)
+    try:
+        machines = await client.list_machines()
+        sessions = await client.list_sessions()
+    finally:
+        await client.aclose()
+
+    assert all(machine["online"] is False for machine in machines)
+    assert all(session["active"] is False for session in sessions)
+    assert all(session["thinking"] is False for session in sessions)
+
+
+@pytest.mark.asyncio
 async def test_client_rejects_path_injection_identifiers() -> None:
     transport, requests = _recording_transport(
         lambda request: (
@@ -1112,6 +1512,178 @@ async def test_sse_parser_handles_multiline_data_heartbeat_and_bounds() -> None:
     assert events[0].event == "session-updated"
     assert events[0].data["sessionId"] == "s1"
     assert closed
+
+
+def test_sse_parser_bounds_empty_data_lines_and_recovers_next_frame() -> None:
+    parser = _SSEParser(64)
+
+    for _ in range(100):
+        parser.feed(b"data:\n")
+    assert len(parser._data_lines) <= 64
+
+    parser.feed(b"\n")
+    events = parser.feed(b'data: {"type":"session-ended","sessionId":"s1"}\n\n')
+    assert [event.event for event in events] == ["session-ended"]
+
+
+@pytest.mark.asyncio
+async def test_sse_stop_event_closes_a_silent_stream_without_external_cancellation() -> None:
+    stop = asyncio.Event()
+    stream = _SilentByteStream()
+    transport, _requests = _recording_transport(
+        lambda request: httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+    )
+    client = HapiClient(
+        _client_config(auth_mode="bearer"),
+        transport=transport,
+    )
+
+    async def consume() -> None:
+        async for _event in client.iter_events(stop_event=stop):
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(stream.started.wait(), timeout=1.0)
+        stop.set()
+        await asyncio.wait_for(task, timeout=1.0)
+        assert stream.closed is True
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sse_authentication_failure_is_not_reconnected_forever() -> None:
+    attempts = 0
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(401, json={"error": "unauthorized"})
+
+    transport, _requests = _recording_transport(responder)
+    client = HapiClient(
+        _client_config(auth_mode="bearer", reconnect_delay_seconds=0.01),
+        transport=transport,
+    )
+    try:
+        with pytest.raises(HapiClientError) as caught:
+            await asyncio.wait_for(anext(client.iter_events()), timeout=1.0)
+    finally:
+        await client.aclose()
+
+    assert caught.value.code == "authentication_failed"
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_sse_refreshes_expired_derived_bearer_once() -> None:
+    auth_attempts = 0
+    stream_attempts = 0
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_attempts, stream_attempts
+        if request.url.path == "/api/auth":
+            auth_attempts += 1
+            return httpx.Response(200, json={"token": f"derived-jwt-{auth_attempts}"})
+        assert request.url.path == "/api/events"
+        stream_attempts += 1
+        if stream_attempts == 1:
+            assert request.headers["authorization"] == "Bearer derived-jwt-1"
+            return httpx.Response(401, json={"error": "expired"})
+        assert request.headers["authorization"] == "Bearer derived-jwt-2"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_ByteStream(
+                [b'data: {"type":"session-ended","sessionId":"s1"}\n\n']
+            ),
+        )
+
+    transport, _requests = _recording_transport(responder)
+    client = HapiClient(_client_config(), transport=transport)
+    try:
+        event = await asyncio.wait_for(
+            anext(client.iter_events(reconnect=False)),
+            timeout=1.0,
+        )
+    finally:
+        await client.aclose()
+
+    assert event.event == "session-ended"
+    assert auth_attempts == 2
+    assert stream_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_sse_reconnects_after_transient_auth_transport_failure() -> None:
+    auth_attempts = 0
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_attempts
+        if request.url.path == "/api/auth":
+            auth_attempts += 1
+            if auth_attempts == 1:
+                raise httpx.ConnectError("temporary auth outage", request=request)
+            return httpx.Response(200, json={"token": "derived-jwt"})
+        assert request.url.path == "/api/events"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_ByteStream(
+                [b'data: {"type":"session-ended","sessionId":"s1"}\n\n']
+            ),
+        )
+
+    transport, _requests = _recording_transport(responder)
+    client = HapiClient(
+        _client_config(reconnect_delay_seconds=0.01),
+        transport=transport,
+    )
+    try:
+        event = await asyncio.wait_for(anext(client.iter_events()), timeout=1.0)
+    finally:
+        await client.aclose()
+
+    assert event.event == "session-ended"
+    assert auth_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_sse_rejects_compressed_stream_before_decompression() -> None:
+    compressed = gzip.compress(
+        b'data: {"type":"message","text":"' + (b"x" * 200_000) + b'"}\n\n'
+    )
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "text/event-stream",
+                "content-encoding": "gzip",
+            },
+            content=compressed,
+        )
+
+    transport, _requests = _recording_transport(responder)
+    client = HapiClient(
+        _client_config(auth_mode="bearer", max_response_bytes=16_384),
+        transport=transport,
+    )
+    try:
+        with pytest.raises(HapiClientError) as caught:
+            await anext(client.iter_events(reconnect=False))
+    finally:
+        await client.aclose()
+
+    assert caught.value.code == "unsupported_content_encoding"
 
 
 @pytest.mark.asyncio
@@ -1354,6 +1926,548 @@ async def test_startup_drops_persisted_records_from_other_or_unknown_connection_
 
 
 @pytest.mark.asyncio
+async def test_startup_fails_closed_when_credential_is_embedded_in_public_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    secret = "https://credential-must-not-be-public.example"
+    compromised_settings = {
+        **ConnectorSettings().to_store(),
+        "base_url": secret,
+        "allow_remote": True,
+    }
+    assert (await plugin.store.set("settings_v1", compromised_settings)).is_ok()
+    assert (await plugin.store.set("credential_v1", secret)).is_ok()
+    assert (
+        await plugin.store.set(
+            "recent_events_v1",
+            [
+                {
+                    "type": "session-ended",
+                    "session_id": "s1",
+                    "summary": secret,
+                    "base_url": secret,
+                    "auth_mode": "access_token",
+                }
+            ],
+        )
+    ).is_ok()
+
+    try:
+        assert (await plugin.startup()).is_ok()
+        state = _public(await plugin.panel_state())
+        assert plugin._token is None
+        assert plugin._settings == ConnectorSettings()
+        assert secret not in json.dumps(state, ensure_ascii=False)
+        assert secret not in "\n".join(plugin.logger.records)
+    finally:
+        await plugin.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_startup_drops_credential_when_persisted_settings_are_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    secret = "must-not-be-rebound-to-default-endpoint"
+    invalid_settings = {
+        **ConnectorSettings().to_store(),
+        "allowed_providers": ["untrusted-provider"],
+    }
+    assert (await plugin.store.set("settings_v1", invalid_settings)).is_ok()
+    assert (await plugin.store.set("credential_v1", secret)).is_ok()
+
+    try:
+        assert (await plugin.startup()).is_ok()
+        state = _public(await plugin.panel_state())
+        stored_token = await plugin.store.get("credential_v1", default=None)
+
+        assert plugin._settings == ConnectorSettings()
+        assert plugin._token is None
+        assert isinstance(stored_token, Ok)
+        assert stored_token.value is None
+        assert secret not in json.dumps(state, ensure_ascii=False)
+        assert secret not in "\n".join(plugin.logger.records)
+    finally:
+        await plugin.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_startup_does_not_rebind_token_when_settings_read_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    secret = "remote-endpoint-credential"
+    assert (await plugin.store.set("credential_v1", secret)).is_ok()
+    original_get = plugin.store.get
+
+    async def fail_settings_read(key: str, default: object = None):
+        if key == "settings_v1":
+            return Err(RuntimeError("synthetic settings read failure"))
+        return await original_get(key, default=default)
+
+    monkeypatch.setattr(plugin.store, "get", fail_settings_read)
+    try:
+        assert (await plugin.startup()).is_ok()
+        assert plugin._settings == ConnectorSettings()
+        assert plugin._token is None
+        stored_token = await original_get("credential_v1", default=None)
+        assert isinstance(stored_token, Ok)
+        assert stored_token.value == secret
+    finally:
+        await plugin.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_save_after_unknown_configuration_requires_visible_refresh_before_rebind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    old_secret = "old-secret-must-not-rebind"
+    old_settings = {
+        **ConnectorSettings().to_store(),
+        "base_url": "https://original.example",
+        "allow_remote": True,
+    }
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    assert (await plugin.store.set("settings_v1", old_settings)).is_ok()
+    assert (await plugin.store.set("credential_v1", old_secret)).is_ok()
+    original_get = plugin.store.get
+    fail_once = True
+
+    async def fail_first_settings_read(key: str, default: object = None):
+        nonlocal fail_once
+        if key == "settings_v1" and fail_once:
+            fail_once = False
+            return Err(RuntimeError("synthetic settings read failure"))
+        return await original_get(key, default=default)
+
+    monkeypatch.setattr(plugin.store, "get", fail_first_settings_read)
+    plugin2: VibeCodingConnectorPlugin | None = None
+    try:
+        assert (await plugin.startup()).is_ok()
+        assert plugin._token is None
+
+        save = await _save_encrypted_settings(
+            plugin,
+            settings={
+                **ConnectorSettings().to_store(),
+                "base_url": "https://attacker.example",
+                "allow_remote": True,
+            },
+            token="",
+        )
+        assert save.is_err()
+        assert save.error["error"]["code"] == "configuration_refresh_required"
+
+        persisted_settings = await original_get("settings_v1")
+        persisted_token = await original_get("credential_v1")
+        assert isinstance(persisted_settings, Ok)
+        assert isinstance(persisted_token, Ok)
+        assert persisted_settings.value["base_url"] == "https://original.example"
+        assert persisted_token.value == old_secret
+
+        plugin2 = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+        assert (await plugin2.startup()).is_ok()
+        assert plugin2._settings.base_url == "https://original.example"
+        assert plugin2._token == old_secret
+    finally:
+        await plugin.shutdown()
+        if plugin2 is not None:
+            await plugin2.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_failed_invalid_configuration_cleanup_cannot_resurrect_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    secret = "must-remain-quarantined"
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    invalid_settings = {
+        **ConnectorSettings().to_store(),
+        "allowed_providers": ["untrusted-provider"],
+    }
+    assert (await plugin.store.set("settings_v1", invalid_settings)).is_ok()
+    assert (await plugin.store.set("credential_v1", secret)).is_ok()
+    original_delete = plugin.store.delete
+
+    async def fail_credential_delete(key: str):
+        if key == "credential_v1":
+            return Err(RuntimeError("synthetic credential delete failure"))
+        return await original_delete(key)
+
+    monkeypatch.setattr(plugin.store, "delete", fail_credential_delete)
+    plugin2: VibeCodingConnectorPlugin | None = None
+    try:
+        assert (await plugin.startup()).is_ok()
+        assert plugin._token is None
+        persisted_settings = await plugin.store.get("settings_v1")
+        assert isinstance(persisted_settings, Ok)
+        assert persisted_settings.value["allowed_providers"] == [
+            "untrusted-provider"
+        ]
+
+        save = await _save_encrypted_settings(
+            plugin,
+            settings={
+                **ConnectorSettings().to_store(),
+                "base_url": "https://attacker.example",
+                "allow_remote": True,
+            },
+            token="",
+        )
+        assert save.is_err()
+        assert save.error["error"]["code"] == "configuration_refresh_required"
+
+        plugin2 = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+        assert (await plugin2.startup()).is_ok()
+        assert plugin2._token is None
+    finally:
+        await plugin.shutdown()
+        if plugin2 is not None:
+            await plugin2.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_startup_removes_non_string_persisted_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    assert (await plugin.store.set("settings_v1", ConnectorSettings().to_store())).is_ok()
+    assert (
+        await plugin.store.set(
+            "credential_v1",
+            {"token": "nested-credential"},
+        )
+    ).is_ok()
+
+    try:
+        assert (await plugin.startup()).is_ok()
+        stored_token = await plugin.store.get("credential_v1", default=None)
+        assert plugin._token is None
+        assert isinstance(stored_token, Ok)
+        assert stored_token.value is None
+    finally:
+        await plugin.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_startup_detects_credential_in_structured_public_settings_before_json_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    public_secret_path = tmp_path / "credential\\segment"
+    public_secret_path.mkdir()
+    secret = str(public_secret_path.resolve())
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    compromised_settings = {
+        **ConnectorSettings().to_store(),
+        "allowed_workspace_roots": [secret],
+    }
+    assert (await plugin.store.set("settings_v1", compromised_settings)).is_ok()
+    assert (await plugin.store.set("credential_v1", secret)).is_ok()
+
+    try:
+        assert (await plugin.startup()).is_ok()
+        state = _public(await plugin.panel_state())
+        assert plugin._settings == ConnectorSettings()
+        assert plugin._token is None
+        assert secret not in json.dumps(state, ensure_ascii=False)
+    finally:
+        await plugin.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_encrypted_settings_envelope_is_bound_single_use_and_secret_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    ctx = _Context(PLUGIN_DIR)
+    plugin = VibeCodingConnectorPlugin(ctx)
+    await plugin.startup()
+    secret = "panel-access-secret-7890"
+
+    try:
+        state = _public(await plugin.panel_state())
+        envelope = state["secret_envelope"]
+        assert isinstance(envelope, dict)
+        args = _encrypt_settings_document(
+            envelope,
+            {
+                "settings": plugin._settings.to_store(),
+                "token": secret,
+                "clear_token": False,
+            },
+        )
+        assert secret not in json.dumps(args)
+
+        first, replay = await asyncio.gather(
+            plugin.save_settings(**args),
+            plugin.save_settings(**args),
+        )
+        outcomes = (first, replay)
+        assert sum(result.is_ok() for result in outcomes) == 1
+        assert sum(result.is_err() for result in outcomes) == 1
+
+        public_state = _public(await plugin.panel_state())
+        serialized = json.dumps(public_state, ensure_ascii=False)
+        assert public_state["token"] == {"configured": True}
+        assert secret not in serialized
+        assert secret not in "\n".join(ctx.logger.records)
+
+        replay_error = next(result for result in outcomes if result.is_err())
+        assert replay_error.error["error"]["code"] in {
+            "secret_envelope_expired_or_used",
+            "configuration_busy",
+        }
+    finally:
+        await plugin.shutdown()
+
+
+def test_token_state_never_exposes_credential_fragments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    plugin._token = "short-jwt-secret"
+
+    state = plugin._token_state()
+
+    assert state == {"configured": True}
+    assert "cret" not in json.dumps(state)
+
+
+@pytest.mark.asyncio
+async def test_encrypted_save_rejects_credential_in_structured_public_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    public_secret_path = tmp_path / "credential\\segment"
+    public_secret_path.mkdir()
+    secret = str(public_secret_path.resolve())
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    await plugin.startup()
+
+    try:
+        result = await _save_encrypted_settings(
+            plugin,
+            settings={
+                **plugin._settings.to_store(),
+                "allowed_workspace_roots": [secret],
+            },
+            token=secret,
+        )
+        assert result.is_err()
+        assert result.error["error"]["code"] == "invalid_token"
+        state = _public(await plugin.panel_state())
+        assert secret not in json.dumps(state, ensure_ascii=False)
+    finally:
+        await plugin.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_encrypted_save_rejects_previous_credential_in_new_public_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    old_secret = "https://old-credential.example"
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    await plugin.startup()
+    assert (
+        await _save_encrypted_settings(
+            plugin,
+            token=old_secret,
+        )
+    ).is_ok()
+
+    try:
+        result = await _save_encrypted_settings(
+            plugin,
+            settings={
+                **plugin._settings.to_store(),
+                "base_url": old_secret,
+                "allow_remote": True,
+            },
+            token="replacement-credential",
+        )
+        assert result.is_err()
+        assert result.error["error"]["code"] == "invalid_token"
+        state = _public(await plugin.panel_state())
+        assert old_secret not in json.dumps(state, ensure_ascii=False)
+    finally:
+        await plugin.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("secret", ("false", "100", "15.0"))
+async def test_encrypted_save_rejects_credential_matching_public_json_scalar(
+    secret: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    await plugin.startup()
+
+    try:
+        result = await _save_encrypted_settings(
+            plugin,
+            token=secret,
+        )
+        assert result.is_err()
+        assert result.error["error"]["code"] == "invalid_token"
+    finally:
+        await plugin.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_encrypted_settings_rejects_wrong_entry_binding_and_plaintext_args(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    await plugin.startup()
+    secret = "must-never-enter-run-args"
+    settings = plugin._settings.to_store()
+
+    try:
+        plaintext = await plugin.save_settings(settings=settings, token=secret)
+        assert plaintext.is_err()
+        assert plaintext.error["error"]["code"] == "encrypted_settings_required"
+
+        envelope = await plugin._issue_secret_envelope()
+        wrong_binding = _encrypt_settings_document(
+            envelope,
+            {
+                "settings": settings,
+                "token": secret,
+                "clear_token": False,
+            },
+            entry_id="some_other_entry",
+        )
+        rejected = await plugin.save_settings(**wrong_binding)
+        assert rejected.is_err()
+        assert rejected.error["error"]["code"] == "encrypted_settings_invalid"
+
+        replay_with_correct_binding = await plugin.save_settings(
+            **_encrypt_settings_document(
+                envelope,
+                {
+                    "settings": settings,
+                    "token": secret,
+                    "clear_token": False,
+                },
+            )
+        )
+        assert replay_with_correct_binding.is_err()
+        assert (
+            replay_with_correct_binding.error["error"]["code"]
+            == "secret_envelope_expired_or_used"
+        )
+        assert plugin._token is None
+        assert secret not in "\n".join(plugin.logger.records)
+    finally:
+        await plugin.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_encrypted_settings_envelope_expires_and_shutdown_discards_pending_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    await plugin.startup()
+    monkeypatch.setattr(
+        vibe_coding_module,
+        "_SECRET_ENVELOPE_TTL_SECONDS",
+        0,
+    )
+    envelope = await plugin._issue_secret_envelope()
+    args = _encrypt_settings_document(
+        envelope,
+        {
+            "settings": plugin._settings.to_store(),
+            "token": "expired-secret",
+            "clear_token": False,
+        },
+    )
+
+    expired = await plugin.save_settings(**args)
+    assert expired.is_err()
+    assert (
+        expired.error["error"]["code"]
+        == "secret_envelope_expired_or_used"
+    )
+
+    monkeypatch.setattr(
+        vibe_coding_module,
+        "_SECRET_ENVELOPE_TTL_SECONDS",
+        300,
+    )
+    await plugin._issue_secret_envelope()
+    assert plugin._secret_envelopes
+    await plugin.shutdown()
+    assert not plugin._secret_envelopes
+
+
+@pytest.mark.asyncio
+async def test_encrypted_settings_ttl_is_checked_after_acquiring_envelope_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setattr(
+        vibe_coding_module,
+        "_SECRET_ENVELOPE_TTL_SECONDS",
+        0.05,
+    )
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    envelope = await plugin._issue_secret_envelope()
+    encrypted = _encrypt_settings_document(
+        envelope,
+        {
+            "settings": ConnectorSettings().to_store(),
+            "token": "",
+            "clear_token": False,
+        },
+    )
+    sampled = threading.Event()
+    original_monotonic = vibe_coding_module.time.monotonic
+
+    def observed_monotonic() -> float:
+        sampled.set()
+        return original_monotonic()
+
+    monkeypatch.setattr(
+        vibe_coding_module.time,
+        "monotonic",
+        observed_monotonic,
+    )
+    plugin._envelope_lock.acquire()
+    consume_task = asyncio.create_task(
+        asyncio.to_thread(
+            lambda: asyncio.run(
+                plugin._consume_encrypted_settings(**encrypted)
+            )
+        )
+    )
+    try:
+        await asyncio.to_thread(sampled.wait, 0.2)
+        await asyncio.sleep(0.08)
+    finally:
+        plugin._envelope_lock.release()
+
+    with pytest.raises(PolicyError) as caught:
+        await consume_task
+    assert caught.value.code == "secret_envelope_expired_or_used"
+    await plugin.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_settings_second_key_failure_rolls_back_and_never_publishes_new_endpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1367,7 +2481,11 @@ async def test_settings_second_key_failure_rolls_back_and_never_publishes_new_en
         "base_url": "http://127.0.0.1:3006",
         "auth_mode": "access_token",
     }
-    initial = await plugin.save_settings(settings=old_settings, token=old_token)
+    initial = await _save_encrypted_settings(
+        plugin,
+        settings=old_settings,
+        token=old_token,
+    )
     assert initial.is_ok()
 
     original_set = plugin.store.set
@@ -1393,7 +2511,8 @@ async def test_settings_second_key_failure_rolls_back_and_never_publishes_new_en
     }
 
     try:
-        failed = await plugin.save_settings(
+        failed = await _save_encrypted_settings(
+            plugin,
             settings=attempted_settings,
             token=new_token,
         )
@@ -1408,7 +2527,7 @@ async def test_settings_second_key_failure_rolls_back_and_never_publishes_new_en
         serialized = json.dumps(state)
         assert state["settings"]["base_url"] == old_settings["base_url"]
         assert state["settings"]["auth_mode"] == old_settings["auth_mode"]
-        assert state["token"]["last_four"] == "1111"
+        assert state["token"] == {"configured": True}
         assert new_url not in serialized
         assert new_token not in serialized
 
@@ -1439,7 +2558,10 @@ async def test_completed_configuration_transition_rejects_stale_snapshot_permit(
             **old_settings.to_store(),
             "timeout_seconds": old_settings.timeout_seconds + 1,
         }
-        saved = await plugin.save_settings(settings=changed_settings)
+        saved = await _save_encrypted_settings(
+            plugin,
+            settings=changed_settings,
+        )
         assert saved.is_ok()
         assert plugin._settings is not old_settings
 
@@ -1467,25 +2589,29 @@ async def test_token_save_keep_and_explicit_clear_persist_without_echo(
     await plugin.startup()
     safe_settings = plugin._settings.to_store()
     saved = _public(
-        await plugin.save_settings(
+        await _save_encrypted_settings(
+            plugin,
             settings=safe_settings,
             token="first-secret-7890",
         )
     )
-    assert saved["token"]["configured"] is True
-    assert saved["token"]["last_four"] == "7890"
+    assert saved["token"] == {"configured": True}
     assert "first-secret-7890" not in json.dumps(saved)
 
-    kept = _public(await plugin.save_settings(settings=safe_settings, token=""))
-    assert kept["token"]["configured"] is True
-    assert kept["token"]["last_four"] == "7890"
+    kept = _public(
+        await _save_encrypted_settings(
+            plugin,
+            settings=safe_settings,
+            token="",
+        )
+    )
+    assert kept["token"] == {"configured": True}
 
     second_ctx = _Context(PLUGIN_DIR)
     plugin2 = VibeCodingConnectorPlugin(second_ctx)
     await plugin2.startup()
     state = _public(await plugin2.panel_state())
-    assert state["token"]["configured"] is True
-    assert state["token"]["last_four"] == "7890"
+    assert state["token"] == {"configured": True}
     assert "first-secret-7890" not in json.dumps(state)
 
     cleared = _public(await plugin2.clear_token(confirm=True))
@@ -1494,6 +2620,189 @@ async def test_token_save_keep_and_explicit_clear_persist_without_echo(
     assert "first-secret-7890" not in "\n".join(first_ctx.logger.records + second_ctx.logger.records)
     await plugin.shutdown()
     await plugin2.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_remote_session_fields_are_redacted_before_panel_llm_and_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    await plugin.startup()
+    provider_secret = "Bearer eyJremote.provider.secret"
+    directory_secret = "/tmp/ghp_remoteDirectorySecret"
+
+    class _SecretSessionClient:
+        async def list_sessions(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": "s1",
+                    "provider": provider_secret,
+                    "directory": directory_secret,
+                    "status": "inactive",
+                    "active": False,
+                    "permission_mode": "default",
+                }
+            ]
+
+        async def aclose(self) -> None:
+            return None
+
+    plugin.set_client_for_testing(_SecretSessionClient())
+    try:
+        model_result = _public(await plugin.list_sessions())
+        panel_result = _public(await plugin.panel_list_sessions())
+        state = _public(await plugin.panel_state())
+        serialized = json.dumps(
+            [model_result, panel_result, state, plugin._recent_sessions],
+            ensure_ascii=False,
+        )
+        assert provider_secret not in serialized
+        assert directory_secret not in serialized
+    finally:
+        await plugin.shutdown()
+
+
+def test_message_and_approval_text_redaction_covers_common_secret_syntax(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    raw = (
+        "curl -H 'Authorization: Basic c2VjcmV0LXZhbHVl' "
+        "--api-token opaque-api-token-123 token=opaque-token-456"
+    )
+
+    output = plugin._messages_output(
+        [{"role": "assistant", "content": raw}],
+        maximum=4_000,
+    )
+
+    assert "c2VjcmV0LXZhbHVl" not in output
+    assert "opaque-api-token-123" not in output
+    assert "opaque-token-456" not in output
+
+
+def test_message_redaction_removes_complete_quoted_secret_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    raw = (
+        'password="very secret value" '
+        "api_key='opaque secret material' "
+        '--token "cli secret with spaces" '
+        "OPENAI_API_KEY=opaquevalue123 "
+        "DATABASE_PASSWORD=hunter222 "
+        "passwd=hunter333 "
+        "passphrase=correcthorse "
+        "AUTH=Basic QVVUSFNFQ1JFVA== "
+        'authentication="Basic QVVUSEVOVElDQVRJT04=" '
+        "AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE "
+        "credential='opaque credential material' "
+        "jwt=opaque.jwt.material "
+        "Basic U1RBTkRBTU9ORVNFQ1JFVA=="
+    )
+
+    output = plugin._messages_output(
+        [{"role": "assistant", "content": raw}],
+        maximum=4_000,
+    )
+
+    assert "very secret value" not in output
+    assert "secret material" not in output
+    assert "cli secret with spaces" not in output
+    assert "opaquevalue123" not in output
+    assert "hunter222" not in output
+    assert "hunter333" not in output
+    assert "correcthorse" not in output
+    assert "QVVUSFNFQ1JFVA==" not in output
+    assert "QVVUSEVOVElDQVRJT04=" not in output
+    assert "AKIAIOSFODNN7EXAMPLE" not in output
+    assert "credential material" not in output
+    assert "opaque.jwt.material" not in output
+    assert "U1RBTkRBTU9ORVNFQ1JFVA==" not in output
+
+
+def test_permission_redaction_treats_auth_alias_keys_as_sensitive() -> None:
+    for key in (
+        "auth",
+        "authentication",
+        "basic_auth",
+        "proxy_authentication",
+        "bearer",
+        "db_passwd",
+        "ssh_passphrase",
+    ):
+        permissions = extract_permissions(
+            {
+                "requests": {
+                    "r1": {
+                        "status": "pending",
+                        "tool": "Bash",
+                        "arguments": {key: "Basic dXNlcjpwYXNz"},
+                    }
+                }
+            }
+        )
+
+        assert permissions[0]["arguments"][key] == "[REDACTED]"
+        assert permissions[0]["arguments_truncated"] is True
+
+
+def test_permission_redaction_checks_full_key_before_bounding_it() -> None:
+    secret = "opaque-long-key-secret"
+    long_key = ("a" * 129) + "apiKey"
+    permissions = extract_permissions(
+        {
+            "requests": {
+                "r1": {
+                    "status": "pending",
+                    "tool": "Bash",
+                    "arguments": {long_key: secret},
+                }
+            }
+        }
+    )
+
+    serialized = json.dumps(permissions, ensure_ascii=False)
+    assert secret not in serialized
+    assert "[REDACTED]" in serialized
+    assert permissions[0]["arguments_truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_startup_redacts_nested_sensitive_keys_in_persisted_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    secret = "opaque-persisted-secret"
+    defaults = ConnectorSettings()
+    assert (await plugin.store.set("settings_v1", defaults.to_store())).is_ok()
+    assert (
+        await plugin.store.set(
+            "recent_events_v1",
+            [
+                {
+                    "type": "session-ended",
+                    "session_id": "s1",
+                    "summary": {"apiKey": secret},
+                    "base_url": defaults.base_url,
+                    "auth_mode": defaults.auth_mode,
+                }
+            ],
+        )
+    ).is_ok()
+
+    try:
+        assert (await plugin.startup()).is_ok()
+        state = _public(await plugin.panel_state())
+        serialized = json.dumps(state, ensure_ascii=False)
+        assert secret not in serialized
+        assert "[REDACTED]" in serialized
+    finally:
+        await plugin.shutdown()
 
 
 @pytest.mark.asyncio
@@ -1549,7 +2858,8 @@ async def test_dynamic_llm_callback_returns_summary_while_panel_gets_details_and
         async def aclose(self) -> None:
             return None
 
-    result = await plugin.save_settings(
+    result = await _save_encrypted_settings(
+        plugin,
         settings={
             **plugin._settings.to_store(),
             "allowed_workspace_roots": [str(repo)],
@@ -1659,7 +2969,8 @@ async def test_session_tools_enforce_policy_and_return_bounded_summary(
         async def aclose(self) -> None:
             return None
 
-    await plugin.save_settings(
+    await _save_encrypted_settings(
+        plugin,
         settings={
             **plugin._settings.to_store(),
             "allowed_workspace_roots": [str(repo)],
@@ -1703,6 +3014,102 @@ async def test_session_tools_enforce_policy_and_return_bounded_summary(
 
 
 @pytest.mark.asyncio
+async def test_send_refuses_inactive_session_instead_of_unsafe_auto_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    await plugin.startup()
+    saved = await _save_encrypted_settings(
+        plugin,
+        settings={
+            **plugin._settings.to_store(),
+            "allowed_workspace_roots": [str(repo)],
+            "allowed_providers": ["codex"],
+            "allow_send": True,
+        },
+    )
+    assert saved.is_ok()
+
+    class _InactiveClient:
+        def __init__(self) -> None:
+            self.resumes = 0
+            self.sends = 0
+
+        async def get_session(self, session_id: str) -> dict[str, object]:
+            return {
+                "id": session_id,
+                "provider": "codex",
+                "directory": str(repo.resolve()),
+                "status": "inactive",
+                "active": False,
+                "permission_mode": "default",
+            }
+
+        async def resume_session(
+            self,
+            session_id: str,
+            permission_mode: str,
+        ) -> str:
+            self.resumes += 1
+            return session_id
+
+        async def send_instruction(self, session_id: str, text: str) -> None:
+            self.sends += 1
+
+        async def aclose(self) -> None:
+            return None
+
+    fake = _InactiveClient()
+    plugin.set_client_for_testing(fake)
+    try:
+        result = await plugin.send_instruction(
+            session_id="s1",
+            instruction="fix tests",
+        )
+        assert result.is_err()
+        assert (
+            result.error["error"]["code"]
+            == "inactive_session_requires_manual_resume"
+        )
+        assert fake.resumes == 0
+        assert fake.sends == 0
+    finally:
+        await plugin.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_status_does_not_advertise_unsafe_automatic_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    await plugin.startup()
+
+    class _StatusClient:
+        async def health(self) -> dict[str, object]:
+            return {"status": "ok", "protocol_version": 1}
+
+        async def list_machines(self) -> list[dict[str, object]]:
+            return []
+
+        async def aclose(self) -> None:
+            return None
+
+    plugin.set_client_for_testing(_StatusClient())
+    try:
+        result = _public(await plugin.panel_connection_status())
+        capabilities = result["capabilities"]
+        assert capabilities["session_messages"] is True
+        assert capabilities["session_resume"] is False
+        assert "session_messages_and_resume" not in capabilities
+    finally:
+        await plugin.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_secret_key_redaction_marks_approval_unapprovable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1732,6 +3139,9 @@ async def test_secret_key_redaction_marks_approval_unapprovable(
                             "arguments": {
                                 "path": "README.md",
                                 "api_token": "must-not-be-approved",
+                                "apiKey": "opaque-api-key-123",
+                                "privateKey": "opaque-private-key-456",
+                                "cookie": "opaque-cookie-789",
                             },
                         }
                     }
@@ -1749,7 +3159,8 @@ async def test_secret_key_redaction_marks_approval_unapprovable(
         async def aclose(self) -> None:
             return None
 
-    saved = await plugin.save_settings(
+    saved = await _save_encrypted_settings(
+        plugin,
         settings={
             **plugin._settings.to_store(),
             "allowed_workspace_roots": [str(repo)],
@@ -1767,6 +3178,9 @@ async def test_secret_key_redaction_marks_approval_unapprovable(
         )["approvals"][0]
         serialized = json.dumps(detail)
         assert "must-not-be-approved" not in serialized
+        assert "opaque-api-key-123" not in serialized
+        assert "opaque-private-key-456" not in serialized
+        assert "opaque-cookie-789" not in serialized
         assert "[REDACTED]" in serialized
         assert detail["details_withheld"] is True
         assert detail["approvable_without_answers"] is False
@@ -1844,7 +3258,8 @@ async def test_question_and_truncated_approvals_fail_closed_but_deny_remains_ava
         async def aclose(self) -> None:
             return None
 
-    saved = await plugin.save_settings(
+    saved = await _save_encrypted_settings(
+        plugin,
         settings={
             **plugin._settings.to_store(),
             "allowed_workspace_roots": [str(repo)],
@@ -1925,7 +3340,8 @@ async def test_existing_session_mutations_reauthorize_workspace_before_hapi_writ
     monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(runtime))
     plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
     await plugin.startup()
-    result = await plugin.save_settings(
+    result = await _save_encrypted_settings(
+        plugin,
         settings={
             **plugin._settings.to_store(),
             "allowed_workspace_roots": [str(allowed)],
@@ -1994,7 +3410,8 @@ async def test_pending_sse_approval_is_never_auto_approved(
     monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
     plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
     await plugin.startup()
-    saved = await plugin.save_settings(
+    saved = await _save_encrypted_settings(
+        plugin,
         settings={
             **plugin._settings.to_store(),
             "allowed_workspace_roots": [str(repo)],
@@ -2296,6 +3713,138 @@ def test_static_panel_uses_real_run_bridge_and_has_no_external_assets_or_demo_da
     assert ".value = state.settings.token" not in html
 
 
+def test_static_panel_numeric_constraints_accept_backend_defaults() -> None:
+    parser = _PanelNumberInputParser()
+    parser.feed((PLUGIN_DIR / "static" / "index.html").read_text(encoding="utf-8"))
+    parser.close()
+    defaults = ConnectorSettings()
+    inputs_by_setting = {
+        "timeout_seconds": "timeoutSeconds",
+        "sse_reconnect_delay": "reconnectDelay",
+        "max_response_size": "maxResponseSize",
+        "max_instruction_chars": "maxInstructionChars",
+        "max_output_chars": "maxOutputChars",
+        "max_concurrency": "maxConcurrency",
+        "rate_limit_per_minute": "rateLimit",
+    }
+
+    for setting_name, input_id in inputs_by_setting.items():
+        attributes = parser.inputs[input_id]
+        assert all(attributes.get(name) is not None for name in ("min", "max", "step"))
+        minimum = Decimal(attributes["min"] or "")
+        maximum = Decimal(attributes["max"] or "")
+        step = Decimal(attributes["step"] or "")
+        default = Decimal(str(getattr(defaults, setting_name)))
+
+        assert minimum <= default <= maximum, setting_name
+        assert step > 0, setting_name
+        assert (default - minimum) % step == 0, setting_name
+
+
+def test_settings_save_never_places_plaintext_token_in_run_args() -> None:
+    html = (PLUGIN_DIR / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert (
+        'callPlugin("vibe_coding_save_settings", { settings, token })'
+        not in html
+    )
+    assert "async function encryptSavePayload(" in html
+    assert (
+        'callPlugin("vibe_coding_save_settings", encryptedArgs)'
+        in html
+    )
+
+    meta = getattr(VibeCodingConnectorPlugin.save_settings, EVENT_META_ATTR)
+    schema = meta.input_schema
+    assert set(schema["properties"]) == {"encrypted_payload", "key_id"}
+    assert schema["required"] == ["encrypted_payload", "key_id"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["encrypted_payload"]["writeOnly"] is True
+    assert schema["properties"]["encrypted_payload"]["x-sensitive"] is True
+
+
+def test_failed_encrypted_save_refreshes_the_consumed_envelope() -> None:
+    html = (PLUGIN_DIR / "static" / "index.html").read_text(encoding="utf-8")
+
+    save_block = re.search(
+        r"async function saveSettings\(event\)(.*?)(?:\n    async function resetSettings)",
+        html,
+        flags=re.DOTALL,
+    )
+    assert save_block is not None
+    source = save_block.group(1)
+    assert re.search(
+        r'await callPlugin\("vibe_coding_save_settings", encryptedArgs\);'
+        r".*?catch \(saveError\).*?await loadPanelState\(\{ quiet: true \}\);"
+        r".*?throw saveError;",
+        source,
+        flags=re.DOTALL,
+    )
+
+
+def test_save_notice_only_claims_token_was_kept_for_blank_input() -> None:
+    html = (PLUGIN_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    save_block = re.search(
+        r"async function saveSettings\(event\)(.*?)(?:\n    async function resetSettings)",
+        html,
+        flags=re.DOTALL,
+    )
+    assert save_block is not None
+    source = save_block.group(1)
+    assert re.search(
+        r"if \(!token\) \{.*?panel\.message\.tokenKept",
+        source,
+        flags=re.DOTALL,
+    )
+
+
+def test_static_panel_has_csp_safe_narrow_layout_and_lossless_settings_roundtrip() -> None:
+    html = (PLUGIN_DIR / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert 'http-equiv="Content-Security-Policy"' in html
+    for directive in (
+        "default-src 'self'",
+        "base-uri 'self'",
+        "object-src 'none'",
+        "form-action 'self'",
+        "connect-src 'self'",
+    ):
+        assert directive in html
+    for field in ("max_recent_events", "max_recent_sessions", "auto_approve"):
+        assert field in html
+    assert re.search(
+        r"\.activity-output\s*\{[^}]*overflow-wrap:\s*anywhere",
+        html,
+        flags=re.DOTALL,
+    )
+    assert re.search(
+        r"\.tag\s*\{[^}]*max-width:\s*60%[^}]*overflow:\s*hidden"
+        r"[^}]*text-overflow:\s*ellipsis",
+        html,
+        flags=re.DOTALL,
+    )
+    assert re.search(
+        r"\.health-detail\s*\{[^}]*min-width:\s*0",
+        html,
+        flags=re.DOTALL,
+    )
+    assert "HAPI 报告的提供商" not in html
+    assert "连接器本地允许的提供商" in html
+    assert "末四位" not in html
+
+
+def test_readme_matches_encrypted_save_https_and_manual_resume_policy() -> None:
+    readme = (PLUGIN_DIR / "README.md").read_text(encoding="utf-8")
+
+    assert "RSA-OAEP" in readme
+    assert "AES-GCM" in readme
+    assert "非本机 HAPI" in readme and "必须使用 HTTPS" in readme
+    assert "不会自动恢复" in readme
+    assert "自动确定性选择" in readme
+    assert "末四位" not in readme
+    assert "token 经 N.E.K.O 的 `/runs` 管理通道写入" not in readme
+
+
 def test_all_eight_locale_bundles_have_identical_nonempty_key_sets() -> None:
     bundles = {
         locale: json.loads((PLUGIN_DIR / "i18n" / f"{locale}.json").read_text(encoding="utf-8"))
@@ -2308,6 +3857,17 @@ def test_all_eight_locale_bundles_have_identical_nonempty_key_sets() -> None:
     for locale, bundle in bundles.items():
         assert all(isinstance(key, str) and key.strip() for key in bundle), locale
         assert all(isinstance(value, str) and value.strip() for value in bundle.values()), locale
+
+    html = (PLUGIN_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    panel_keys = {
+        key
+        for key in bundles["en"]
+        if key.startswith("panel.")
+    }
+    assert panel_keys
+    assert all(key in html for key in panel_keys)
+    assert "data-i18n-placeholder" in html
+    assert 'querySelectorAll("[data-i18n-placeholder]")' in html
 
 
 def test_source_has_no_local_command_execution_or_auto_approval_path() -> None:

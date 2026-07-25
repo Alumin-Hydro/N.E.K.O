@@ -4,6 +4,10 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
+    <meta
+        http-equiv="Content-Security-Policy"
+        content="default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'"
+    >
     <title>N.E.K.O Vibe Coding 连接器</title>
     <style>
         :root {
@@ -320,6 +324,7 @@
 
         .health-detail {
             display: block;
+            min-width: 0;
             margin-top: 2px;
             overflow: hidden;
             color: var(--muted);
@@ -704,13 +709,17 @@
             display: inline-flex;
             flex: 0 0 auto;
             align-items: center;
+            max-width: 60%;
             min-height: 23px;
+            overflow: hidden;
             padding: 3px 8px;
             color: #5f557e;
             background: #f0edfb;
             border-radius: 99px;
             font-size: 0.67rem;
             font-weight: 700;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         .tag.online {
@@ -759,6 +768,13 @@
             color: #8e99b7;
         }
 
+        .activity-output {
+            max-width: 100%;
+            overflow: auto;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+
         .approval {
             padding: 13px;
             background: #fffdfa;
@@ -802,9 +818,11 @@
         }
 
         .event-type {
+            min-width: 0;
             color: #46506a;
             font-size: 0.75rem;
             font-weight: 720;
+            overflow-wrap: anywhere;
         }
 
         .event-summary {
@@ -948,7 +966,7 @@
         <div class="health-card">
             <span id="healthOrb" class="health-orb" aria-hidden="true"></span>
             <div>
-                <span class="health-label">HAPI 连接</span>
+                <span class="health-label" data-i18n="panel.connection.health">服务健康</span>
                 <span id="healthValue" class="health-value">正在读取…</span>
                 <span id="healthDetail" class="health-detail">尚未执行连接检测</span>
             </div>
@@ -973,7 +991,7 @@
                 <div class="card-head">
                     <div>
                         <h2 id="connectionHeading" data-i18n="panel.connection.title">连接与安全边界</h2>
-                        <p class="subtle">令牌只写入插件存储；面板只显示是否已配置及末四位。</p>
+                        <p class="subtle">令牌只写入插件存储；面板仅显示是否已配置，不展示任何令牌片段。</p>
                     </div>
                     <div class="actions">
                         <button id="testConnectionBtn" class="btn" type="button">
@@ -986,9 +1004,10 @@
                 </div>
 
                 <form id="settingsForm" novalidate>
+                    <h3 data-i18n="panel.settings.title">HAPI 设置</h3>
                     <div class="form-grid">
                         <div class="field">
-                            <label for="baseUrl">HAPI 基础地址 <span class="required" aria-hidden="true">*</span></label>
+                            <label for="baseUrl"><span data-i18n="panel.field.baseUrl">HAPI 基础地址</span> <span class="required" aria-hidden="true">*</span></label>
                             <input id="baseUrl" name="base_url" type="url" autocomplete="url"
                                    placeholder="http://127.0.0.1:3006" required>
                             <p class="hint">末尾斜杠会自动规范化。非回环地址必须显式开启远程访问。</p>
@@ -1002,10 +1021,11 @@
                             <p class="hint">access token 会通过 /api/auth 交换；Bearer 模式直接使用现有 JWT。</p>
                         </div>
                         <div class="field full">
-                            <label for="tokenInput">访问令牌</label>
+                            <label for="tokenInput" data-i18n="panel.field.token">访问令牌</label>
                             <div class="token-line">
                                 <input id="tokenInput" name="token" type="password" autocomplete="new-password"
-                                       spellcheck="false" placeholder="留空以保留已有令牌">
+                                       spellcheck="false" placeholder="留空以保留已有令牌"
+                                       data-i18n-placeholder="panel.field.tokenPlaceholder">
                                 <button id="clearTokenBtn" class="btn danger" type="button" disabled>
                                     <span data-i18n="panel.action.clearToken">清除令牌</span>
                                 </button>
@@ -1016,21 +1036,22 @@
                             <label class="toggle" for="allowRemote">
                                 <input id="allowRemote" name="allow_remote" type="checkbox">
                                 <span>
-                                    <strong>允许连接非本机 HAPI</strong>
+                                    <strong data-i18n="panel.field.allowRemote">允许连接非本机 HAPI</strong>
                                     <span>仅在你信任远端网络、TLS 与工作目录映射时开启。</span>
                                 </span>
                             </label>
                         </div>
                         <div class="field full">
-                            <label for="workspaceRoots">允许的工作区根目录</label>
+                            <label for="workspaceRoots" data-i18n="panel.field.workspaceRoots">允许的工作区根目录</label>
                             <textarea id="workspaceRoots" name="allowed_workspace_roots"
                                       spellcheck="false" placeholder="每行一个绝对路径；未配置时禁止创建或控制任务"></textarea>
-                            <p class="hint">后端会解析真实路径并拒绝 ..、符号链接逃逸和根目录外的路径。</p>
+                            <p class="hint" data-i18n="panel.field.workspaceRootsHint">每行一个已存在的绝对目录</p>
                         </div>
                     </div>
 
                     <div class="divider" role="presentation"></div>
-                    <h3>提供商允许列表</h3>
+                    <h3 data-i18n="panel.security.title">工作区与工具策略</h3>
+                    <p class="label" data-i18n="panel.field.providers">允许的提供商</p>
                     <div class="choice-grid" aria-label="允许的 Vibe Coding 提供商">
                         <label class="choice" for="providerClaude">
                             <input id="providerClaude" type="checkbox" value="claude">
@@ -1051,57 +1072,58 @@
                     <div class="toggle-grid">
                         <label class="toggle" for="allowCreate">
                             <input id="allowCreate" type="checkbox">
-                            <span><strong>创建会话</strong><span>允许启动一个受限工作区会话</span></span>
+                            <span><strong data-i18n="panel.field.allowCreate">允许创建会话</strong><span>允许启动一个受限工作区会话</span></span>
                         </label>
                         <label class="toggle" for="allowSend">
                             <input id="allowSend" type="checkbox">
-                            <span><strong>提交开发指令</strong><span>允许向已有会话继续发送任务</span></span>
+                            <span><strong data-i18n="panel.field.allowSend">允许提交任务</strong><span>允许向已有会话继续发送任务</span></span>
                         </label>
                         <label class="toggle" for="allowStop">
                             <input id="allowStop" type="checkbox">
-                            <span><strong>停止会话</strong><span>允许请求 HAPI 取消正在运行的任务</span></span>
+                            <span><strong data-i18n="panel.field.allowStop">允许停止会话</strong><span>允许请求 HAPI 取消正在运行的任务</span></span>
                         </label>
                         <label class="toggle" for="allowApproval">
                             <input id="allowApproval" type="checkbox">
-                            <span><strong>响应审批</strong><span>仍需逐项明确批准或拒绝，不会自动批准</span></span>
+                            <span><strong data-i18n="panel.field.allowApproval">允许响应审批</strong><span>仍需逐项明确批准或拒绝，不会自动批准</span></span>
                         </label>
                     </div>
                     <p class="warning-box">
-                        危险权限自动批准始终关闭。启用“响应审批”只会开放逐项操作，不代表默认同意。
+                        <span data-i18n="panel.reason.autoApprovalOff">危险权限自动批准始终关闭。</span>
+                        启用“响应审批”只会开放逐项操作，不代表默认同意。
                     </p>
 
                     <details class="advanced">
-                        <summary>超时、事件流、通知与资源限制</summary>
+                        <summary data-i18n="panel.notifications.title">SSE 与通知</summary>
                         <div class="advanced-body form-grid">
                             <div class="field">
-                                <label for="timeoutSeconds">请求超时（秒）</label>
+                                <label for="timeoutSeconds" data-i18n="panel.field.timeout">请求超时（秒）</label>
                                 <input id="timeoutSeconds" type="number" min="1" max="30" step="1" value="15">
                             </div>
                             <div class="field">
-                                <label for="reconnectDelay">SSE 重连延迟（秒）</label>
+                                <label for="reconnectDelay" data-i18n="panel.field.reconnectDelay">SSE 重连延迟（秒）</label>
                                 <input id="reconnectDelay" type="number" min="1" max="120" step="1" value="5">
                             </div>
                             <div class="field">
                                 <label class="toggle" for="sseEnabled">
                                     <input id="sseEnabled" type="checkbox">
-                                    <span><strong>后台 SSE 监听</strong><span>断线后按设置重连</span></span>
+                                    <span><strong data-i18n="panel.field.sseEnabled">监听 SSE 事件</strong><span>断线后按设置重连</span></span>
                                 </label>
                             </div>
                             <div class="field">
                                 <label class="toggle" for="notificationsEnabled">
                                     <input id="notificationsEnabled" type="checkbox">
-                                    <span><strong>完成 / 审批通知</strong><span>只推送重要且已去重的事件</span></span>
+                                    <span><strong data-i18n="panel.field.notifyEnabled">推送重要通知</strong><span>只推送重要且已去重的事件</span></span>
                                 </label>
                             </div>
                             <div class="field">
-                                <label for="notificationBehavior">通知 AI 行为</label>
+                                <label for="notificationBehavior" data-i18n="panel.field.aiBehavior">通知 AI 行为</label>
                                 <select id="notificationBehavior">
                                     <option value="read">read · 可读但不触发回复</option>
                                     <option value="blind">blind · 不提供给 AI</option>
                                 </select>
                             </div>
                             <div class="field">
-                                <span class="label">通知可见性</span>
+                                <span class="label" data-i18n="panel.field.visibility">通知可见性</span>
                                 <div class="actions">
                                     <label class="choice" for="visibilityHud">
                                         <input id="visibilityHud" type="checkbox" value="hud">
@@ -1114,12 +1136,12 @@
                                 </div>
                             </div>
                             <div class="field">
-                                <label for="maxResponseSize">最大响应字节数</label>
+                                <label for="maxResponseSize" data-i18n="panel.field.maxResponseSize">最大响应字节数</label>
                                 <input id="maxResponseSize" type="number" min="16384" max="2097152" step="1024" value="262144">
                             </div>
                             <div class="field">
                                 <label for="maxInstructionChars">最大指令字符数</label>
-                                <input id="maxInstructionChars" type="number" min="256" max="32000" step="128" value="8000">
+                                <input id="maxInstructionChars" type="number" min="256" max="32000" step="1" value="8000">
                             </div>
                             <div class="field">
                                 <label for="maxOutputChars">最大输出字符数</label>
@@ -1161,11 +1183,11 @@
                 <form id="createSessionForm">
                     <div class="form-grid">
                         <div class="field">
-                            <label for="createProvider">提供商</label>
+                            <label for="createProvider" data-i18n="panel.field.provider">提供商</label>
                             <select id="createProvider"></select>
                         </div>
                         <div class="field">
-                            <label for="workingDirectory">工作目录</label>
+                            <label for="workingDirectory" data-i18n="panel.field.workingDirectory">工作目录</label>
                             <input id="workingDirectory" type="text" list="workspaceRootChoices"
                                    spellcheck="false" autocomplete="off" placeholder="选择允许根目录或输入其子目录">
                             <datalist id="workspaceRootChoices"></datalist>
@@ -1181,18 +1203,18 @@
 
                 <div class="divider" role="presentation"></div>
                 <div id="sessionList" class="session-list" aria-live="polite">
-                    <div class="empty">正在读取真实会话…</div>
+                    <div class="empty" data-i18n="panel.status.emptySessions">暂无会话</div>
                 </div>
 
                 <div class="divider" role="presentation"></div>
                 <h3>继续任务与活动记录</h3>
                 <div class="form-grid">
                     <div class="field full">
-                        <label for="sessionSelect">目标会话</label>
+                        <label for="sessionSelect" data-i18n="panel.field.session">目标会话</label>
                         <select id="sessionSelect"></select>
                     </div>
                     <div class="field full">
-                        <label for="instructionInput">开发指令</label>
+                        <label for="instructionInput" data-i18n="panel.field.instruction">开发指令</label>
                         <textarea id="instructionInput" placeholder="输入要交给所选会话的开发任务"></textarea>
                         <p id="instructionLimitHint" class="hint"></p>
                     </div>
@@ -1225,7 +1247,7 @@
             <section class="card" aria-labelledby="capabilitiesHeading">
                 <div class="card-head">
                     <div>
-                        <h2 id="capabilitiesHeading">能力与提供商</h2>
+                        <h2 id="capabilitiesHeading" data-i18n="panel.connection.capabilities">能力与提供商</h2>
                         <p class="subtle">只展示 HAPI 返回或本插件明确配置的能力，不猜测远端版本。</p>
                     </div>
                 </div>
@@ -1246,7 +1268,7 @@
                 </div>
                 <p id="approvalDisabledReason" class="disabled-reason" role="note"></p>
                 <div id="approvalList" class="approval-list" aria-live="polite">
-                    <div class="empty">正在读取真实审批…</div>
+                    <div class="empty" data-i18n="panel.status.emptyApprovals">暂无待处理审批</div>
                 </div>
             </section>
 
@@ -1258,7 +1280,7 @@
                     </div>
                 </div>
                 <div id="eventList" class="event-list" aria-live="polite">
-                    <div class="empty">尚无事件。</div>
+                    <div class="empty" data-i18n="panel.status.emptyEvents">暂无近期事件</div>
                 </div>
             </section>
         </aside>
@@ -1273,6 +1295,9 @@
     const RUNS_URL = "/runs";
     const POLL_INTERVAL_MS = 260;
     const RUN_TIMEOUT_MS = 195000;
+    const SECRET_ENVELOPE_ALGORITHM = "RSA-OAEP-256+A256GCM";
+    const SECRET_ENVELOPE_BINDING_PREFIX =
+        "vibe_coding_connector:vibe_coding_save_settings:";
     const SUPPORTED_LOCALES = ["zh-CN", "zh-TW", "en", "ja", "ko", "es", "pt", "ru"];
     const ALLOWED_PROVIDERS = ["claude", "codex", "opencode"];
     const PROVIDER_LABELS = {
@@ -1284,7 +1309,8 @@
     const model = {
         loaded: false,
         settings: {},
-        token: { configured: false, last_four: "" },
+        token: { configured: false },
+        secretEnvelope: null,
         health: null,
         sessions: [],
         approvals: [],
@@ -1301,6 +1327,12 @@
     const sleep = ms => new Promise(resolve => window.setTimeout(resolve, ms));
     const objectValue = value => value && typeof value === "object" && !Array.isArray(value) ? value : {};
     const arrayValue = value => Array.isArray(value) ? value : [];
+    const t = (key, fallback = "") => {
+        const translated = translations[key];
+        return typeof translated === "string" && translated.trim()
+            ? translated
+            : fallback;
+    };
     const scalarText = (value, fallback = "") => {
         if (value === null || value === undefined) return fallback;
         if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
@@ -1401,10 +1433,18 @@
     function translatePage() {
         document.querySelectorAll("[data-i18n]").forEach(element => {
             const key = element.getAttribute("data-i18n");
-            const translated = translations[key];
-            if (typeof translated === "string" && translated.trim()) {
-                element.textContent = translated;
-            }
+            const translated = t(key);
+            if (translated) element.textContent = translated;
+        });
+        document.querySelectorAll("[data-i18n-placeholder]").forEach(element => {
+            const key = element.getAttribute("data-i18n-placeholder");
+            const translated = t(key);
+            if (translated) element.setAttribute("placeholder", translated);
+        });
+        document.querySelectorAll("[data-i18n-aria-label]").forEach(element => {
+            const key = element.getAttribute("data-i18n-aria-label");
+            const translated = t(key);
+            if (translated) element.setAttribute("aria-label", translated);
         });
     }
 
@@ -1523,6 +1563,122 @@
         throw new Error("插件调用超时，请检查 HAPI 是否可访问");
     }
 
+    function decodeBase64(value) {
+        const normalized = String(value || "").trim();
+        if (!normalized || normalized.length > 16384
+            || !/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)
+            || normalized.length % 4 !== 0) {
+            throw new Error("安全密钥信封无效，请刷新面板后重试");
+        }
+        try {
+            const binary = window.atob(normalized);
+            const result = new Uint8Array(binary.length);
+            for (let index = 0; index < binary.length; index += 1) {
+                result[index] = binary.charCodeAt(index);
+            }
+            return result;
+        } catch (_) {
+            throw new Error("安全密钥信封无效，请刷新面板后重试");
+        }
+    }
+
+    function encodeBase64(value) {
+        const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+        let binary = "";
+        for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+            binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+        }
+        return window.btoa(binary);
+    }
+
+    function envelopeExpiryMillis(value) {
+        if (typeof value === "number" && Number.isFinite(value)) {
+            return value < 1e12 ? value * 1000 : value;
+        }
+        const parsed = Date.parse(String(value || ""));
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    async function encryptSavePayload(savePayload) {
+        const envelope = model.secretEnvelope;
+        if (!envelope || typeof envelope !== "object"
+            || envelope.algorithm !== SECRET_ENVELOPE_ALGORITHM
+            || typeof envelope.key_id !== "string"
+            || !/^[0-9a-f]{32}$/.test(envelope.key_id)
+            || typeof envelope.public_key_spki_b64 !== "string"
+            || envelopeExpiryMillis(envelope.expires_at) <= Date.now()) {
+            throw new Error("安全密钥信封已失效，请刷新面板后重试");
+        }
+        if (!window.crypto || !window.crypto.subtle || typeof TextEncoder === "undefined") {
+            throw new Error("当前浏览器无法安全加密设置内容");
+        }
+
+        const encoder = new TextEncoder();
+        const plaintext = encoder.encode(JSON.stringify(savePayload));
+        const maxBytes = Math.max(
+            1,
+            Math.min(262144, numberValue(envelope.max_plaintext_bytes, 262144))
+        );
+        if (!plaintext.length || plaintext.length > maxBytes) {
+            plaintext.fill(0);
+            throw new Error("设置内容超过安全信封允许的长度");
+        }
+
+        let rawContentKey = null;
+        try {
+            const publicKey = await window.crypto.subtle.importKey(
+                "spki",
+                decodeBase64(envelope.public_key_spki_b64),
+                { name: "RSA-OAEP", hash: "SHA-256" },
+                false,
+                ["encrypt"]
+            );
+            const contentKey = await window.crypto.subtle.generateKey(
+                { name: "AES-GCM", length: 256 },
+                true,
+                ["encrypt"]
+            );
+            rawContentKey = new Uint8Array(
+                await window.crypto.subtle.exportKey("raw", contentKey)
+            );
+            const iv = window.crypto.getRandomValues(new Uint8Array(12));
+            const additionalData = encoder.encode(
+                `${SECRET_ENVELOPE_BINDING_PREFIX}${envelope.key_id}`
+            );
+            const ciphertext = new Uint8Array(
+                await window.crypto.subtle.encrypt(
+                    { name: "AES-GCM", iv, additionalData },
+                    contentKey,
+                    plaintext
+                )
+            );
+            const wrappedKey = new Uint8Array(
+                await window.crypto.subtle.encrypt(
+                    { name: "RSA-OAEP", label: additionalData },
+                    publicKey,
+                    rawContentKey
+                )
+            );
+            const payload = {
+                v: 1,
+                wrapped_key: encodeBase64(wrappedKey),
+                iv: encodeBase64(iv),
+                ciphertext: encodeBase64(ciphertext)
+            };
+            return {
+                encrypted_payload: encodeBase64(
+                    encoder.encode(JSON.stringify(payload))
+                ),
+                key_id: envelope.key_id
+            };
+        } catch (_) {
+            throw new Error("无法安全加密设置内容，请刷新面板后重试");
+        } finally {
+            plaintext.fill(0);
+            if (rawContentKey) rawContentKey.fill(0);
+        }
+    }
+
     function setNotice(message, kind = "loading") {
         const notice = byId("statusMessage");
         notice.className = `notice ${kind}`;
@@ -1541,7 +1697,7 @@
             const result = await action();
             return result;
         } catch (error) {
-            setNotice(`操作失败：${safeError(error)}`, "error");
+            setNotice(`${t("panel.message.requestFailed", "操作失败。")} ${safeError(error)}`, "error");
             throw error;
         } finally {
             activeCalls = Math.max(0, activeCalls - 1);
@@ -1658,9 +1814,9 @@
         model.settings = objectValue(source.settings);
         const token = objectValue(source.token);
         model.token = {
-            configured: boolValue(token.configured || source.token_configured),
-            last_four: safeText(token.last_four || token.last4 || source.token_last_four, "", 4)
+            configured: boolValue(token.configured || source.token_configured)
         };
+        model.secretEnvelope = objectValue(source.secret_envelope);
         model.health = source.health && typeof source.health === "object" ? source.health : null;
         model.sessions = normalizeSessions(source.sessions || source);
         model.approvals = normalizeApprovals(source.approvals || source);
@@ -1725,10 +1881,9 @@
         const element = byId("tokenState");
         element.classList.toggle("configured", model.token.configured);
         if (model.token.configured) {
-            const suffix = model.token.last_four ? ` · 末四位 ${model.token.last_four}` : "";
-            element.textContent = `已配置（仅显示状态）${suffix}`;
+            element.textContent = `${t("panel.status.configured", "已配置")}（仅显示状态）`;
         } else {
-            element.textContent = "尚未配置令牌";
+            element.textContent = t("panel.status.notConfigured", "尚未配置令牌");
         }
         byId("clearTokenBtn").disabled = !model.loaded || !model.token.configured || activeCalls > 0;
     }
@@ -1798,7 +1953,10 @@
             max_instruction_chars: numberValue(byId("maxInstructionChars").value, 8000),
             max_output_chars: numberValue(byId("maxOutputChars").value, 12000),
             max_concurrency: numberValue(byId("maxConcurrency").value, 3),
-            rate_limit_per_minute: numberValue(byId("rateLimit").value, 20)
+            rate_limit_per_minute: numberValue(byId("rateLimit").value, 20),
+            max_recent_events: numberValue(model.settings.max_recent_events, 100),
+            max_recent_sessions: numberValue(model.settings.max_recent_sessions, 50),
+            auto_approve: false
         };
     }
 
@@ -1860,19 +2018,19 @@
             ? "该会话的工作目录不符合当前安全策略，不能读取。"
             : "";
         const createReason = disabledReason("create")
-            || (!byId("allowCreate").checked ? "“创建会话”工具尚未启用。" : "")
-            || (!roots.length ? "请先保存至少一个允许的工作区根目录。" : "")
+            || (!byId("allowCreate").checked ? t("panel.reason.actionDisabled", "工具策略已关闭此操作。") : "")
+            || (!roots.length ? t("panel.reason.configureRoots", "请先配置至少一个允许的工作区根目录。") : "")
             || (!providers.length ? "请至少允许一个提供商。" : "");
         const sendReason = disabledReason("send")
-            || (!byId("allowSend").checked ? "“提交开发指令”工具尚未启用。" : "")
-            || (!selected ? "请先选择一个会话。" : "")
+            || (!byId("allowSend").checked ? t("panel.reason.actionDisabled", "工具策略已关闭此操作。") : "")
+            || (!selected ? t("panel.reason.selectSession", "请先选择一个会话。") : "")
             || sendPolicyReason;
         const stopReason = disabledReason("stop")
-            || (!byId("allowStop").checked ? "“停止会话”工具尚未启用。" : "")
-            || (!selected ? "请先选择一个会话。" : "")
+            || (!byId("allowStop").checked ? t("panel.reason.actionDisabled", "工具策略已关闭此操作。") : "")
+            || (!selected ? t("panel.reason.selectSession", "请先选择一个会话。") : "")
             || stopPolicyReason;
         const approvalReason = disabledReason("approval")
-            || (!byId("allowApproval").checked ? "“响应审批”工具尚未启用。" : "");
+            || (!byId("allowApproval").checked ? t("panel.reason.actionDisabled", "工具策略已关闭此操作。") : "");
 
         byId("createDisabledReason").textContent = createReason;
         byId("sessionActionReason").textContent = sendReason || stopReason;
@@ -1938,10 +2096,10 @@
         if (connected === false) orb.classList.add("offline");
 
         byId("healthValue").textContent = connected === true
-            ? "连接正常"
+            ? t("panel.status.connected", "连接正常")
             : connected === false
-                ? "连接不可用"
-                : "尚未确认";
+                ? t("panel.status.disconnected", "连接不可用")
+                : t("panel.status.notConfigured", "尚未确认");
         const detail = health && typeof health === "object"
             ? nestedHealthValue(health, "summary")
                 || nestedHealthValue(health, "message")
@@ -1960,25 +2118,31 @@
         const remoteProviders = health.providers || objectValue(capabilities).providers;
         const rows = [];
         rows.push({
+            label: "SSE",
+            value: boolValue(model.settings.sse_enabled)
+                ? t("panel.status.enabled", "已开启")
+                : t("panel.status.disabled", "已关闭")
+        });
+        rows.push({
             label: "配置允许的提供商",
             value: arrayValue(model.settings.allowed_providers)
                 .map(normalizeProvider)
                 .filter(Boolean)
                 .map(provider => PROVIDER_LABELS[provider])
-                .join("、") || "未配置"
+                .join("、") || t("panel.status.notConfigured", "未配置")
         });
         if (Array.isArray(remoteProviders) && remoteProviders.length) {
             rows.push({
-                label: "HAPI 报告的提供商",
+                label: "连接器本地允许的提供商",
                 value: remoteProviders.map(item => safeText(item, "", 60)).filter(Boolean).join("、")
             });
         } else {
             rows.push({ label: "HAPI 提供商声明", value: "当前协议未明确报告；不作推测" });
         }
         if (Array.isArray(machines)) {
-            rows.push({ label: "在线 / 已报告机器", value: String(machines.length) });
+            rows.push({ label: t("panel.field.machine", "在线 / 已报告机器"), value: String(machines.length) });
         } else if (Number.isFinite(Number(health.machine_count))) {
-            rows.push({ label: "已报告机器", value: String(health.machine_count) });
+            rows.push({ label: t("panel.field.machine", "已报告机器"), value: String(health.machine_count) });
         }
 
         if (Array.isArray(capabilities)) {
@@ -2316,7 +2480,10 @@
                 model.health = objectValue(payload.health || payload);
                 renderHealth();
                 renderCapabilities();
-                const summary = safeText(payload.summary || nestedHealthValue(model.health, "summary"), "连接检测完成");
+                const summary = safeText(
+                    payload.summary || nestedHealthValue(model.health, "summary"),
+                    t("panel.message.requestSucceeded", "操作成功。")
+                );
                 setNotice(summary, healthConnected(model.health) === false ? "error" : "success");
             });
         } catch (_) {
@@ -2375,27 +2542,59 @@
         }
         if (settings.allow_remote && !isLoopbackUrl(settings.base_url)) {
             const confirmed = window.confirm(
-                "你正在允许连接非本机 HAPI。请确认网络、TLS、远端服务及工作目录映射均可信。继续保存吗？"
+                `${t("panel.reason.remoteOptIn", "远程端点需要明确选择启用。")}\n`
+                + "请确认网络、TLS、远端服务及工作目录映射均可信。继续保存吗？"
             );
             if (!confirmed) return;
         }
 
-        const token = byId("tokenInput").value;
+        const tokenField = byId("tokenInput");
+        const token = tokenField.value;
+        tokenField.value = "";
         const button = byId("saveSettingsBtn");
         try {
             await runAction(button, "正在安全保存设置…", async () => {
-                await callPlugin("vibe_coding_save_settings", { settings, token });
-                byId("tokenInput").value = "";
+                let encryptedArgs;
+                try {
+                    encryptedArgs = await encryptSavePayload({
+                        settings,
+                        token,
+                        clear_token: false
+                    });
+                } catch (error) {
+                    await loadPanelState({ quiet: true });
+                    throw error;
+                }
+                try {
+                    await callPlugin("vibe_coding_save_settings", encryptedArgs);
+                } catch (saveError) {
+                    try {
+                        await loadPanelState({ quiet: true });
+                    } catch (_) {
+                        // Preserve the original save error while the panel remains usable.
+                    }
+                    throw saveError;
+                }
                 await loadPanelState({ quiet: true });
-                setNotice("设置已保存。空令牌输入不会覆盖已有令牌。", "success");
+                let savedMessage = t("panel.message.saved", "设置已保存。");
+                if (!token) {
+                    savedMessage += ` ${t(
+                        "panel.message.tokenKept",
+                        "空令牌输入会保留原有 token。"
+                    )}`;
+                }
+                setNotice(savedMessage, "success");
             });
         } finally {
-            byId("tokenInput").value = "";
+            tokenField.value = "";
         }
     }
 
     async function resetSettings() {
-        if (!window.confirm("确定将连接器设置重置为安全默认值吗？现有令牌会保留，工具开关将关闭。")) return;
+        if (!window.confirm(t(
+            "panel.confirm.reset",
+            "确定将连接器设置重置为安全默认值吗？"
+        ))) return;
         const button = byId("resetSettingsBtn");
         await runAction(button, "正在重置为安全默认设置…", async () => {
             await callPlugin("vibe_coding_reset_settings", {});
@@ -2405,13 +2604,16 @@
     }
 
     async function clearToken() {
-        if (!window.confirm("确定清除已保存的 HAPI 令牌吗？清除后连接与事件监听会失去认证。")) return;
+        if (!window.confirm(t(
+            "panel.confirm.clearToken",
+            "确定清除已保存的 HAPI 令牌吗？"
+        ))) return;
         const button = byId("clearTokenBtn");
         await runAction(button, "正在清除令牌…", async () => {
             await callPlugin("vibe_coding_clear_token", {});
             byId("tokenInput").value = "";
             await loadPanelState({ quiet: true });
-            setNotice("HAPI 令牌已清除。", "success");
+            setNotice(t("panel.message.tokenCleared", "HAPI 令牌已清除。"), "success");
         });
     }
 
@@ -2492,7 +2694,9 @@
         const button = byId("stopSessionBtn");
         const session = model.selectedSessionId;
         if (!session) return;
-        if (!window.confirm(`确定请求 HAPI 停止会话 ${session} 吗？未保存的后端工作可能中断。`)) return;
+        if (!window.confirm(
+            `${t("panel.confirm.stop", "停止这个运行中的会话？")}\n${session}`
+        )) return;
         await runAction(button, "正在请求 HAPI 停止会话…", async () => {
             const payload = await callPlugin("vibe_coding_stop_session", { session_id: session });
             await refreshSessions(button);
@@ -2504,7 +2708,10 @@
         const requestId = approvalId(approval);
         const session = approvalSessionId(approval);
         if (!requestId || !session) {
-            setNotice("该审批缺少安全响应所需的会话或请求 ID。", "error");
+            setNotice(
+                t("panel.reason.selectApproval", "请先选择一个待处理审批。"),
+                "error"
+            );
             return;
         }
         const verb = decision === "approve" ? "批准" : "拒绝";
@@ -2515,8 +2722,8 @@
             600
         );
         const warning = decision === "approve"
-            ? "批准可能允许后端执行文件修改或其他敏感操作。自动批准仍保持关闭；请确认你已审阅以下脱敏预览。"
-            : "拒绝后，后端任务可能停止或要求新的指令。";
+            ? t("panel.confirm.approve", "批准这个待处理请求？")
+            : t("panel.confirm.deny", "拒绝这个待处理请求？");
         if (!window.confirm(
             `${warning}\n\n会话：${session}\n请求：${requestId}\n工具：${tool}\n参数预览：${preview}\n\n确定${verb}吗？`
         )) return;

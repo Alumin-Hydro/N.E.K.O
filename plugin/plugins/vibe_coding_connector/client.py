@@ -17,7 +17,13 @@ from urllib.parse import quote
 
 import httpx
 
-from .security import PolicyError, redact_sensitive, validate_base_url, validate_identifier
+from .security import (
+    PolicyError,
+    is_sensitive_key,
+    redact_sensitive,
+    validate_base_url,
+    validate_identifier,
+)
 
 
 class HealthInfo(TypedDict):
@@ -145,12 +151,62 @@ def _unwrap_key(value: Any, key: str) -> Any:
 
 
 def _text(value: Any, *, maximum: int = 4096) -> str:
-    if value is None:
-        return ""
     if not isinstance(value, str):
-        value = str(value)
+        return ""
     value = value.replace("\x00", "")
     return value[:maximum]
+
+
+def _credential_values(*values: Any) -> tuple[str, ...]:
+    secrets: list[str] = []
+    for value in values:
+        if isinstance(value, str) and value and value not in secrets:
+            secrets.append(value)
+    return tuple(sorted(secrets, key=len, reverse=True))
+
+
+def _redact_exact_credentials(
+    value: Any,
+    secrets: tuple[str, ...],
+    *,
+    depth: int = 0,
+) -> Any:
+    if not secrets:
+        return value
+    if depth > 32:
+        return "[TRUNCATED]"
+    if isinstance(value, str):
+        result = value
+        for secret in secrets:
+            result = result.replace(secret, "[REDACTED]")
+        return result
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            safe_key = _redact_exact_credentials(str(key), secrets, depth=depth + 1)
+            result[str(safe_key)] = _redact_exact_credentials(
+                item,
+                secrets,
+                depth=depth + 1,
+            )
+        return result
+    if isinstance(value, list):
+        return [
+            _redact_exact_credentials(item, secrets, depth=depth + 1)
+            for item in value
+        ]
+    if value is None or isinstance(value, (bool, int, float)):
+        try:
+            scalar = json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError):
+            return value
+        if scalar in secrets:
+            return "[REDACTED]"
+    return value
 
 
 def _protocol_identifier(value: Any, *, kind: str) -> str:
@@ -208,7 +264,7 @@ def _normalize_machine(value: Any) -> MachineInfo | None:
         return None
     status = _text(_first(raw, "status", "connectionStatus"), maximum=64).lower()
     online_value = _first(raw, "online", "isOnline", "connected", "active")
-    online = bool(online_value) if online_value is not None else status in {
+    online = online_value is True if online_value is not None else status in {
         "online",
         "connected",
         "ready",
@@ -217,17 +273,18 @@ def _normalize_machine(value: Any) -> MachineInfo | None:
         metadata_raw,
         max_string=512,
     )
+    name = _text(
+        _first(
+            raw,
+            "name",
+            "displayName",
+            default=_first(metadata_raw, "displayName", "name", default=machine_id),
+        ),
+        maximum=256,
+    )
     return {
         "id": machine_id,
-        "name": _text(
-            _first(
-                raw,
-                "name",
-                "displayName",
-                default=_first(metadata_raw, "displayName", "name", default=machine_id),
-            ),
-            maximum=256,
-        ),
+        "name": name or machine_id,
         "online": online,
         "metadata": metadata if isinstance(metadata, dict) else {},
     }
@@ -326,9 +383,19 @@ def extract_permissions(agent_state: Any) -> list[PermissionInfo]:
         result.append(
             {
                 "id": request_id,
-                "tool": _text(
-                    _first(raw, "tool", "toolName", "name", "permission", default="unknown"),
-                    maximum=128,
+                "tool": (
+                    _text(
+                        _first(
+                            raw,
+                            "tool",
+                            "toolName",
+                            "name",
+                            "permission",
+                            default="unknown",
+                        ),
+                        maximum=128,
+                    )
+                    or "unknown"
                 ),
                 "created_at": _timestamp(
                     _first(raw, "createdAt", "created_at", "timestamp")
@@ -352,16 +419,19 @@ def _normalize_session(value: Any, *, include_state: bool = False) -> SessionInf
     if not session_id:
         return None
     metadata = _as_mapping(raw.get("metadata"))
-    thinking = bool(_first(raw, "thinking", default=False))
+    thinking = _first(raw, "thinking", default=False) is True
     active_value = _first(raw, "active", "isActive", "running")
     if active_value is None:
         active = thinking
     else:
-        active = bool(active_value)
+        active = active_value is True
     agent_state = _as_mapping(_first(raw, "agentState", "agent_state", default={}))
-    if bool(_first(agent_state, "thinking", default=False)):
+    if _first(agent_state, "thinking", default=False) is True:
         thinking = True
-    if not active and bool(_first(agent_state, "thinking", "running", default=False)):
+    if (
+        not active
+        and _first(agent_state, "thinking", "running", default=False) is True
+    ):
         active = True
     status_raw = _first(
         raw,
@@ -546,18 +616,7 @@ def _permission_arguments_would_redact(value: Any, *, depth: int = 0) -> bool:
         return True
     if isinstance(value, Mapping):
         for key, item in list(value.items())[:65]:
-            lowered = str(key).lower()
-            if any(
-                part in lowered
-                for part in (
-                    "token",
-                    "secret",
-                    "password",
-                    "authorization",
-                    "credential",
-                    "jwt",
-                )
-            ):
+            if is_sensitive_key(key):
                 return True
             if _permission_arguments_would_redact(item, depth=depth + 1):
                 return True
@@ -571,8 +630,14 @@ def _permission_arguments_would_redact(value: Any, *, depth: int = 0) -> bool:
 
 
 class _SSEParser:
-    def __init__(self, max_event_bytes: int) -> None:
+    def __init__(
+        self,
+        max_event_bytes: int,
+        *,
+        secrets: tuple[str, ...] = (),
+    ) -> None:
         self._max_event_bytes = max_event_bytes
+        self._secrets = secrets
         self._buffer = bytearray()
         self._data_lines: list[str] = []
         self._data_size = 0
@@ -622,7 +687,7 @@ class _SSEParser:
         if separator and value.startswith(b" "):
             value = value[1:]
         if field == b"data":
-            self._data_size += len(value)
+            self._data_size += len(raw_line) + 1
             if self._data_size > self._max_event_bytes:
                 self._oversized = True
                 self._data_lines.clear()
@@ -649,12 +714,21 @@ class _SSEParser:
             return None
         if not isinstance(value, Mapping):
             value = {"value": value}
-        data = redact_sensitive(value, max_string=2048)
-        event_name = self._event or _text(value.get("type"), maximum=128) or "message"
+        exact_redacted = _redact_exact_credentials(value, self._secrets)
+        if not isinstance(exact_redacted, Mapping):
+            exact_redacted = {}
+        data = redact_sensitive(exact_redacted, max_string=2048)
+        event_name = (
+            self._event
+            or _text(exact_redacted.get("type"), maximum=128)
+            or "message"
+        )
+        event_name = _redact_exact_credentials(event_name, self._secrets)
+        event_id = _redact_exact_credentials(self._event_id, self._secrets)
         event = SSEEvent(
-            event=event_name,
+            event=str(event_name),
             data=data if isinstance(data, dict) else {},
-            event_id=self._event_id,
+            event_id=str(event_id),
         )
         self._reset_frame()
         return event
@@ -684,7 +758,7 @@ class HapiClient:
         self._loops: dict[int, weakref.ReferenceType[asyncio.AbstractEventLoop]] = {}
         self._bearer_tokens: dict[int, str] = {}
 
-    def _client(self) -> httpx.AsyncClient:
+    async def _client(self) -> httpx.AsyncClient:
         loop = asyncio.get_running_loop()
         loop_id = id(loop)
         current = self._clients.get(loop_id)
@@ -696,10 +770,38 @@ class HapiClient:
             and loop_ref() is loop
         ):
             return current
+        stale_clients: list[httpx.AsyncClient] = []
         if current is not None:
             self._clients.pop(loop_id, None)
             self._loops.pop(loop_id, None)
             self._bearer_tokens.pop(loop_id, None)
+            stale_clients.append(current)
+        for stale_loop_id, stale_ref in list(self._loops.items()):
+            owner = stale_ref()
+            if owner is not None and not owner.is_closed():
+                continue
+            stale = self._clients.pop(stale_loop_id, None)
+            self._loops.pop(stale_loop_id, None)
+            self._bearer_tokens.pop(stale_loop_id, None)
+            if stale is not None:
+                stale_clients.append(stale)
+        for stale in stale_clients:
+            if stale.is_closed:
+                continue
+            try:
+                await stale.aclose()
+            except (RuntimeError, httpx.HTTPError):
+                pass
+
+        current = self._clients.get(loop_id)
+        loop_ref = self._loops.get(loop_id)
+        if (
+            current is not None
+            and not current.is_closed
+            and loop_ref is not None
+            and loop_ref() is loop
+        ):
+            return current
         kwargs: dict[str, Any] = {
             "base_url": self.config.base_url,
             "timeout": httpx.Timeout(self.config.timeout_seconds),
@@ -707,6 +809,7 @@ class HapiClient:
             "trust_env": False,
             "headers": {
                 "Accept": "application/json",
+                "Accept-Encoding": "identity",
                 "User-Agent": "NEKO-vibe-coding-connector/0.1.0",
             },
         }
@@ -749,7 +852,21 @@ class HapiClient:
         bearer = await self.authenticate(force=force)
         return {"Authorization": f"Bearer {bearer}"} if bearer else {}
 
+    def _active_credentials(self) -> tuple[str, ...]:
+        loop_id = id(asyncio.get_running_loop())
+        return _credential_values(
+            self.config.token,
+            self._bearer_tokens.get(loop_id),
+        )
+
     async def _read_response(self, response: httpx.Response) -> bytes:
+        content_encoding = response.headers.get("content-encoding", "").strip().lower()
+        if content_encoding and content_encoding != "identity":
+            raise HapiClientError(
+                "HAPI 响应使用了不允许的压缩编码",
+                code="unsupported_content_encoding",
+                status_code=response.status_code,
+            )
         header = response.headers.get("content-length")
         if header:
             try:
@@ -781,7 +898,7 @@ class HapiClient:
         protected: bool = True,
         retry_auth: bool = True,
     ) -> Any:
-        client = self._client()
+        client = await self._client()
         headers: dict[str, str] = {}
         if protected:
             headers.update(await self._auth_headers())
@@ -849,16 +966,26 @@ class HapiClient:
         if not body:
             return {}
         try:
-            return json.loads(body)
+            payload = json.loads(body)
         except (ValueError, UnicodeDecodeError, RecursionError) as exc:
             raise HapiClientError(
                 "HAPI 返回了无效的 JSON 响应",
                 code="invalid_response",
                 status_code=status,
             ) from exc
+        if protected:
+            return _redact_exact_credentials(
+                payload,
+                self._active_credentials(),
+            )
+        return payload
 
     async def health(self) -> HealthInfo:
         payload = await self._request_json("GET", "/health", protected=False)
+        payload = _redact_exact_credentials(
+            payload,
+            self._active_credentials(),
+        )
         raw = _as_mapping(payload)
         data = _as_mapping(raw.get("data"))
         source = data or raw
@@ -1122,48 +1249,107 @@ class HapiClient:
         raise HapiClientError(f"HAPI 未确认{action}", code="mutation_not_confirmed")
 
     async def _stream_once(self) -> AsyncIterator[SSEEvent]:
-        client = self._client()
-        headers = {"Accept": "text/event-stream"}
-        headers.update(await self._auth_headers())
+        client = await self._client()
+        auth_attempts = (
+            2
+            if self.config.auth_mode == "access_token" and self.config.token
+            else 1
+        )
         try:
-            async with client.stream(
-                "GET",
-                "/api/events?all=1",
-                headers=headers,
-                timeout=httpx.Timeout(
-                    connect=self.config.timeout_seconds,
-                    read=None,
-                    write=self.config.timeout_seconds,
-                    pool=self.config.timeout_seconds,
-                ),
-            ) as response:
-                if response.status_code == 401:
-                    self._bearer_tokens.pop(id(asyncio.get_running_loop()), None)
-                    raise HapiClientError(
-                        "HAPI SSE 身份验证失败",
-                        code="authentication_failed",
-                        status_code=401,
+            for auth_attempt in range(auth_attempts):
+                headers = {"Accept": "text/event-stream"}
+                try:
+                    headers.update(await self._auth_headers())
+                except HapiClientError as exc:
+                    retryable = (
+                        exc.code in {"connection_failed", "network_error"}
+                        or exc.status_code in {408, 425, 429}
+                        or (
+                            exc.status_code is not None
+                            and exc.status_code >= 500
+                        )
                     )
-                if response.status_code < 200 or response.status_code >= 300:
-                    raise HapiClientError(
-                        f"HAPI SSE 连接失败（HTTP {response.status_code}）",
-                        code="sse_connection_failed",
-                        status_code=response.status_code,
+                    if retryable:
+                        raise HapiClientError(
+                            "HAPI SSE 认证暂时不可用",
+                            code="sse_connection_failed",
+                            status_code=exc.status_code,
+                        ) from exc
+                    raise
+                async with client.stream(
+                    "GET",
+                    "/api/events?all=1",
+                    headers=headers,
+                    timeout=httpx.Timeout(
+                        connect=self.config.timeout_seconds,
+                        read=None,
+                        write=self.config.timeout_seconds,
+                        pool=self.config.timeout_seconds,
+                    ),
+                ) as response:
+                    if response.status_code == 401:
+                        self._bearer_tokens.pop(
+                            id(asyncio.get_running_loop()),
+                            None,
+                        )
+                        if auth_attempt + 1 < auth_attempts:
+                            continue
+                        raise HapiClientError(
+                            "HAPI SSE 身份验证失败",
+                            code="authentication_failed",
+                            status_code=401,
+                        )
+                    if response.status_code == 403:
+                        raise HapiClientError(
+                            "HAPI 拒绝 SSE 访问",
+                            code="forbidden",
+                            status_code=403,
+                        )
+                    if response.status_code == 404:
+                        raise HapiClientError(
+                            "当前 HAPI 版本不支持 SSE 端点",
+                            code="not_found",
+                            status_code=404,
+                        )
+                    if response.status_code < 200 or response.status_code >= 300:
+                        retryable = (
+                            response.status_code in {408, 425, 429}
+                            or response.status_code >= 500
+                        )
+                        raise HapiClientError(
+                            f"HAPI SSE 连接失败（HTTP {response.status_code}）",
+                            code=(
+                                "sse_connection_failed"
+                                if retryable
+                                else "sse_request_rejected"
+                            ),
+                            status_code=response.status_code,
+                        )
+                    content_encoding = (
+                        response.headers.get("content-encoding", "").strip().lower()
                     )
-                content_type = response.headers.get("content-type", "").lower()
-                if content_type and "text/event-stream" not in content_type:
-                    raise HapiClientError(
-                        "HAPI SSE 返回了不支持的内容类型",
-                        code="invalid_sse_response",
+                    if content_encoding and content_encoding != "identity":
+                        raise HapiClientError(
+                            "HAPI SSE 使用了不允许的压缩编码",
+                            code="unsupported_content_encoding",
+                            status_code=response.status_code,
+                        )
+                    content_type = response.headers.get("content-type", "").lower()
+                    if content_type and "text/event-stream" not in content_type:
+                        raise HapiClientError(
+                            "HAPI SSE 返回了不支持的内容类型",
+                            code="invalid_sse_response",
+                        )
+                    parser = _SSEParser(
+                        min(self.config.max_response_bytes, 65_536),
+                        secrets=self._active_credentials(),
                     )
-                parser = _SSEParser(
-                    min(self.config.max_response_bytes, 65_536),
-                )
-                async for chunk in response.aiter_bytes():
-                    for event in parser.feed(chunk):
+                    async for chunk in response.aiter_bytes():
+                        for event in parser.feed(chunk):
+                            yield event
+                    for event in parser.finish():
                         yield event
-                for event in parser.finish():
-                    yield event
+                    return
         except asyncio.CancelledError:
             raise
         except HapiClientError:
@@ -1185,18 +1371,51 @@ class HapiClient:
         """Yield parsed events, reconnecting until cancelled or explicitly stopped."""
 
         while stop_event is None or not stop_event.is_set():
+            stream = self._stream_once()
             try:
-                async for event in self._stream_once():
+                while stop_event is None or not stop_event.is_set():
+                    if stop_event is None:
+                        event = await anext(stream)
+                    else:
+                        next_event = asyncio.create_task(anext(stream))
+                        stopped = asyncio.create_task(stop_event.wait())
+                        try:
+                            done, _pending = await asyncio.wait(
+                                {next_event, stopped},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if stopped in done:
+                                next_event.cancel()
+                                await asyncio.gather(
+                                    next_event,
+                                    return_exceptions=True,
+                                )
+                                return
+                            stopped.cancel()
+                            await asyncio.gather(stopped, return_exceptions=True)
+                            event = await next_event
+                        finally:
+                            for task in (next_event, stopped):
+                                if not task.done():
+                                    task.cancel()
+                            await asyncio.gather(
+                                next_event,
+                                stopped,
+                                return_exceptions=True,
+                            )
                     yield event
                     if stop_event is not None and stop_event.is_set():
                         return
+            except StopAsyncIteration:
                 if not reconnect:
                     return
             except asyncio.CancelledError:
                 raise
-            except HapiClientError:
-                if not reconnect:
+            except HapiClientError as exc:
+                if not reconnect or exc.code != "sse_connection_failed":
                     raise
+            finally:
+                await stream.aclose()
             if stop_event is not None and stop_event.is_set():
                 return
             try:
@@ -1237,9 +1456,8 @@ class HapiClient:
                         asyncio.wrap_future(future),
                         timeout=2.0,
                     )
-                # A client whose owning loop is already closed cannot be
-                # safely awaited from another loop.  Its references are
-                # dropped above; shutdown remains bounded and deterministic.
+                elif current_loop is not None:
+                    await client.aclose()
             except (asyncio.TimeoutError, RuntimeError, httpx.HTTPError):
                 continue
 

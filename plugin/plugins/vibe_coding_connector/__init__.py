@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import re
@@ -12,7 +13,17 @@ import weakref
 from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
+
+try:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ImportError:  # pragma: no cover - packaged dependency failure
+    AESGCM = None  # type: ignore[assignment,misc]
+    hashes = padding = rsa = serialization = None  # type: ignore[assignment]
 
 from plugin.sdk.plugin import (
     Err,
@@ -37,6 +48,7 @@ from .security import (
     ConnectorSettings,
     PolicyError,
     SecurityPolicy,
+    is_sensitive_key,
     redact_sensitive,
     validate_identifier,
 )
@@ -47,6 +59,14 @@ _TOKEN_KEY = "credential_v1"
 _EVENTS_KEY = "recent_events_v1"
 _SESSIONS_KEY = "recent_sessions_v1"
 _PLUGIN_SOURCE = "vibe_coding_connector"
+_SAVE_SETTINGS_ENTRY_ID = "vibe_coding_save_settings"
+_SECRET_ENVELOPE_BINDING_PREFIX = (
+    f"{_PLUGIN_SOURCE}:{_SAVE_SETTINGS_ENTRY_ID}:"
+)
+_ENCRYPTED_DOCUMENT_MAX_BYTES = 262_144
+_ENCRYPTED_PAYLOAD_MAX_CHARS = 524_288
+_SECRET_ENVELOPE_TTL_SECONDS = 300
+_SECRET_ENVELOPE_MAX_PENDING = 8
 _PANEL_DETAILS = object()
 _IMPORTANT_EVENTS = frozenset(
     {
@@ -73,11 +93,30 @@ _DANGEROUS_PERMISSION_MARKERS = (
 )
 _SAFE_PERMISSION_MODES = frozenset({"default", "plan"})
 _SECRET_PATTERNS = (
-    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{6,}"),
+    re.compile(r"(?i)\b(?:Basic|Bearer)\s+[A-Za-z0-9._~+/=-]{6,}"),
+    re.compile(
+        r"(?i)\bAuthorization\s*:\s*[\"']?(?:Basic|Bearer)\s+"
+        r"[A-Za-z0-9._~+/=-]{4,}"
+    ),
+    re.compile(
+        r"(?i)\b(?:[A-Za-z][A-Za-z0-9_]*_)?"
+        r"(?:auth(?:entication|orization)?)\b[\"']?\s*[:=]\s*[\"']?"
+        r"(?:Basic|Bearer)\s+[A-Za-z0-9._~+/=-]{4,}[\"']?"
+    ),
     re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{4,})?"),
     re.compile(
-        r"(?i)\b(?:api[_ -]?key|access[_ -]?token|secret|password)\b"
-        r"\s*[:=]\s*[\"']?[^\s,\"']{4,}"
+        r"(?i)\b(?:[A-Za-z][A-Za-z0-9_]*_)?(?:api[_-]?(?:key|token)|"
+        r"access[_-]?(?:token|key(?:[_-]?id)?)|refresh[_-]?token|"
+        r"secret[_-]?access[_-]?key|private[_-]?key|client[_-]?secret|"
+        r"auth(?:entication|orization)?|bearer|credential|jwt|"
+        r"token|secret|password|passwd|passphrase|cookie)\b"
+        r"[\"']?\s*[:=]\s*(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;\"'}]{4,})"
+    ),
+    re.compile(
+        r"(?i)(?:^|\s)--?(?:api[-_]?(?:key|token)|access[-_]?token|"
+        r"private[-_]?key|client[-_]?secret|auth(?:entication|orization)?|"
+        r"bearer|credential|jwt|token|password|passwd|passphrase)\s+"
+        r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;\"']{4,})"
     ),
     re.compile(r"\b(?:sk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{8,}"),
 )
@@ -191,16 +230,22 @@ APPROVAL_SCHEMA: dict[str, Any] = {
 SAVE_SETTINGS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "settings": {"type": "object"},
-        "token": {
+        "encrypted_payload": {
             "type": "string",
-            "maxLength": 8192,
+            "minLength": 1,
+            "maxLength": _ENCRYPTED_PAYLOAD_MAX_CHARS,
             "writeOnly": True,
             "x-sensitive": True,
+            "description": "一次性 RSA-OAEP + AES-GCM 加密的完整设置文档。",
         },
-        "clear_token": {"type": "boolean"},
+        "key_id": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 32,
+            "pattern": "^[0-9a-f]{32}$",
+        },
     },
-    "required": ["settings"],
+    "required": ["encrypted_payload", "key_id"],
     "additionalProperties": False,
 }
 
@@ -235,6 +280,55 @@ def _unwrap_store_result(value: Any, default: Any = None) -> Any:
 
 def _safe_bool(value: Any) -> bool:
     return value is True
+
+
+def _value_contains_credential(
+    value: Any,
+    credential: str | None,
+    *,
+    depth: int = 0,
+) -> bool:
+    if not credential or depth > 12:
+        return False
+    if isinstance(value, str):
+        return credential in value
+    if isinstance(value, Mapping):
+        return any(
+            _value_contains_credential(
+                key,
+                credential,
+                depth=depth + 1,
+            )
+            or _value_contains_credential(
+                item,
+                credential,
+                depth=depth + 1,
+            )
+            for key, item in list(value.items())[:128]
+        )
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return any(
+            _value_contains_credential(
+                item,
+                credential,
+                depth=depth + 1,
+            )
+            for item in value[:128]
+        )
+    if value is None or isinstance(value, (bool, int, float)):
+        try:
+            scalar = json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError):
+            return False
+        return credential in scalar
+    return False
 
 
 def _bounded_limit(value: Any, *, default: int, maximum: int) -> int:
@@ -353,6 +447,7 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
         self._policy = SecurityPolicy(self._settings)
         self._token: str | None = None
         self._loaded = False
+        self._configuration_quarantined = False
         self._revision = 0
         self._client: HapiClient | Any | None = None
         self._client_revision = -1
@@ -377,6 +472,8 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
         self._last_metadata_persist_at = 0.0
         self._settings_update_guard = threading.Lock()
         self._operation_guard = threading.Lock()
+        self._envelope_lock = threading.Lock()
+        self._secret_envelopes: OrderedDict[str, tuple[Any, float]] = OrderedDict()
         self._active_operations = 0
         self._configuration_changing = False
         self._listener_task: asyncio.Task[None] | None = None
@@ -391,6 +488,45 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
     async def startup(self, **_: Any):
         try:
             self.register_static_ui("static")
+            try:
+                manifest_raw = await self.config.dump(timeout=5.0)
+            except Exception as exc:
+                self.logger.warning(
+                    "VibeCoding manifest config load failed; using defaults: {}",
+                    exc,
+                )
+                manifest_raw = {}
+
+            manifest_config: Mapping[str, Any]
+            if not isinstance(manifest_raw, Mapping):
+                manifest_config = {}
+            elif "data" in manifest_raw:
+                data = manifest_raw.get("data")
+                if isinstance(data, Mapping):
+                    config = data.get("config")
+                    manifest_config = (
+                        config if isinstance(config, Mapping) else {}
+                    )
+                else:
+                    manifest_config = {}
+            elif "config" in manifest_raw:
+                config = manifest_raw.get("config")
+                manifest_config = config if isinstance(config, Mapping) else {}
+            else:
+                manifest_config = manifest_raw
+
+            plugin_config = manifest_config.get("plugin")
+            store_config = (
+                plugin_config.get("store")
+                if isinstance(plugin_config, Mapping)
+                else None
+            )
+            if (
+                isinstance(store_config, Mapping)
+                and store_config.get("enabled") is True
+                and not getattr(self.store, "enabled", False)
+            ):
+                self.store.enabled = True
             await self._ensure_loaded(force=True)
             return Ok(
                 {
@@ -407,6 +543,9 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
 
     @lifecycle(id="shutdown")
     async def shutdown(self, **_: Any):
+        with self._envelope_lock:
+            discarded_envelopes = len(self._secret_envelopes)
+            self._secret_envelopes.clear()
         await self._stop_listener()
         await self._persist_metadata()
         client = self._client
@@ -420,7 +559,12 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             await self.store.close()
         except Exception:
             pass
-        return Ok({"status": "shutdown"})
+        return Ok(
+            {
+                "status": "shutdown",
+                "secret_envelopes_discarded": discarded_envelopes,
+            }
+        )
 
     async def _ensure_loaded(self, *, force: bool = False) -> None:
         if self._loaded and not force:
@@ -429,15 +573,17 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
         token_raw: Any = None
         events_raw: Any = None
         sessions_raw: Any = None
+        configuration_read_failed = False
+        configuration_cleanup_failed = False
         if getattr(self.store, "enabled", False):
-            settings_raw = _unwrap_store_result(
-                await self.store.get(_SETTINGS_KEY, default={}),
-                {},
-            )
-            token_raw = _unwrap_store_result(
-                await self.store.get(_TOKEN_KEY, default=None),
-                None,
-            )
+            settings_result = await self.store.get(_SETTINGS_KEY, default={})
+            token_result = await self.store.get(_TOKEN_KEY, default=None)
+            configuration_read_failed = isinstance(
+                settings_result,
+                Err,
+            ) or isinstance(token_result, Err)
+            settings_raw = _unwrap_store_result(settings_result, {})
+            token_raw = _unwrap_store_result(token_result, None)
             events_raw = _unwrap_store_result(
                 await self.store.get(_EVENTS_KEY, default=[]),
                 [],
@@ -446,36 +592,63 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
                 await self.store.get(_SESSIONS_KEY, default=[]),
                 [],
             )
+        settings_invalid = (
+            settings_raw is not None
+            and not isinstance(settings_raw, Mapping)
+        )
         try:
-            settings = ConnectorSettings.from_mapping(
-                settings_raw if isinstance(settings_raw, Mapping) else {}
-            )
+            if settings_invalid:
+                raise PolicyError(
+                    "持久化设置格式无效",
+                    code="invalid_settings",
+                )
+            settings = ConnectorSettings.from_mapping(settings_raw or {})
         except PolicyError:
             settings = ConnectorSettings()
-        token = token_raw.strip() if isinstance(token_raw, str) else ""
+            settings_invalid = True
+        raw_token = token_raw.strip() if isinstance(token_raw, str) else ""
+        token = raw_token if raw_token and len(raw_token) <= 8192 else ""
+        credential_conflict = _value_contains_credential(
+            settings.to_public(),
+            token or None,
+        )
+        invalid_credential = token_raw is not None and (
+            not isinstance(token_raw, str)
+            or token_raw != raw_token
+            or not token
+        )
+        credential_for_redaction = token or None
+        if configuration_read_failed:
+            settings = ConnectorSettings()
+            token = ""
+            events_raw = []
+            sessions_raw = []
+        elif settings_invalid or credential_conflict or invalid_credential:
+            settings = ConnectorSettings()
+            token = ""
+            if getattr(self.store, "enabled", False):
+                restored = await self._restore_configuration_store(settings, None)
+                if not restored:
+                    configuration_cleanup_failed = True
+                    self.logger.warning(
+                        "VibeCoding invalid configuration cleanup failed"
+                    )
+            events_raw = []
+            sessions_raw = []
         self._settings = settings
         self._policy.update(settings)
-        self._token = token if token and len(token) <= 8192 else None
-        if self._token and self._token in json.dumps(
-            settings.to_public(),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ):
-            # A credential that is also embedded in public configuration
-            # cannot satisfy the write-only contract.  Fail closed until the
-            # user explicitly replaces or clears it.
-            self._token = None
+        self._token = token or None
         self._recent_events = self._sanitize_stored_records(
             events_raw,
             maximum=settings.max_recent_events,
             record_type="event",
-            credential=self._token,
+            credential=credential_for_redaction,
         )
         self._recent_sessions = self._sanitize_stored_records(
             sessions_raw,
             maximum=settings.max_recent_sessions,
             record_type="session",
-            credential=self._token,
+            credential=credential_for_redaction,
         )
         self._recent_events = [
             item
@@ -490,6 +663,9 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             and item.get("auth_mode") == settings.auth_mode
         ]
         self._loaded = True
+        self._configuration_quarantined = (
+            configuration_read_failed or configuration_cleanup_failed
+        )
         self._revision += 1
 
     def _sanitize_stored_records(
@@ -547,6 +723,150 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
                 records.append(record)
         return records
 
+    def _prune_secret_envelopes_locked(self, now: float) -> None:
+        expired = [
+            key_id
+            for key_id, (_private_key, expires_at) in self._secret_envelopes.items()
+            if expires_at <= now
+        ]
+        for key_id in expired:
+            self._secret_envelopes.pop(key_id, None)
+        while len(self._secret_envelopes) >= _SECRET_ENVELOPE_MAX_PENDING:
+            self._secret_envelopes.popitem(last=False)
+
+    async def _issue_secret_envelope(self) -> dict[str, Any]:
+        if (
+            rsa is None
+            or serialization is None
+            or hashes is None
+            or padding is None
+            or AESGCM is None
+        ):
+            raise PolicyError(
+                "密钥加密组件不可用，请重新安装插件依赖",
+                code="secret_encryption_unavailable",
+            )
+        try:
+            private_key = await asyncio.to_thread(
+                rsa.generate_private_key,
+                public_exponent=65537,
+                key_size=2048,
+            )
+            public_bytes = private_key.public_key().public_bytes(
+                encoding=serialization.Encoding.DER,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        except Exception:
+            raise PolicyError(
+                "无法创建一次性设置加密信封，请稍后刷新面板",
+                code="secret_envelope_unavailable",
+            ) from None
+
+        key_id = uuid4().hex
+        with self._envelope_lock:
+            now = time.monotonic()
+            self._prune_secret_envelopes_locked(now)
+            self._secret_envelopes[key_id] = (
+                private_key,
+                now + _SECRET_ENVELOPE_TTL_SECONDS,
+            )
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=_SECRET_ENVELOPE_TTL_SECONDS
+        )
+        return {
+            "key_id": key_id,
+            "public_key_spki_b64": base64.b64encode(public_bytes).decode("ascii"),
+            "algorithm": "RSA-OAEP-256+A256GCM",
+            "expires_at": expires_at.isoformat(timespec="seconds"),
+            "max_plaintext_bytes": _ENCRYPTED_DOCUMENT_MAX_BYTES,
+        }
+
+    async def _consume_encrypted_settings(
+        self,
+        *,
+        encrypted_payload: Any,
+        key_id: Any,
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(key_id, str)
+            or re.fullmatch(r"[0-9a-f]{32}", key_id) is None
+            or not isinstance(encrypted_payload, str)
+            or not 1 <= len(encrypted_payload) <= _ENCRYPTED_PAYLOAD_MAX_CHARS
+        ):
+            raise PolicyError(
+                "设置保存仅接受有效的一次性加密载荷",
+                code="encrypted_settings_required",
+            )
+
+        with self._envelope_lock:
+            now = time.monotonic()
+            self._prune_secret_envelopes_locked(now)
+            envelope = self._secret_envelopes.pop(key_id, None)
+        if envelope is None or envelope[1] <= now:
+            raise PolicyError(
+                "设置加密信封已过期或已使用，请刷新面板后重试",
+                code="secret_envelope_expired_or_used",
+            )
+        private_key = envelope[0]
+        binding = f"{_SECRET_ENVELOPE_BINDING_PREFIX}{key_id}".encode("utf-8")
+
+        try:
+            outer_bytes = base64.b64decode(encrypted_payload, validate=True)
+            if len(outer_bytes) > 393_216:
+                raise ValueError
+            outer = json.loads(outer_bytes)
+            if not isinstance(outer, Mapping) or set(outer) != {
+                "v",
+                "wrapped_key",
+                "iv",
+                "ciphertext",
+            }:
+                raise ValueError
+            if outer.get("v") != 1:
+                raise ValueError
+            encoded_parts = (
+                outer.get("wrapped_key"),
+                outer.get("iv"),
+                outer.get("ciphertext"),
+            )
+            if not all(isinstance(item, str) for item in encoded_parts):
+                raise ValueError
+            wrapped_key = base64.b64decode(encoded_parts[0], validate=True)
+            iv = base64.b64decode(encoded_parts[1], validate=True)
+            ciphertext = base64.b64decode(encoded_parts[2], validate=True)
+            if (
+                not 128 <= len(wrapped_key) <= 512
+                or len(iv) != 12
+                or not 17 <= len(ciphertext) <= _ENCRYPTED_DOCUMENT_MAX_BYTES + 16
+            ):
+                raise ValueError
+
+            def decrypt_payload() -> bytes:
+                content_key = private_key.decrypt(
+                    wrapped_key,
+                    padding.OAEP(
+                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                        algorithm=hashes.SHA256(),
+                        label=binding,
+                    ),
+                )
+                if len(content_key) != 32:
+                    raise ValueError
+                return AESGCM(content_key).decrypt(iv, ciphertext, binding)
+
+            plaintext = await asyncio.to_thread(decrypt_payload)
+            if not 1 <= len(plaintext) <= _ENCRYPTED_DOCUMENT_MAX_BYTES:
+                raise ValueError
+            document = json.loads(plaintext)
+            if not isinstance(document, Mapping):
+                raise ValueError
+            return {str(key): value for key, value in document.items()}
+        except Exception:
+            raise PolicyError(
+                "无法解密设置载荷；它可能已损坏、过期或不属于此插件入口",
+                code="encrypted_settings_invalid",
+            ) from None
+
     async def _store_set(self, key: str, value: Any) -> None:
         if not getattr(self.store, "enabled", False):
             raise PolicyError("PluginStore 未启用，无法安全保存设置", code="store_disabled")
@@ -571,28 +891,42 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
         if not getattr(self.store, "enabled", False):
             return False
         try:
+            if token is None:
+                token_result = await self.store.delete(_TOKEN_KEY)
+                if isinstance(token_result, Err):
+                    return False
             settings_result = await self.store.set(
                 _SETTINGS_KEY,
                 settings.to_store(),
             )
             if isinstance(settings_result, Err):
                 return False
-            if token is None:
-                token_result = await self.store.delete(_TOKEN_KEY)
-            else:
+            if token is not None:
                 token_result = await self.store.set(_TOKEN_KEY, token)
-            return not isinstance(token_result, Err)
+                if isinstance(token_result, Err):
+                    return False
+            return True
         except Exception:
             return False
 
     async def _fail_closed_configuration(self) -> None:
         defaults = ConnectorSettings()
-        await self._restore_configuration_store(defaults, None)
+        restored = await self._restore_configuration_store(defaults, None)
         self._settings = defaults
         self._token = None
         self._policy.update(defaults)
         self._loaded = True
+        self._configuration_quarantined = not restored
         await self._clear_remote_metadata()
+
+    async def _refresh_quarantined_configuration_for_write(self) -> None:
+        if not self._configuration_quarantined:
+            return
+        await self._ensure_loaded(force=True)
+        raise PolicyError(
+            "持久化配置状态刚刚重新读取；请刷新面板确认令牌状态后再保存",
+            code="configuration_refresh_required",
+        )
 
     async def _persist_metadata(self) -> None:
         if not getattr(self.store, "enabled", False):
@@ -852,17 +1186,22 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
                 credential=credential,
             )
         if isinstance(value, Mapping):
-            return {
-                self._redact_output(
+            result: dict[str, Any] = {}
+            for key, item in list(value.items())[:64]:
+                safe_key = self._redact_output(
                     str(key)[:128],
                     credential=credential,
-                ): self._surface_remote_value(
-                    item,
-                    credential=credential,
-                    depth=depth + 1,
                 )
-                for key, item in list(value.items())[:64]
-            }
+                result[safe_key] = (
+                    "[REDACTED]"
+                    if is_sensitive_key(key)
+                    else self._surface_remote_value(
+                        item,
+                        credential=credential,
+                        depth=depth + 1,
+                    )
+                )
+            return result
         if isinstance(value, Sequence) and not isinstance(
             value,
             (bytes, bytearray),
@@ -963,10 +1302,24 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             session.get("machine_id"),
             session.get("updated_at"),
         )
+        provider_text = str(raw_provider or "")[:64].lower()
+        directory_text = str(raw_directory or "")[:4096]
+        safe_provider_text = self._redact_output(
+            provider_text,
+            credential=credential,
+        )
+        safe_directory_text = self._redact_output(
+            directory_text,
+            credential=credential,
+        )
+        sensitive_remote_identity = (
+            safe_provider_text != provider_text
+            or safe_directory_text != directory_text
+        )
         result = {
             "id": session_id,
-            "provider": str(raw_provider or "")[:64].lower(),
-            "directory": str(raw_directory or "")[:4096],
+            "provider": safe_provider_text,
+            "directory": safe_directory_text,
             "status": self._redact_output(
                 str(raw_status or "unknown"),
                 credential=credential,
@@ -987,10 +1340,17 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             ),
             "pending_count": max(0, min(int(session.get("pending_count") or 0), 100)),
         }
-        policy_allowed = True
+        policy_allowed = not sensitive_remote_identity
         try:
+            if not policy_allowed:
+                raise PolicyError(
+                    "HAPI 会话身份字段包含敏感内容",
+                    code="invalid_response",
+                )
             active_policy.validate_provider(result["provider"])
-            result["directory"] = active_policy.validate_workspace(result["directory"])
+            result["directory"] = active_policy.validate_workspace(
+                result["directory"]
+            )
         except (PolicyError, OSError, ValueError):
             policy_allowed = False
         permission_safe = self._permission_mode_is_safe(raw_permission_mode)
@@ -1198,7 +1558,8 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
                     "source": "connector_supported_contract",
                     "session_list_and_detail": True,
                     "session_spawn": True,
-                    "session_messages_and_resume": True,
+                    "session_messages": True,
+                    "session_resume": False,
                     "session_abort": True,
                     "permission_response": True,
                     "sse_events": True,
@@ -1643,22 +2004,11 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
                 target_session_id = str(session["id"])
                 resumed = False
                 if not bool(session.get("active")):
-                    target_session_id = await client.resume_session(
-                        target_session_id,
-                        permission_mode,
+                    raise PolicyError(
+                        "会话当前未运行；HAPI 恢复接口无法原子保证安全权限模式，"
+                        "请先在受信任的 HAPI 客户端中手动恢复并复核权限模式",
+                        code="inactive_session_requires_manual_resume",
                     )
-                    # Resume/reopen can return a new HAPI session ID.  Never
-                    # trust inherited metadata: fetch and authorize it again
-                    # before sending the development instruction.
-                    session, provider, _directory = await self._authorized_session(
-                        target_session_id,
-                        client=client,
-                        policy=operation_policy,
-                        credential=credential,
-                    )
-                    self._require_safe_permission_mode(session)
-                    target_session_id = str(session["id"])
-                    resumed = True
                 await client.send_instruction(target_session_id, safe_instruction)
                 self._notified_completions.pop(target_session_id, None)
                 return self._entry_result(
@@ -2194,28 +2544,40 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
     @plugin_entry(
         id="vibe_coding_save_settings",
         name="保存 Vibe Coding 设置",
-        description="保存经过严格验证的连接器设置；空 token 保留原值。",
+        description=(
+            "消费一次性 RSA-OAEP + AES-GCM 加密载荷并保存连接器设置；"
+            "空 token 保留原值。"
+        ),
         input_schema=SAVE_SETTINGS_SCHEMA,
         timeout=30.0,
     )
     async def save_settings(
         self,
-        settings: Any = None,
-        token: Any = "",
-        clear_token: Any = False,
-        **_: Any,
+        encrypted_payload: str = "",
+        key_id: str = "",
+        **extra: Any,
     ):
-        if not self._settings_update_guard.acquire(blocking=False):
+        unexpected = sorted(key for key in extra if key != "_ctx")
+        if unexpected:
             return _public_error(
                 PolicyError(
-                    "连接设置正在保存，请稍后重试",
-                    code="configuration_busy",
+                    "设置保存只接受一次性加密载荷，请刷新管理面板",
+                    code="encrypted_settings_required",
                 )
             )
-        configuration_claimed = False
-        old_settings = self._settings
-        old_token = self._token
         try:
+            document = await self._consume_encrypted_settings(
+                encrypted_payload=encrypted_payload,
+                key_id=key_id,
+            )
+            if set(document) != {"settings", "token", "clear_token"}:
+                raise PolicyError(
+                    "加密设置文档字段不完整或包含未知字段",
+                    code="invalid_settings",
+                )
+            settings = document.get("settings")
+            token = document.get("token")
+            clear_token = document.get("clear_token")
             if not isinstance(settings, Mapping):
                 raise PolicyError("settings 必须是对象", code="invalid_settings")
             new_settings = ConnectorSettings.from_mapping(settings)
@@ -2226,15 +2588,31 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             if clear_token is not False and clear_token is not True:
                 raise PolicyError("clear_token 必须是布尔值", code="invalid_settings")
             cleaned_token = token.strip()
+        except Exception as exc:
+            return _public_error(exc)
+
+        if not self._settings_update_guard.acquire(blocking=False):
+            return _public_error(
+                PolicyError(
+                    "连接设置正在保存，请稍后重试",
+                    code="configuration_busy",
+                )
+        )
+        configuration_claimed = False
+        try:
+            await self._refresh_quarantined_configuration_for_write()
+            old_settings = self._settings
+            old_token = self._token
             effective_token = (
                 None
                 if clear_token is True
                 else (cleaned_token or self._token)
             )
-            if effective_token and effective_token in json.dumps(
-                new_settings.to_public(),
-                ensure_ascii=False,
-                separators=(",", ":"),
+            public_settings = new_settings.to_public()
+            if any(
+                _value_contains_credential(public_settings, credential)
+                for credential in (old_token, effective_token)
+                if credential
             ):
                 raise PolicyError(
                     "token 不能与任何公开设置文本相同或包含于其中",
@@ -2268,6 +2646,7 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             self._token = effective_token
             self._policy.update(new_settings)
             self._loaded = True
+            self._configuration_quarantined = False
             await self._clear_remote_metadata()
             await self._restart_listener()
             return Ok(
@@ -2300,15 +2679,12 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
                 )
             )
         configuration_claimed = False
-        old_settings = self._settings
-        old_token = self._token
         try:
+            await self._refresh_quarantined_configuration_for_write()
+            old_settings = self._settings
+            old_token = self._token
             defaults = ConnectorSettings()
-            if old_token and old_token in json.dumps(
-                defaults.to_public(),
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ):
+            if _value_contains_credential(defaults.to_public(), old_token):
                 raise PolicyError(
                     "现有 token 与默认公开设置文本冲突；请先明确清除或替换 token",
                     code="invalid_token",
@@ -2336,6 +2712,7 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             self._settings = defaults
             self._policy.update(defaults)
             self._loaded = True
+            self._configuration_quarantined = False
             await self._clear_remote_metadata()
             await self._restart_listener()
             return Ok(
@@ -2368,9 +2745,10 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
                 )
             )
         configuration_claimed = False
-        old_settings = self._settings
-        old_token = self._token
         try:
+            await self._refresh_quarantined_configuration_for_write()
+            old_settings = self._settings
+            old_token = self._token
             self._claim_configuration_change()
             configuration_claimed = True
             await self._clear_remote_metadata(strict=True)
@@ -2392,6 +2770,7 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
                     code="store_rollback_failed",
                 ) from store_exc
             self._token = None
+            self._configuration_quarantined = False
             await self._clear_remote_metadata()
             await self._restart_listener()
             return Ok(
@@ -2426,7 +2805,13 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
 
     async def _panel_state_payload(self) -> dict[str, Any]:
         await self._ensure_loaded()
+        if self._configuration_quarantined:
+            await self._ensure_loaded(force=True)
         reasons: dict[str, str] = {}
+        if self._configuration_quarantined:
+            reasons["settings"] = (
+                "持久化配置暂时无法安全读取；写入保持隔离，请稍后刷新"
+            )
         if not self._settings.allowed_workspace_roots:
             reasons["workspace"] = "尚未配置允许的工作区根目录"
         for name, enabled in (
@@ -2438,10 +2823,18 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             if not enabled:
                 reasons[name] = "此操作尚未在面板启用"
         reasons["auto_approve"] = "危险权限自动批准不可用"
+        try:
+            secret_envelope: dict[str, Any] | None = (
+                await self._issue_secret_envelope()
+            )
+        except PolicyError:
+            secret_envelope = None
+            reasons["settings"] = "浏览器设置加密组件不可用"
         return {
             "summary": "已读取脱敏的 Vibe Coding 管理状态。",
             "settings": self._settings.to_public(),
             "token": self._token_state(),
+            "secret_envelope": secret_envelope,
             "health": dict(self._health),
             "sessions": [dict(item) for item in self._recent_sessions],
             "approvals": [dict(item) for item in self._recent_approvals],
@@ -2458,14 +2851,7 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
         }
 
     def _token_state(self) -> dict[str, Any]:
-        return {
-            "configured": bool(self._token),
-            "last_four": (
-                self._token[-4:]
-                if self._token is not None and len(self._token) >= 8
-                else ""
-            ),
-        }
+        return {"configured": bool(self._token)}
 
     # ------------------------------------------------------------------
     # Background SSE listener, bounded dedupe, and synthesized push
