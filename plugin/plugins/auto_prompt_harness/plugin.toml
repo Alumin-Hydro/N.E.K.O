@@ -1,0 +1,46 @@
+[plugin]
+id = "auto_prompt_harness"
+name = "Auto Prompt Harness"
+description = "本地学习稳定的沟通偏好，并通过受限、低优先级的隐藏上下文提示帮助后续回复更贴合用户。"
+short_description = "Local-first adaptive communication preference guidance."
+keywords = [
+    "偏好",
+    "表达风格",
+    "adaptive",
+    "preference",
+    "prompt",
+    "privacy",
+]
+passive = true
+version = "0.1.0"
+type = "plugin"
+entry = "plugin.plugins.auto_prompt_harness:AutoPromptHarnessPlugin"
+
+[plugin.author]
+name = "N.E.K.O Team"
+
+[plugin.sdk]
+recommended = ">=0.1.0,<0.2.0"
+supported = ">=0.1.0,<0.3.0"
+
+[plugin.store]
+enabled = true
+
+[plugin.i18n]
+default_locale = "zh-CN"
+locales_dir = "i18n"
+
+[plugin.ui]
+enabled = true
+
+[[plugin.ui.panel]]
+id = "main"
+title = "Auto Prompt Harness"
+entry = "static/index.html"
+mode = "static"
+open_in = "iframe"
+permissions = ["state:read", "action:call", "runs:read"]
+
+[plugin_runtime]
+enabled = true
+auto_start = true
