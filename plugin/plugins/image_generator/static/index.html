@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <meta
     http-equiv="Content-Security-Policy"
-    content="default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http: https:; connect-src 'self'"
+    content="default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'"
   >
   <title>图像生成器</title>
   <style>
@@ -1075,7 +1075,7 @@
           <div class="card-header">
             <div>
               <h2 id="settingsTitle" data-i18n="settings.title">服务与生成设置</h2>
-              <p data-i18n="settings.subtitle">密钥仅写入插件安全存储；面板永远不会读取或回显完整密钥。</p>
+              <p data-i18n="settings.subtitle">完整保存内容会在浏览器中使用短时一次性公钥信封加密；任务参数只包含密文。</p>
             </div>
             <span id="apiStatusPill" class="status-pill" data-state="unknown">
               <span id="apiStatusText" data-i18n="badge.unknown">状态未知</span>
@@ -1095,14 +1095,13 @@
                   placeholder="https://api.openai.com/v1"
                   required
                 >
-                <p class="field-help" data-i18n="help.api_base_url">将自动调用该地址下的 /images/generations。</p>
+                <p class="field-help" data-i18n="help.api_base_url">将自动调用该地址下的 /images/generations；仅回环开发地址可使用 HTTP。</p>
               </div>
 
               <div class="field field-wide">
                 <label for="apiKey" data-i18n="field.api_key">API 密钥</label>
                 <input
                   id="apiKey"
-                  name="api_key"
                   type="password"
                   maxlength="4096"
                   autocomplete="new-password"
@@ -1111,7 +1110,7 @@
                   data-lpignore="true"
                 >
                 <p id="apiKeyHelp" class="field-help" data-tone="secure" data-i18n="help.api_key_empty">
-                  留空会保留现有密钥。密钥不会显示在面板、生成记录或调用结果中。
+                  浏览器会先加密密钥再提交；明文不会进入任务参数、日志或调用结果。
                 </p>
               </div>
 
@@ -1131,10 +1130,8 @@
               </div>
 
               <div class="field">
-                <label for="responseFormat" data-i18n="field.response_format">返回传输方式</label>
+                <label for="responseFormat" data-i18n="field.response_format">提供商响应（仅 b64_json）</label>
                 <select id="responseFormat" name="response_format" required>
-                  <option value="auto">auto</option>
-                  <option value="url">url</option>
                   <option value="b64_json">b64_json</option>
                 </select>
               </div>
@@ -1168,7 +1165,7 @@
 
               <div class="field">
                 <label for="defaultStyle" data-i18n="field.default_style">默认风格</label>
-                <select id="defaultStyle" name="default_style" required></select>
+                <select id="defaultStyle" name="default_style"></select>
               </div>
 
               <div class="field">
@@ -1180,7 +1177,7 @@
               </div>
 
               <div class="field">
-                <label for="maxDownloadMiB" data-i18n="field.max_download">单图下载上限</label>
+                <label for="maxDownloadMiB" data-i18n="field.max_download">单图 Base64 响应上限</label>
                 <div class="input-unit">
                   <input id="maxDownloadMiB" name="max_download_mib" type="number" min="0.001" max="50" step="0.001" required>
                   <span>MiB</span>
@@ -1283,7 +1280,7 @@
           <div class="card-header">
             <div>
               <h2 id="activityTitle" data-i18n="activity.title">最近生成</h2>
-              <p data-i18n="activity.subtitle">仅保存摘要与链接，不保存密钥或完整 Base64 数据。</p>
+              <p data-i18n="activity.subtitle">仅保存摘要与同源缓存链接，不保存密钥、远程链接或完整 Base64 数据。</p>
             </div>
             <button id="historyRefreshButton" class="button button-ghost" type="button">
               <span aria-hidden="true">↻</span>
@@ -1324,6 +1321,9 @@
       const GENERATION_RUN_TIMEOUT_MS = 300000;
       const EXPORT_RETRIES = 4;
       const MAX_ERROR_TEXT = 420;
+      const SECRET_ENVELOPE_ALGORITHM = 'RSA-OAEP-256+A256GCM';
+      const SECRET_ENVELOPE_BINDING_PREFIX = `${PLUGIN_ID}:`;
+      const GENERATED_ASSET_PREFIX = `/plugin/${PLUGIN_ID}/ui/generated/`;
       const SUPPORTED_LOCALES = Object.freeze(['zh-CN', 'zh-TW', 'en', 'ja', 'ko', 'es', 'pt', 'ru']);
       const LOCALE_ALIASES = Object.freeze({
         zh: 'zh-CN',
@@ -1336,7 +1336,6 @@
       let currentState = {};
       let busyCount = 0;
       let toastTimer = 0;
-      let transientSecret = '';
 
       const ids = [
         'connectionBadge', 'connectionText', 'refreshButton',
@@ -1459,9 +1458,6 @@
 
       function redactText(value) {
         let text = String(value || '');
-        if (transientSecret && transientSecret.length >= 4) {
-          text = text.split(transientSecret).join('[redacted]');
-        }
         text = text
           .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
           .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, 'sk-[redacted]')
@@ -1618,6 +1614,119 @@
         return fallback;
       }
 
+      function decodeBase64(value) {
+        const normalized = String(value || '').trim();
+        if (!normalized || normalized.length > 16384
+          || !/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)
+          || normalized.length % 4 !== 0) {
+          throw new Error(t('error.secret_envelope', '安全密钥信封无效，请刷新面板后重试'));
+        }
+        try {
+          const binary = window.atob(normalized);
+          const result = new Uint8Array(binary.length);
+          for (let index = 0; index < binary.length; index += 1) {
+            result[index] = binary.charCodeAt(index);
+          }
+          return result;
+        } catch (_) {
+          throw new Error(t('error.secret_envelope', '安全密钥信封无效，请刷新面板后重试'));
+        }
+      }
+
+      function encodeBase64(value) {
+        const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+        }
+        return window.btoa(binary);
+      }
+
+      function envelopeExpiryMillis(value) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          return value < 1e12 ? value * 1000 : value;
+        }
+        const parsed = Date.parse(String(value || ''));
+        return Number.isFinite(parsed) ? parsed : 0;
+      }
+
+      async function encryptSavePayload(savePayload) {
+        const envelope = currentState.secret_envelope;
+        if (!envelope || typeof envelope !== 'object'
+          || envelope.algorithm !== SECRET_ENVELOPE_ALGORITHM
+          || typeof envelope.key_id !== 'string'
+          || !/^[0-9a-f]{32}$/.test(envelope.key_id)
+          || typeof envelope.public_key_spki_b64 !== 'string'
+          || envelopeExpiryMillis(envelope.expires_at) <= Date.now()) {
+          throw new Error(t('error.secret_envelope', '安全密钥信封已失效，请刷新面板后重试'));
+        }
+        if (!window.crypto || !window.crypto.subtle || typeof TextEncoder === 'undefined') {
+          throw new Error(t('error.secret_encrypt', '当前浏览器无法安全加密设置内容'));
+        }
+
+        const encoder = new TextEncoder();
+        const plaintext = encoder.encode(JSON.stringify(savePayload));
+        const maxBytes = Math.max(
+          1,
+          Math.min(65536, numberValue(envelope.max_plaintext_bytes, 32768)),
+        );
+        if (!plaintext.length || plaintext.length > maxBytes) {
+          throw new Error(t('error.secret_too_large', '设置内容超过安全信封允许的长度'));
+        }
+
+        let rawContentKey = null;
+        try {
+          const publicKey = await window.crypto.subtle.importKey(
+            'spki',
+            decodeBase64(envelope.public_key_spki_b64),
+            { name: 'RSA-OAEP', hash: 'SHA-256' },
+            false,
+            ['encrypt'],
+          );
+          const contentKey = await window.crypto.subtle.generateKey(
+            { name: 'AES-GCM', length: 256 },
+            true,
+            ['encrypt'],
+          );
+          rawContentKey = new Uint8Array(
+            await window.crypto.subtle.exportKey('raw', contentKey),
+          );
+          const iv = window.crypto.getRandomValues(new Uint8Array(12));
+          const additionalData = encoder.encode(
+            `${SECRET_ENVELOPE_BINDING_PREFIX}${envelope.key_id}`,
+          );
+          const ciphertext = new Uint8Array(
+            await window.crypto.subtle.encrypt(
+              { name: 'AES-GCM', iv, additionalData },
+              contentKey,
+              plaintext,
+            ),
+          );
+          const wrappedKey = new Uint8Array(
+            await window.crypto.subtle.encrypt(
+              { name: 'RSA-OAEP', label: additionalData },
+              publicKey,
+              rawContentKey,
+            ),
+          );
+          const payload = {
+            v: 1,
+            wrapped_key: encodeBase64(wrappedKey),
+            iv: encodeBase64(iv),
+            ciphertext: encodeBase64(ciphertext),
+          };
+          return {
+            encrypted_payload: encodeBase64(encoder.encode(JSON.stringify(payload))),
+            key_id: envelope.key_id,
+          };
+        } catch (_) {
+          throw new Error(t('error.secret_encrypt', '无法安全加密设置内容，请刷新面板后重试'));
+        } finally {
+          plaintext.fill(0);
+          if (rawContentKey) rawContentKey.fill(0);
+        }
+      }
+
       function updateActionAvailability() {
         if (!elements.testButton || !elements.clearKeyButton) return;
         const running = boolValue(currentState.running, false);
@@ -1731,22 +1840,48 @@
         }
       }
 
-      function safeUrl(value) {
+      function safeGeneratedAssetUrl(value) {
         const raw = String(value || '').trim();
         if (!raw || raw.length > 4096) return '';
         try {
           const parsed = new URL(raw, location.href);
-          if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+          if (parsed.origin !== location.origin
+            || parsed.username
+            || parsed.password
+            || parsed.search
+            || parsed.hash
+            || !parsed.pathname.startsWith(GENERATED_ASSET_PREFIX)) {
+            return '';
+          }
+          const filename = parsed.pathname.slice(GENERATED_ASSET_PREFIX.length);
+          if (!/^[0-9a-f]{32}\.(?:png|jpg|webp)$/.test(filename)) {
+            return '';
+          }
           return parsed.href;
         } catch (_) {
           return '';
         }
       }
 
-      function safeAbsoluteHttpUrl(value) {
+      function isLoopbackHostname(value) {
+        const hostname = String(value || '').toLowerCase();
+        if (hostname === 'localhost' || hostname === '[::1]' || hostname === '::1') return true;
+        const match = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(hostname);
+        return Boolean(match && match.slice(1).every((octet) => Number(octet) <= 255));
+      }
+
+      function safeApiBaseUrl(value) {
         const raw = String(value || '').trim();
         if (!/^https?:\/\//i.test(raw)) return '';
-        return safeUrl(raw);
+        try {
+          const parsed = new URL(raw);
+          if (parsed.username || parsed.password || parsed.search || parsed.hash) return '';
+          if (parsed.protocol === 'https:') return parsed.href;
+          if (parsed.protocol === 'http:' && isLoopbackHostname(parsed.hostname)) return parsed.href;
+          return '';
+        } catch (_) {
+          return '';
+        }
       }
 
       function statusName(status) {
@@ -1774,7 +1909,7 @@
       }
 
       function historyUrl(item) {
-        return safeUrl(
+        return safeGeneratedAssetUrl(
           valueFrom(item, 'result_url',
             valueFrom(item, 'image_url',
               valueFrom(item, 'display_url', valueFrom(item, 'url', '')))),
@@ -1899,10 +2034,7 @@
         elements.outputFormat.value = ['auto', 'png', 'jpeg', 'webp'].includes(outputFormat)
           ? outputFormat
           : 'auto';
-        const responseFormat = String(get('response_format', 'auto')).slice(0, 24);
-        elements.responseFormat.value = ['auto', 'url', 'b64_json'].includes(responseFormat)
-          ? responseFormat
-          : 'auto';
+        elements.responseFormat.value = 'b64_json';
 
         const sizes = parseList(get('allowed_sizes', ['1024x1024']));
         const qualities = parseList(get('allowed_qualities', ['standard']));
@@ -1927,17 +2059,12 @@
         elements.autoShow.checked = boolValue(get('auto_show_in_chat', true), true);
 
         const configured = boolValue(state.api_key_configured, false);
-        const hint = String(state.api_key_hint || '').slice(-12);
         elements.apiKey.placeholder = configured
-          ? t('placeholder.api_key_configured', '已配置 {hint}；留空保留', {
-            hint: hint || t('badge.configured', '已配置'),
-          })
+          ? t('placeholder.api_key_configured', '已安全配置；留空保留')
           : t('placeholder.api_key', '输入 API 密钥');
         elements.apiKeyHelp.textContent = configured
-          ? t('help.api_key_configured', '已有密钥 {hint}。输入新密钥可替换，留空会保留。', {
-            hint: hint || '',
-          })
-          : t('help.api_key_empty', '留空会保留现有密钥。密钥不会显示在面板、生成记录或调用结果中。');
+          ? t('help.api_key_configured', '已有密钥。新密钥会在浏览器中加密后替换；留空会保留。')
+          : t('help.api_key_empty', '浏览器会先加密密钥再提交；明文不会进入任务参数、日志或调用结果。');
       }
 
       function renderLastRequest(value) {
@@ -1988,9 +2115,8 @@
         elements.credentialValue.textContent = configured
           ? t('badge.configured', '已配置')
           : t('badge.unconfigured', '未配置');
-        const hint = String(currentState.api_key_hint || '').slice(-12);
         elements.credentialDetail.textContent = configured
-          ? t('stat.key_hint', '安全尾号 {hint}', { hint: hint || '••••' })
+          ? t('stat.key_hint', '凭据已安全保存')
           : t('stat.key_missing', '生成前需要保存 API 密钥');
 
         elements.cacheValue.textContent = formatBytes(cacheBytes);
@@ -2026,12 +2152,25 @@
 
       function positiveNumber(input, fallback, integer = false) {
         const parsed = Number(input.value);
-        if (!Number.isFinite(parsed) || parsed <= 0) {
-          throw new Error(t('error.invalid_number', '{field} 必须是大于 0 的数字', {
+        const violatesConstraint = input.validity && input.validity.valid === false;
+        if (!Number.isFinite(parsed)
+          || parsed <= 0
+          || violatesConstraint
+          || (integer && !Number.isInteger(parsed))) {
+          throw new Error(t('error.invalid_numeric_constraint', '{field} 必须符合允许的范围和步进值', {
             field: input.labels && input.labels[0] ? input.labels[0].textContent : input.name,
           }));
         }
-        return integer ? Math.round(parsed) : parsed;
+        return parsed;
+      }
+
+      function validateCacheCapacity(maxDownloadBytes, cacheMaxBytes) {
+        if (cacheMaxBytes < maxDownloadBytes) {
+          throw new Error(t(
+            'error.cache_too_small',
+            '缓存容量上限不能小于单图响应上限',
+          ));
+        }
       }
 
       function collectSettings() {
@@ -2048,19 +2187,24 @@
         }
 
         const baseUrl = elements.apiBaseUrl.value.trim();
-        if (!safeAbsoluteHttpUrl(baseUrl)) {
-          throw new Error(t('error.invalid_api_url', 'API 基础地址必须是有效的 HTTP 或 HTTPS 地址'));
+        if (!safeApiBaseUrl(baseUrl)) {
+          throw new Error(t('error.invalid_api_url', 'API 基础地址必须使用 HTTPS；仅回环开发地址可使用 HTTP'));
         }
         const model = elements.model.value.trim();
         const outputFormat = elements.outputFormat.value.trim();
         if (!model || !outputFormat) {
           throw new Error(t('error.required_fields', '请填写 API 地址、模型和输出格式'));
         }
+        const maxDownloadBytes = Math.round(
+          positiveNumber(elements.maxDownloadMiB, 10) * 1024 * 1024,
+        );
+        const cacheMaxBytes = Math.round(
+          positiveNumber(elements.cacheMaxMiB, 100) * 1024 * 1024,
+        );
+        validateCacheCapacity(maxDownloadBytes, cacheMaxBytes);
 
         return {
           api_base_url: baseUrl,
-          api_key: elements.apiKey.value,
-          clear_api_key: false,
           model,
           default_size: elements.defaultSize.value,
           default_quality: elements.defaultQuality.value,
@@ -2069,11 +2213,11 @@
           allowed_qualities: allowedQualities,
           allowed_styles: allowedStyles,
           output_format: outputFormat,
-          response_format: elements.responseFormat.value,
+          response_format: 'b64_json',
           timeout_seconds: positiveNumber(elements.timeoutSeconds, 120),
-          max_download_bytes: Math.round(positiveNumber(elements.maxDownloadMiB, 10) * 1024 * 1024),
+          max_download_bytes: maxDownloadBytes,
           cache_max_count: positiveNumber(elements.cacheMaxCount, 20, true),
-          cache_max_bytes: Math.round(positiveNumber(elements.cacheMaxMiB, 100) * 1024 * 1024),
+          cache_max_bytes: cacheMaxBytes,
           history_limit: positiveNumber(elements.historyLimit, 30, true),
           auto_show_in_chat: elements.autoShow.checked,
         };
@@ -2101,6 +2245,8 @@
       async function saveSettings(event) {
         event.preventDefault();
         let args;
+        const pendingCredential = elements.apiKey.value;
+        elements.apiKey.value = '';
         try {
           syncSelects();
           args = collectSettings();
@@ -2109,23 +2255,30 @@
           return;
         }
 
-        transientSecret = String(args.api_key || '');
-        elements.apiKey.value = '';
         setBusy(true);
         try {
-          const result = await callPlugin('save_settings', args);
-          args.api_key = '';
-          if (result && result.settings) {
-            renderState({ ...currentState, ...result }, { populateForm: true });
-          } else {
+          let encryptedArgs;
+          try {
+            encryptedArgs = await encryptSavePayload({
+              ...args,
+              api_key: pendingCredential,
+              clear_api_key: false,
+            });
+          } catch (error) {
+            showToast(errorMessage(error), 'error');
             await refreshState();
+            return;
           }
+          const result = await callPlugin('save_settings', encryptedArgs);
+          if (!result || typeof result !== 'object') {
+            throw new Error(t('error.empty_result', '插件未返回可读取的结果'));
+          }
+          await refreshState();
           showToast(t('status.saved', '设置已保存'), 'success');
         } catch (error) {
-          showToast(errorMessage(error), 'error');
+          showToast(t('error.plugin_call', '设置保存失败，请刷新面板后重试'), 'error');
+          await refreshState();
         } finally {
-          args.api_key = '';
-          transientSecret = '';
           elements.apiKey.value = '';
           setBusy(false);
         }
@@ -2201,7 +2354,7 @@
       }
 
       function showTestResult(result) {
-        const url = safeUrl(
+        const url = safeGeneratedAssetUrl(
           valueFrom(result, 'result_url',
             valueFrom(result, 'image_url',
               valueFrom(result, 'display_url', valueFrom(result, 'url', '')))),

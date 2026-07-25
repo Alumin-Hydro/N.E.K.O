@@ -1,0 +1,11 @@
+[project]
+name = "neko-image-generator-plugin"
+version = "0.1.0"
+description = "Secure OpenAI-compatible image generation for N.E.K.O."
+requires-python = "==3.11.*"
+# N.E.K.O 0.8.3 supplies the cross-platform Pillow and cryptography runtime
+# dependencies. Keeping them transitive avoids packaging one platform's native
+# wheels in this built-in plugin archive.
+dependencies = [
+    "N.E.K.O>=0.8.3",
+]

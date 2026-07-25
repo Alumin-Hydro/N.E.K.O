@@ -12,22 +12,39 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import io
 import ipaddress
 import json
 import math
 import os
 import re
-import shutil
-import socket
 import threading
-from collections.abc import Mapping
-from datetime import datetime, timezone
+import time
+import warnings
+from collections import OrderedDict
+from collections.abc import Iterable, Mapping
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import ParseResult, quote, urljoin, urlparse
+from urllib.parse import ParseResult, quote, urlparse
 from uuid import uuid4
 
 import httpx
+
+try:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ImportError:  # pragma: no cover - packaged dependency failure
+    AESGCM = None  # type: ignore[assignment,misc]
+    hashes = padding = rsa = serialization = None  # type: ignore[assignment]
+
+try:
+    from PIL import Image, ImageOps, UnidentifiedImageError
+except ImportError:  # pragma: no cover - packaged dependency failure
+    Image = None  # type: ignore[assignment]
+    ImageOps = None  # type: ignore[assignment]
+    UnidentifiedImageError = OSError  # type: ignore[assignment,misc]
 
 from plugin.sdk.plugin import (
     Err,
@@ -58,7 +75,19 @@ _REVISED_PROMPT_MAX_CHARS = 2_000
 _MODEL_MAX_CHARS = 128
 _URL_MAX_CHARS = 4_096
 _API_KEY_MAX_CHARS = 4_096
-_MAX_REDIRECTS = 3
+_API_KEY_MAX_BYTES = 16_384
+_ENCRYPTED_DOCUMENT_MAX_BYTES = 32_768
+_ENCRYPTED_PAYLOAD_MAX_CHARS = 65_536
+_SECRET_ENVELOPE_TTL_SECONDS = 300
+_SECRET_ENVELOPE_MAX_PENDING = 8
+_KNOWN_SECRET_MAX_COUNT = 8
+_MAX_IMAGE_DIMENSION = 8_192
+_MAX_IMAGE_PIXELS = 33_554_432
+_SUPPORTED_IMAGE_FORMATS: dict[str, tuple[str, str]] = {
+    "PNG": ("image/png", "png"),
+    "JPEG": ("image/jpeg", "jpg"),
+    "WEBP": ("image/webp", "webp"),
+}
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "api_base_url": "https://api.openai.com/v1",
@@ -80,8 +109,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "allowed_styles": ["", "auto", "vivid", "natural"],
     # Exact OpenAI image file format; "auto" lets the provider choose.
     "output_format": "auto",
-    # Compatibility transport selector. "auto" accepts URL or Base64 output.
-    "response_format": "auto",
+    # Security policy: remote provider URLs are never fetched server-side.
+    "response_format": "b64_json",
     "timeout_seconds": 120.0,
     "max_download_bytes": 20 * 1024 * 1024,
     "cache_max_count": 20,
@@ -158,93 +187,31 @@ _TEST_GENERATION_SCHEMA: dict[str, Any] = {
 _SAVE_SETTINGS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "api_base_url": {"type": "string", "maxLength": _URL_MAX_CHARS},
-        "api_key": {
+        "encrypted_payload": {
             "type": "string",
-            "maxLength": _API_KEY_MAX_CHARS,
-            "description": "留空保留原密钥；此值只会写入 PluginStore。",
+            "minLength": 1,
+            "maxLength": _ENCRYPTED_PAYLOAD_MAX_CHARS,
+            "writeOnly": True,
+            "x-sensitive": True,
+            "description": "一次性 RSA-OAEP + AES-GCM 加密的完整设置文档。",
         },
-        "clear_api_key": {"type": "boolean", "default": False},
-        "model": {"type": "string", "maxLength": _MODEL_MAX_CHARS},
-        "default_size": {"type": "string", "maxLength": 32},
-        "default_quality": {"type": "string", "maxLength": 32},
-        "default_style": {"type": "string", "maxLength": 32},
-        "allowed_sizes": {
-            "type": "array",
-            "items": {"type": "string", "maxLength": 32},
-            "minItems": 1,
-            "maxItems": 24,
-        },
-        "allowed_qualities": {
-            "type": "array",
-            "items": {"type": "string", "maxLength": 32},
-            "minItems": 1,
-            "maxItems": 24,
-        },
-        "allowed_styles": {
-            "type": "array",
-            "items": {"type": "string", "maxLength": 32},
-            "minItems": 1,
-            "maxItems": 24,
-        },
-        "output_format": {
+        "key_id": {
             "type": "string",
-            "enum": ["auto", "png", "jpeg", "webp"],
+            "minLength": 32,
+            "maxLength": 32,
+            "pattern": "^[0-9a-f]{32}$",
         },
-        "response_format": {
-            "type": "string",
-            "enum": ["auto", "url", "b64_json"],
-        },
-        "timeout_seconds": {"type": "number", "minimum": 5, "maximum": 240},
-        "max_download_bytes": {
-            "type": "integer",
-            "minimum": 1024,
-            "maximum": 52_428_800,
-        },
-        "cache_max_count": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 100,
-        },
-        "cache_max_bytes": {
-            "type": "integer",
-            "minimum": 1024,
-            "maximum": 1_073_741_824,
-        },
-        "history_limit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 100,
-        },
-        "auto_show_in_chat": {"type": "boolean"},
     },
-    "required": [
-        "api_base_url",
-        "model",
-        "default_size",
-        "default_quality",
-        "default_style",
-        "allowed_sizes",
-        "allowed_qualities",
-        "allowed_styles",
-        "output_format",
-        "response_format",
-        "timeout_seconds",
-        "max_download_bytes",
-        "cache_max_count",
-        "cache_max_bytes",
-        "history_limit",
-        "auto_show_in_chat",
-    ],
+    "required": ["encrypted_payload", "key_id"],
     "additionalProperties": False,
 }
 
 _SIZE_PATTERN = re.compile(r"^(?:auto|[1-9][0-9]{1,4}x[1-9][0-9]{1,4})$")
 _OPTION_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{1,32}$")
 _MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\-]{0,127}$")
-_GENERATED_FILE_PATTERN = re.compile(r"^[0-9a-f]{32}\.(?:png|jpg|gif|webp)$")
+_GENERATED_FILE_PATTERN = re.compile(r"^[0-9a-f]{32}\.(?:png|jpg|webp)$")
 _GENERATED_TEMP_FILE_PATTERN = re.compile(
-    r"^\.[0-9a-f]{32}\.(?:png|jpg|gif|webp)\.[0-9a-f]{32}\.tmp$"
+    r"^\.[0-9a-f]{32}\.(?:png|jpg|webp)\.[0-9a-f]{32}\.tmp$"
 )
 _BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=\-]{8,}")
 _KEY_LIKE_PATTERN = re.compile(r"(?i)\bsk-[A-Za-z0-9_\-]{8,}")
@@ -279,10 +246,33 @@ def _clean_text(
     return cleaned[:max_chars]
 
 
-def _redact_text(value: Any, api_key: str = "", *, max_chars: int) -> str:
+def _secret_values(
+    values: str | Iterable[str] | None,
+) -> tuple[str, ...]:
+    if isinstance(values, str):
+        candidates = (values,)
+    elif values is None:
+        candidates = ()
+    else:
+        candidates = tuple(item for item in values if isinstance(item, str))
+    return tuple(
+        sorted(
+            {item for item in candidates if item},
+            key=len,
+            reverse=True,
+        )
+    )
+
+
+def _redact_text(
+    value: Any,
+    secrets: str | Iterable[str] | None = None,
+    *,
+    max_chars: int,
+) -> str:
     text = str(value or "")
-    if api_key:
-        text = text.replace(api_key, "[REDACTED]")
+    for secret in _secret_values(secrets):
+        text = text.replace(secret, "[REDACTED]")
     text = _BEARER_PATTERN.sub("Bearer [REDACTED]", text)
     text = _KEY_LIKE_PATTERN.sub("[REDACTED]", text)
     text = _CONTROL_PATTERN.sub(" ", text).strip()
@@ -299,33 +289,59 @@ def _validate_api_key(value: Any) -> str:
         raise SdkError("API 密钥长度过短")
     if any(ch.isspace() for ch in key):
         raise SdkError("API 密钥不能包含空白字符")
+    if len(key.encode("utf-8")) > _API_KEY_MAX_BYTES:
+        raise SdkError("API 密钥编码后过长")
     return key
+
+
+def _value_contains_secret(
+    value: Any,
+    secrets: str | Iterable[str] | None,
+) -> bool:
+    candidates = _secret_values(secrets)
+    if not candidates:
+        return False
+    if isinstance(value, str):
+        return any(secret in value for secret in candidates)
+    if isinstance(value, Mapping):
+        return any(
+            _value_contains_secret(key, candidates)
+            or _value_contains_secret(item, candidates)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_value_contains_secret(item, candidates) for item in value)
+    return False
 
 
 def _settings_contain_secret(
     settings: Mapping[str, Any],
-    secret: str,
+    secrets: str | Iterable[str] | None,
 ) -> bool:
-    if not secret:
-        return False
-    for value in settings.values():
-        if isinstance(value, str) and secret in value:
-            return True
-        if isinstance(value, list) and any(
-            isinstance(item, str) and secret in item for item in value
-        ):
-            return True
-    return False
+    return _value_contains_secret(settings, secrets)
 
 
-def _api_key_hint(api_key: str) -> str | None:
-    if not api_key:
-        return None
-    suffix = "".join(
-        char if char.isascii() and (char.isalnum() or char in {"-", "_"}) else "•"
-        for char in api_key[-4:]
-    )
-    return f"••••{suffix}"
+def _redact_structure(
+    value: Any,
+    secrets: str | Iterable[str] | None,
+) -> Any:
+    if isinstance(value, str):
+        return _redact_text(value, secrets, max_chars=_URL_MAX_CHARS)
+    if isinstance(value, Mapping):
+        return {
+            _redact_text(key, secrets, max_chars=128): _redact_structure(
+                item,
+                secrets,
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_structure(item, secrets) for item in value[:100]]
+    if isinstance(value, tuple):
+        return [_redact_structure(item, secrets) for item in value[:100]]
+    if isinstance(value, (bool, int, float)) or value is None:
+        return value
+    return _redact_text(value, secrets, max_chars=256)
 
 
 def _parse_http_url(value: str) -> ParseResult | None:
@@ -346,6 +362,16 @@ def _parse_http_url(value: str) -> ParseResult | None:
     return parsed
 
 
+def _is_loopback_hostname(value: Any) -> bool:
+    hostname = str(value or "").strip().lower()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
 def _normalize_api_base_url(value: Any) -> str:
     if not isinstance(value, str):
         raise SdkError("API Base URL 必须是文本")
@@ -359,6 +385,9 @@ def _normalize_api_base_url(value: Any) -> str:
     parsed = _parse_http_url(text)
     if parsed is None or parsed.query or parsed.fragment or parsed.params:
         raise SdkError("API Base URL 必须是无账号、查询参数或片段的 http(s) 地址")
+    if parsed.scheme.lower() == "http":
+        if not _is_loopback_hostname(parsed.hostname):
+            raise SdkError("公开 API Base URL 必须使用 HTTPS；HTTP 仅允许回环开发地址")
     path = parsed.path.rstrip("/")
     normalized = parsed._replace(
         scheme=parsed.scheme.lower(),
@@ -368,26 +397,6 @@ def _normalize_api_base_url(value: Any) -> str:
         fragment="",
     ).geturl()
     return normalized.rstrip("/")
-
-
-def _validate_output_url(value: Any) -> str:
-    if not isinstance(value, str) or len(value) > _URL_MAX_CHARS:
-        raise _GenerationFailure(
-            "图片服务返回的图片地址过长或格式无效",
-            "UnsafeImageUrl",
-        )
-    text = _clean_text(
-        value,
-        label="图片 URL",
-        max_chars=_URL_MAX_CHARS,
-    )
-    parsed = _parse_http_url(text)
-    if parsed is None or parsed.fragment:
-        raise _GenerationFailure(
-            "图片服务返回了不安全或无效的图片地址",
-            "UnsafeImageUrl",
-        )
-    return text
 
 
 def _origin_tuple(url: str) -> tuple[str, str, int | None] | None:
@@ -400,51 +409,6 @@ def _origin_tuple(url: str) -> tuple[str, str, int | None] | None:
         str(parsed.hostname or "").lower(),
         parsed.port or default_port,
     )
-
-
-def _is_public_unicast_ip(
-    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
-) -> bool:
-    return (
-        ip.is_global
-        and not ip.is_multicast
-        and not ip.is_reserved
-        and not ip.is_loopback
-        and not ip.is_link_local
-        and not ip.is_private
-        and not ip.is_unspecified
-    )
-
-
-def _url_resolves_to_public_unicast(url: str) -> bool:
-    parsed = _parse_http_url(url)
-    if parsed is None:
-        return False
-    hostname = str(parsed.hostname or "").strip().lower()
-    if not hostname or hostname == "localhost" or hostname.endswith(".localhost"):
-        return False
-    try:
-        literal = ipaddress.ip_address(hostname)
-    except ValueError:
-        literal = None
-    if literal is not None:
-        return _is_public_unicast_ip(literal)
-
-    try:
-        records = socket.getaddrinfo(
-            hostname,
-            parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
-            type=socket.SOCK_STREAM,
-        )
-    except Exception:
-        return False
-    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
-    for _family, _socktype, _proto, _canonname, sockaddr in records:
-        try:
-            addresses.append(ipaddress.ip_address(sockaddr[0]))
-        except (ValueError, TypeError):
-            return False
-    return bool(addresses) and all(_is_public_unicast_ip(ip) for ip in addresses)
 
 
 def _normalize_option_list(
@@ -605,8 +569,8 @@ def _validate_settings(
             label="响应格式",
             max_chars=16,
         ).lower()
-        if response_format not in {"auto", "url", "b64_json"}:
-            raise SdkError("响应格式必须是 auto、url 或 b64_json")
+        if response_format != "b64_json":
+            raise SdkError("为防止服务端 URL 抓取风险，响应格式必须是 b64_json")
         result["response_format"] = response_format
 
     if "timeout_seconds" in raw:
@@ -677,19 +641,151 @@ def _normalize_manifest_settings(raw: Any) -> dict[str, Any]:
     )
 
 
+def _require_image_dependency() -> None:
+    if Image is None or ImageOps is None:
+        raise _GenerationFailure(
+            "图片安全验证组件不可用，请重新安装插件依赖",
+            "ImageDependencyUnavailable",
+        )
+
+
+def _verified_image_format(data: bytes) -> str:
+    _require_image_dependency()
+    if not data:
+        raise _GenerationFailure(
+            "图片服务返回了空图片",
+            "InvalidImageData",
+        )
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as image:
+                image_format = str(image.format or "").upper()
+                width, height = image.size
+                if image_format not in _SUPPORTED_IMAGE_FORMATS:
+                    raise _GenerationFailure(
+                        "图片服务返回的图片格式不受支持；仅允许 PNG、JPEG 或 WebP",
+                        "UnsupportedImageFormat",
+                    )
+                if (
+                    width < 1
+                    or height < 1
+                    or width > _MAX_IMAGE_DIMENSION
+                    or height > _MAX_IMAGE_DIMENSION
+                    or width * height > _MAX_IMAGE_PIXELS
+                ):
+                    raise _GenerationFailure(
+                        "生成图片的尺寸或像素数量超过安全上限",
+                        "ImagePixelLimit",
+                    )
+                if int(getattr(image, "n_frames", 1) or 1) != 1:
+                    raise _GenerationFailure(
+                        "暂不支持动画图片",
+                        "AnimatedImageUnsupported",
+                    )
+                image.verify()
+            with Image.open(io.BytesIO(data)) as decoded:
+                width, height = decoded.size
+                if (
+                    width < 1
+                    or height < 1
+                    or width > _MAX_IMAGE_DIMENSION
+                    or height > _MAX_IMAGE_DIMENSION
+                    or width * height > _MAX_IMAGE_PIXELS
+                ):
+                    raise _GenerationFailure(
+                        "生成图片的尺寸或像素数量超过安全上限",
+                        "ImagePixelLimit",
+                    )
+                decoded.seek(0)
+                decoded.load()
+    except _GenerationFailure:
+        raise
+    except (
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+        UnidentifiedImageError,
+        OSError,
+        SyntaxError,
+        ValueError,
+    ):
+        raise _GenerationFailure(
+            "图片服务返回了损坏、截断或尺寸不安全的图片",
+            "InvalidImageData",
+        ) from None
+    return image_format
+
+
 def _image_type(data: bytes) -> tuple[str, str]:
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png", "png"
-    if len(data) >= 3 and data[:3] == b"\xff\xd8\xff":
-        return "image/jpeg", "jpg"
-    if data.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif", "gif"
-    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp", "webp"
-    raise _GenerationFailure(
-        "图片服务返回的内容不是受支持的 PNG、JPEG、GIF 或 WebP 图片",
-        "InvalidImageData",
-    )
+    image_format = _verified_image_format(data)
+    return _SUPPORTED_IMAGE_FORMATS[image_format]
+
+
+def _sanitize_image(
+    data: bytes,
+    *,
+    max_bytes: int,
+) -> tuple[bytes, str, str]:
+    if len(data) > max_bytes:
+        raise _GenerationFailure(
+            "生成图片超过了配置的最大字节数",
+            "ImageTooLarge",
+        )
+    image_format = _verified_image_format(data)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as image:
+                image.seek(0)
+                image.load()
+                output = io.BytesIO()
+                if image_format == "JPEG":
+                    sanitized = ImageOps.exif_transpose(image).convert("RGB")
+                    sanitized.save(
+                        output,
+                        format="JPEG",
+                        quality=95,
+                        optimize=False,
+                    )
+                elif image_format == "WEBP":
+                    mode = "RGBA" if "A" in image.getbands() else "RGB"
+                    sanitized = image.convert(mode)
+                    sanitized.save(
+                        output,
+                        format="WEBP",
+                        quality=95,
+                        method=4,
+                    )
+                else:
+                    has_transparency = (
+                        "A" in image.getbands()
+                        or image.info.get("transparency") is not None
+                    )
+                    mode = "RGBA" if has_transparency else "RGB"
+                    sanitized = image.convert(mode)
+                    sanitized.save(
+                        output,
+                        format="PNG",
+                        compress_level=6,
+                    )
+        result = output.getvalue()
+    except (
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+        OSError,
+        ValueError,
+    ):
+        raise _GenerationFailure(
+            "无法安全处理图片内容",
+            "ImageSanitizationError",
+        ) from None
+    if not result or len(result) > max_bytes:
+        raise _GenerationFailure(
+            "安全处理后的图片超过了配置的最大字节数",
+            "ImageTooLarge",
+        )
+    mime, extension = _SUPPORTED_IMAGE_FORMATS[image_format]
+    return result, mime, extension
 
 
 def _decode_b64_image(value: Any, *, max_bytes: int) -> tuple[bytes, str, str]:
@@ -739,13 +835,12 @@ def _decode_b64_image(value: Any, *, max_bytes: int) -> tuple[bytes, str, str]:
             "生成图片超过了配置的最大字节数",
             "ImageTooLarge",
         )
-    mime, extension = _image_type(decoded)
-    return decoded, mime, extension
+    return _sanitize_image(decoded, max_bytes=max_bytes)
 
 
 def _safe_history_record(
     value: Any,
-    api_key: str = "",
+    secrets: str | Iterable[str] | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
@@ -754,27 +849,27 @@ def _safe_history_record(
         return None
     record_id = _redact_text(
         value.get("id"),
-        api_key,
+        secrets,
         max_chars=32,
     )
     timestamp = _redact_text(
         value.get("timestamp"),
-        api_key,
+        secrets,
         max_chars=40,
     )
     model = _redact_text(
         value.get("model"),
-        api_key,
+        secrets,
         max_chars=_MODEL_MAX_CHARS,
     )
     prompt_excerpt = _redact_text(
         value.get("prompt_excerpt"),
-        api_key,
+        secrets,
         max_chars=_PROMPT_EXCERPT_MAX_CHARS,
     )
     result_url = _redact_text(
         value.get("result_url"),
-        api_key,
+        secrets,
         max_chars=_URL_MAX_CHARS,
     )
     if not record_id or not timestamp or not model:
@@ -791,19 +886,421 @@ def _safe_history_record(
     }
 
 
-def _new_http_client() -> httpx.AsyncClient:
+def _new_http_client(*, trust_env: bool = True) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         follow_redirects=False,
         headers={"User-Agent": USER_AGENT},
+        trust_env=trust_env,
     )
 
 
-def _atomic_write_bytes(temp_path: Path, target_path: Path, data: bytes) -> None:
-    with temp_path.open("xb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temp_path, target_path)
+def _anchored_asset_io_supported() -> bool:
+    supports_dir_fd = getattr(os, "supports_dir_fd", set())
+    return (
+        hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.open in supports_dir_fd
+        and os.mkdir in supports_dir_fd
+        and os.rename in supports_dir_fd
+        and os.unlink in supports_dir_fd
+    )
+
+
+def _open_anchored_root(
+    writable_ui: Path,
+    expected_root_identity: tuple[int, int],
+) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    root_fd = os.open(writable_ui, flags)
+    try:
+        root_stat = os.fstat(root_fd)
+        if (int(root_stat.st_dev), int(root_stat.st_ino)) != (
+            int(expected_root_identity[0]),
+            int(expected_root_identity[1]),
+        ):
+            raise OSError("writable static UI root identity changed")
+    except BaseException:
+        os.close(root_fd)
+        raise
+    return root_fd
+
+
+def _open_anchored_asset_dir(
+    writable_ui: Path,
+    expected_root_identity: tuple[int, int],
+) -> tuple[int, int]:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    root_fd = _open_anchored_root(
+        writable_ui,
+        expected_root_identity,
+    )
+    try:
+        asset_fd = os.open(
+            _GENERATED_SUBDIR,
+            flags,
+            dir_fd=root_fd,
+        )
+    except BaseException:
+        os.close(root_fd)
+        raise
+    return root_fd, asset_fd
+
+
+def _open_windows_directory_guard(path: Path) -> int:
+    if os.name != "nt":
+        raise OSError("Windows directory guards are unavailable")
+    import ctypes
+    from ctypes import wintypes
+
+    class FileInformation(ctypes.Structure):
+        _fields_ = [
+            ("attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("last_access_time", wintypes.FILETIME),
+            ("last_write_time", wintypes.FILETIME),
+            ("volume_serial_number", wintypes.DWORD),
+            ("file_size_high", wintypes.DWORD),
+            ("file_size_low", wintypes.DWORD),
+            ("number_of_links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(FileInformation),
+    ]
+    get_information.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    file_read_attributes = 0x0080
+    file_share_read = 0x0001
+    file_share_write = 0x0002
+    open_existing = 3
+    file_flag_backup_semantics = 0x02000000
+    file_flag_open_reparse_point = 0x00200000
+    file_attribute_directory = 0x0010
+    file_attribute_reparse_point = 0x0400
+    invalid_handle_value = ctypes.c_void_p(-1).value
+
+    handle = create_file(
+        str(path),
+        file_read_attributes,
+        file_share_read | file_share_write,
+        None,
+        open_existing,
+        file_flag_backup_semantics | file_flag_open_reparse_point,
+        None,
+    )
+    handle_value = int(handle) if handle is not None else 0
+    if not handle_value or handle_value == invalid_handle_value:
+        raise OSError(ctypes.get_last_error(), "unable to guard directory")
+    information = FileInformation()
+    if not get_information(handle, ctypes.byref(information)):
+        error_code = ctypes.get_last_error()
+        close_handle(handle)
+        raise OSError(error_code, "unable to inspect guarded directory")
+    if (
+        not information.attributes & file_attribute_directory
+        or information.attributes & file_attribute_reparse_point
+    ):
+        close_handle(handle)
+        raise OSError("guarded path is not a real directory")
+    return handle_value
+
+
+def _close_windows_handle(handle: int) -> None:
+    if os.name != "nt" or not handle:
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    close_handle = ctypes.WinDLL(
+        "kernel32",
+        use_last_error=True,
+    ).CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    close_handle(wintypes.HANDLE(handle))
+
+
+def _open_windows_asset_guards(
+    writable_ui: Path,
+    expected_root_identity: tuple[int, int],
+) -> tuple[int, int]:
+    root_handle = _open_windows_directory_guard(writable_ui)
+    try:
+        root_stat = writable_ui.stat()
+        if (int(root_stat.st_dev), int(root_stat.st_ino)) != (
+            int(expected_root_identity[0]),
+            int(expected_root_identity[1]),
+        ):
+            raise OSError("writable static UI root identity changed")
+        asset_handle = _open_windows_directory_guard(
+            writable_ui / _GENERATED_SUBDIR
+        )
+    except BaseException:
+        _close_windows_handle(root_handle)
+        raise
+    return root_handle, asset_handle
+
+
+def _atomic_write_ui_index(
+    writable_ui: Path,
+    expected_root_identity: tuple[int, int],
+    data: bytes,
+) -> None:
+    target_name = "index.html"
+    temp_name = f".index.html.{uuid4().hex}.tmp"
+    if _anchored_asset_io_supported():
+        root_fd = _open_anchored_root(
+            writable_ui,
+            expected_root_identity,
+        )
+        temp_created = False
+        try:
+            temp_fd = os.open(
+                temp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=root_fd,
+            )
+            temp_created = True
+            try:
+                with os.fdopen(temp_fd, "wb", closefd=True) as handle:
+                    temp_fd = -1
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            finally:
+                if temp_fd >= 0:
+                    os.close(temp_fd)
+            os.rename(
+                temp_name,
+                target_name,
+                src_dir_fd=root_fd,
+                dst_dir_fd=root_fd,
+            )
+            temp_created = False
+            try:
+                os.fsync(root_fd)
+            except OSError:
+                pass
+        finally:
+            if temp_created:
+                try:
+                    os.unlink(temp_name, dir_fd=root_fd)
+                except OSError:
+                    pass
+            os.close(root_fd)
+        return
+    if os.name == "nt":
+        root_handle = _open_windows_directory_guard(writable_ui)
+        try:
+            root_stat = writable_ui.stat()
+            if (int(root_stat.st_dev), int(root_stat.st_ino)) != (
+                int(expected_root_identity[0]),
+                int(expected_root_identity[1]),
+            ):
+                raise OSError("writable static UI root identity changed")
+            temp_path = writable_ui / temp_name
+            try:
+                with temp_path.open("xb") as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_path, writable_ui / target_name)
+            finally:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        finally:
+            _close_windows_handle(root_handle)
+        return
+    raise OSError("secure directory-anchored UI writes are unsupported")
+
+
+def _ensure_generated_asset_dir(
+    writable_ui: Path,
+    expected_root_identity: tuple[int, int],
+) -> None:
+    if _anchored_asset_io_supported():
+        root_fd = _open_anchored_root(
+            writable_ui,
+            expected_root_identity,
+        )
+        try:
+            try:
+                os.mkdir(_GENERATED_SUBDIR, 0o700, dir_fd=root_fd)
+            except FileExistsError:
+                pass
+            asset_fd = os.open(
+                _GENERATED_SUBDIR,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=root_fd,
+            )
+            os.close(asset_fd)
+        finally:
+            os.close(root_fd)
+        return
+    if os.name == "nt":
+        root_handle = _open_windows_directory_guard(writable_ui)
+        asset_handle = 0
+        try:
+            root_stat = writable_ui.stat()
+            if (int(root_stat.st_dev), int(root_stat.st_ino)) != (
+                int(expected_root_identity[0]),
+                int(expected_root_identity[1]),
+            ):
+                raise OSError("writable static UI root identity changed")
+            asset_dir = writable_ui / _GENERATED_SUBDIR
+            asset_dir.mkdir(exist_ok=True)
+            asset_handle = _open_windows_directory_guard(asset_dir)
+        finally:
+            _close_windows_handle(asset_handle)
+            _close_windows_handle(root_handle)
+        return
+    raise OSError("secure generated asset directories are unsupported")
+
+
+def _atomic_write_bytes(
+    writable_ui: Path,
+    expected_root_identity: tuple[int, int],
+    temp_name: str,
+    target_name: str,
+    data: bytes,
+) -> None:
+    if (
+        not _GENERATED_TEMP_FILE_PATTERN.fullmatch(temp_name)
+        or not _GENERATED_FILE_PATTERN.fullmatch(target_name)
+    ):
+        raise OSError("unsafe generated asset filename")
+
+    if _anchored_asset_io_supported():
+        root_fd, asset_fd = _open_anchored_asset_dir(
+            writable_ui,
+            expected_root_identity,
+        )
+        temp_created = False
+        try:
+            temp_fd = os.open(
+                temp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=asset_fd,
+            )
+            temp_created = True
+            try:
+                with os.fdopen(temp_fd, "wb", closefd=True) as handle:
+                    temp_fd = -1
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            finally:
+                if temp_fd >= 0:
+                    os.close(temp_fd)
+            os.rename(
+                temp_name,
+                target_name,
+                src_dir_fd=asset_fd,
+                dst_dir_fd=asset_fd,
+            )
+            temp_created = False
+            try:
+                os.fsync(asset_fd)
+            except OSError:
+                pass
+        finally:
+            if temp_created:
+                try:
+                    os.unlink(temp_name, dir_fd=asset_fd)
+                except OSError:
+                    pass
+            os.close(asset_fd)
+            os.close(root_fd)
+        return
+
+    if os.name == "nt":
+        root_handle, asset_handle = _open_windows_asset_guards(
+            writable_ui,
+            expected_root_identity,
+        )
+        asset_dir = writable_ui / _GENERATED_SUBDIR
+        temp_path = asset_dir / temp_name
+        target_path = asset_dir / target_name
+        try:
+            with temp_path.open("xb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, target_path)
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            _close_windows_handle(asset_handle)
+            _close_windows_handle(root_handle)
+        return
+
+    raise OSError("secure directory-anchored asset writes are unsupported")
+
+
+def _unlink_asset_file(
+    writable_ui: Path,
+    expected_root_identity: tuple[int, int],
+    filename: str,
+) -> bool:
+    if not (
+        _GENERATED_FILE_PATTERN.fullmatch(filename)
+        or _GENERATED_TEMP_FILE_PATTERN.fullmatch(filename)
+    ):
+        raise OSError("unsafe generated asset filename")
+    if _anchored_asset_io_supported():
+        root_fd, asset_fd = _open_anchored_asset_dir(
+            writable_ui,
+            expected_root_identity,
+        )
+        try:
+            try:
+                os.unlink(filename, dir_fd=asset_fd)
+            except FileNotFoundError:
+                return False
+            return True
+        finally:
+            os.close(asset_fd)
+            os.close(root_fd)
+    if os.name == "nt":
+        root_handle, asset_handle = _open_windows_asset_guards(
+            writable_ui,
+            expected_root_identity,
+        )
+        try:
+            try:
+                (writable_ui / _GENERATED_SUBDIR / filename).unlink()
+            except FileNotFoundError:
+                return False
+            return True
+        finally:
+            _close_windows_handle(asset_handle)
+            _close_windows_handle(root_handle)
+    raise OSError("secure directory-anchored asset deletion is unsupported")
 
 
 @neko_plugin
@@ -813,10 +1310,13 @@ class ImageGeneratorPlugin(NekoPluginBase):
     def __init__(self, ctx: Any):
         super().__init__(ctx)
         self._state_lock = threading.Lock()
-        self._client_lock = threading.Lock()
         self._history_lock = threading.Lock()
         self._cache_lock = threading.Lock()
-        self._settings_update_lock = threading.Lock()
+        # One async lock serializes every settings/key snapshot and mutation.
+        # Plugin entry dispatch uses one persistent command event loop.
+        self._config_lock = asyncio.Lock()
+        self._envelope_lock = threading.Lock()
+        self._secret_lock = threading.Lock()
         self._manifest_settings = {
             key: (list(value) if isinstance(value, list) else value)
             for key, value in DEFAULT_SETTINGS.items()
@@ -831,11 +1331,11 @@ class ImageGeneratorPlugin(NekoPluginBase):
             "action": None,
             "failure_class": None,
         }
-        self._client: httpx.AsyncClient | None = None
-        self._client_loop: asyncio.AbstractEventLoop | None = None
-        self._retired_clients: list[httpx.AsyncClient] = []
+        self._secret_envelopes: OrderedDict[str, tuple[Any, float]] = OrderedDict()
+        self._known_secrets: list[str] = []
         self._writable_ui_dir: Path | None = None
         self._asset_dir: Path | None = None
+        self._writable_ui_identity: tuple[int, int] | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle, Store, and loop-local HTTP client
@@ -917,7 +1417,11 @@ class ImageGeneratorPlugin(NekoPluginBase):
             )
 
         key = await self._load_api_key()
-        if key and _settings_contain_secret(self._settings_snapshot(), key):
+        self._remember_secrets(key)
+        if key and _settings_contain_secret(
+            self._settings_snapshot(),
+            self._known_secrets_snapshot(key),
+        ):
             safe_settings = (
                 manifest_settings
                 if not _settings_contain_secret(manifest_settings, key)
@@ -938,9 +1442,22 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 "ImageGenerator secret-bearing settings ignored: "
                 "failure_class=SecretInSettings"
             )
+        dependencies_available = (
+            Image is not None
+            and ImageOps is not None
+            and rsa is not None
+            and serialization is not None
+            and AESGCM is not None
+        )
+        if not dependencies_available:
+            configuration_warning = "图片验证或密钥加密组件不可用；请重新安装插件依赖"
+            with self._state_lock:
+                self._configuration_warning = configuration_warning
         configured = bool(key)
         lifecycle_status = (
-            "running" if ui_registered and asset_cache_available else "degraded"
+            "running"
+            if ui_registered and asset_cache_available and dependencies_available
+            else "degraded"
         )
         status_payload: dict[str, Any] = {
             "status": lifecycle_status,
@@ -971,58 +1488,29 @@ class ImageGeneratorPlugin(NekoPluginBase):
 
     @lifecycle(id="shutdown")
     async def shutdown(self, **_: Any):
-        with self._client_lock:
-            active = self._client
-            retired = list(self._retired_clients)
-            self._client = None
-            self._client_loop = None
-            self._retired_clients = []
-
-        clients: list[httpx.AsyncClient] = []
-        if active is not None:
-            clients.append(active)
-        clients.extend(retired)
-        close_failures = 0
-        for client in clients:
-            if getattr(client, "is_closed", False):
-                continue
-            try:
-                await client.aclose()
-            except Exception:
-                close_failures += 1
+        with self._envelope_lock:
+            envelope_count = len(self._secret_envelopes)
+            self._secret_envelopes.clear()
+        with self._secret_lock:
+            self._known_secrets.clear()
 
         with self._state_lock:
             self._running = False
         self.report_status({"status": "shutdown"})
-        if close_failures:
-            self.logger.warning(
-                "ImageGenerator client cleanup incomplete: failure_count={}",
-                close_failures,
-            )
         self.logger.info("ImageGenerator shutdown")
         return Ok(
             {
                 "status": "shutdown",
-                "clients_seen": len(clients),
-                "close_failures": close_failures,
+                "clients_seen": 0,
+                "close_failures": 0,
+                "secret_envelopes_discarded": envelope_count,
             }
         )
 
-    def _get_client(self) -> httpx.AsyncClient:
-        loop = asyncio.get_running_loop()
-        with self._client_lock:
-            current = self._client
-            if (
-                current is None
-                or getattr(current, "is_closed", False)
-                or self._client_loop is not loop
-            ):
-                if current is not None and not getattr(current, "is_closed", False):
-                    self._retired_clients.append(current)
-                current = _new_http_client()
-                self._client = current
-                self._client_loop = loop
-            return current
+    def _get_client(self, *, trust_env: bool = True) -> httpx.AsyncClient:
+        # Per-call clients avoid cross-event-loop ownership and any retained
+        # retired-client collection. Callers close them best-effort.
+        return _new_http_client(trust_env=trust_env)
 
     @staticmethod
     async def _acquire_lock(lock: threading.Lock) -> None:
@@ -1030,8 +1518,16 @@ class ImageGeneratorPlugin(NekoPluginBase):
             await asyncio.sleep(0.01)
 
     async def _store_get(self, key: str, default: Any = None) -> Any:
+        success, value = await self._store_get_checked(key, default)
+        return value if success else default
+
+    async def _store_get_checked(
+        self,
+        key: str,
+        default: Any = None,
+    ) -> tuple[bool, Any]:
         if not bool(getattr(self.store, "enabled", False)):
-            return default
+            return False, default
         try:
             result = await self.store.get(key, default)
         except Exception as exc:
@@ -1040,14 +1536,14 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 key,
                 type(exc).__name__,
             )
-            return default
+            return False, default
         if isinstance(result, Ok):
-            return result.value
+            return True, result.value
         self.logger.warning(
             "ImageGenerator store read failed: key={} failure_class=StoreError",
             key,
         )
-        return default
+        return False, default
 
     async def _store_set(self, key: str, value: Any) -> bool:
         if not bool(getattr(self.store, "enabled", False)):
@@ -1098,6 +1594,195 @@ class ImageGeneratorPlugin(NekoPluginBase):
         except SdkError:
             return ""
 
+    async def _load_api_key_checked(self) -> tuple[bool, str, str]:
+        success, raw = await self._store_get_checked(_API_KEY_STORE_KEY, "")
+        if not success:
+            return False, "", ""
+        raw_text = raw if isinstance(raw, str) else ""
+        try:
+            validated = _validate_api_key(raw_text) if raw_text else ""
+        except SdkError:
+            validated = ""
+        return True, raw_text, validated
+
+    def _remember_secrets(self, *values: Any) -> None:
+        candidates: list[str] = []
+        for value in values:
+            if isinstance(value, str) and value:
+                candidates.append(value)
+        if not candidates:
+            return
+        with self._secret_lock:
+            for candidate in candidates:
+                if candidate in self._known_secrets:
+                    self._known_secrets.remove(candidate)
+                self._known_secrets.append(candidate)
+            if len(self._known_secrets) > _KNOWN_SECRET_MAX_COUNT:
+                del self._known_secrets[
+                    : len(self._known_secrets) - _KNOWN_SECRET_MAX_COUNT
+                ]
+
+    def _known_secrets_snapshot(self, *extra: Any) -> tuple[str, ...]:
+        with self._secret_lock:
+            values = list(self._known_secrets)
+        values.extend(item for item in extra if isinstance(item, str) and item)
+        return _secret_values(values)
+
+    def _prune_secret_envelopes_locked(self, now: float) -> None:
+        expired = [
+            key_id
+            for key_id, (_private_key, expires_at) in self._secret_envelopes.items()
+            if expires_at <= now
+        ]
+        for key_id in expired:
+            self._secret_envelopes.pop(key_id, None)
+        while len(self._secret_envelopes) >= _SECRET_ENVELOPE_MAX_PENDING:
+            self._secret_envelopes.popitem(last=False)
+
+    async def _issue_secret_envelope(self) -> dict[str, Any]:
+        if (
+            rsa is None
+            or serialization is None
+            or hashes is None
+            or padding is None
+            or AESGCM is None
+        ):
+            raise SdkError("密钥加密组件不可用，请重新安装插件依赖")
+
+        try:
+            private_key = await asyncio.to_thread(
+                rsa.generate_private_key,
+                public_exponent=65537,
+                key_size=2048,
+            )
+            public_bytes = private_key.public_key().public_bytes(
+                encoding=serialization.Encoding.DER,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            key_id = uuid4().hex
+            now = time.monotonic()
+            expires_at = datetime.now(timezone.utc) + timedelta(
+                seconds=_SECRET_ENVELOPE_TTL_SECONDS
+            )
+            envelope = {
+                "key_id": key_id,
+                "public_key_spki_b64": base64.b64encode(public_bytes).decode("ascii"),
+                "algorithm": "RSA-OAEP-256+A256GCM",
+                "expires_at": expires_at.isoformat(timespec="seconds"),
+                "max_plaintext_bytes": _ENCRYPTED_DOCUMENT_MAX_BYTES,
+            }
+            with self._envelope_lock:
+                self._prune_secret_envelopes_locked(now)
+                self._secret_envelopes[key_id] = (
+                    private_key,
+                    now + _SECRET_ENVELOPE_TTL_SECONDS,
+                )
+            return envelope
+        except Exception:
+            raise SdkError("无法创建一次性密钥加密信封，请稍后重试") from None
+
+    async def _consume_encrypted_settings(
+        self,
+        *,
+        encrypted_payload: Any,
+        key_id: Any,
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(key_id, str)
+            or not re.fullmatch(r"[0-9a-f]{32}", key_id)
+            or not isinstance(encrypted_payload, str)
+            or not 1 <= len(encrypted_payload) <= _ENCRYPTED_PAYLOAD_MAX_CHARS
+        ):
+            raise SdkError("加密设置载荷格式无效，请刷新面板后重试")
+
+        now = time.monotonic()
+        with self._envelope_lock:
+            self._prune_secret_envelopes_locked(now)
+            envelope = self._secret_envelopes.pop(key_id, None)
+        if envelope is None or envelope[1] <= now:
+            raise SdkError("加密设置载荷已过期或已使用，请刷新面板后重试")
+        private_key = envelope[0]
+
+        try:
+            outer_bytes = base64.b64decode(encrypted_payload, validate=True)
+            if len(outer_bytes) > 48_000:
+                raise ValueError
+            outer = json.loads(outer_bytes)
+            if not isinstance(outer, Mapping) or set(outer) != {
+                "v",
+                "wrapped_key",
+                "iv",
+                "ciphertext",
+            }:
+                raise ValueError
+            if outer.get("v") != 1:
+                raise ValueError
+            wrapped_value = outer.get("wrapped_key")
+            iv_value = outer.get("iv")
+            ciphertext_value = outer.get("ciphertext")
+            if not all(
+                isinstance(item, str)
+                for item in (wrapped_value, iv_value, ciphertext_value)
+            ):
+                raise ValueError
+            wrapped_key = base64.b64decode(wrapped_value, validate=True)
+            iv = base64.b64decode(iv_value, validate=True)
+            ciphertext = base64.b64decode(ciphertext_value, validate=True)
+            if (
+                not 128 <= len(wrapped_key) <= 512
+                or len(iv) != 12
+                or not 17 <= len(ciphertext) <= 48_000
+            ):
+                raise ValueError
+            binding = f"image_generator:{key_id}".encode("utf-8")
+
+            def decrypt_payload() -> bytes:
+                aes_key = private_key.decrypt(
+                    wrapped_key,
+                    padding.OAEP(
+                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                        algorithm=hashes.SHA256(),
+                        label=binding,
+                    ),
+                )
+                if len(aes_key) != 32:
+                    raise ValueError
+                return AESGCM(aes_key).decrypt(
+                    iv,
+                    ciphertext,
+                    binding,
+                )
+
+            plaintext = await asyncio.to_thread(decrypt_payload)
+            if len(plaintext) > _ENCRYPTED_DOCUMENT_MAX_BYTES:
+                raise ValueError
+            document = json.loads(plaintext)
+            if not isinstance(document, Mapping):
+                raise ValueError
+            return {str(key): value for key, value in document.items()}
+        except Exception:
+            raise SdkError(
+                "无法解密设置载荷；它可能已损坏、过期或不属于当前面板"
+            ) from None
+
+    async def _generation_config_snapshot(
+        self,
+    ) -> tuple[dict[str, Any], str]:
+        async with self._config_lock:
+            settings = self._settings_snapshot()
+            if not bool(getattr(self.store, "enabled", False)):
+                raise SdkError("插件存储已禁用，无法安全读取 API 密钥")
+            key_read_ok, raw_api_key, api_key = await self._load_api_key_checked()
+            if not key_read_ok:
+                raise SdkError("无法安全读取 API 密钥（StoreError），请稍后重试")
+            self._remember_secrets(raw_api_key, api_key)
+            secrets = self._known_secrets_snapshot(raw_api_key, api_key)
+            if _settings_contain_secret(settings, secrets):
+                raise SdkError(
+                    "检测到设置字段包含 API 密钥；请在管理面板重新保存安全设置"
+                )
+            return settings, api_key
+
     def _settings_snapshot(self) -> dict[str, Any]:
         with self._state_lock:
             return {
@@ -1134,62 +1819,71 @@ class ImageGeneratorPlugin(NekoPluginBase):
     def _source_static_dir(self) -> Path:
         return self.config_dir / "static"
 
-    def _copy_static_ui_assets(self, target_dir: Path) -> None:
-        source_dir = self._source_static_dir
-        if not source_dir.is_dir():
-            return
-        for source_path in source_dir.rglob("*"):
-            relative = source_path.relative_to(source_dir)
-            if not relative.parts or relative.parts[0] == _GENERATED_SUBDIR:
-                continue
-            target_path = target_dir / relative
-            try:
-                resolved_parent = target_path.parent.resolve()
-                resolved_root = target_dir.resolve()
-            except OSError as exc:
-                raise OSError("unable to validate static UI target") from exc
-            if target_path.is_symlink() or (
-                resolved_parent != resolved_root
-                and resolved_root not in resolved_parent.parents
-            ):
-                raise OSError("unsafe static UI target path")
-            if source_path.is_dir():
-                target_path.mkdir(parents=True, exist_ok=True)
-                continue
-            if not source_path.is_file():
-                continue
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            copy_required = True
-            if target_path.is_file():
-                try:
-                    copy_required = source_path.read_bytes() != target_path.read_bytes()
-                except OSError:
-                    copy_required = True
-            if copy_required:
-                shutil.copy2(source_path, target_path)
+    def _copy_static_ui_assets(
+        self,
+        target_dir: Path,
+        expected_root_identity: tuple[int, int],
+    ) -> None:
+        source_index = self._source_static_dir / "index.html"
+        if source_index.is_symlink() or not source_index.is_file():
+            raise OSError("bundled static UI index is unavailable")
+        index_bytes = source_index.read_bytes()
+        if not index_bytes or len(index_bytes) > 2 * 1024 * 1024:
+            raise OSError("bundled static UI index has an invalid size")
+        _atomic_write_ui_index(
+            target_dir,
+            expected_root_identity,
+            index_bytes,
+        )
 
     def _register_writable_static_ui(self) -> bool:
-        writable_ui = self.data_path("static_ui").resolve()
+        raw_writable_ui = self.data_path("static_ui")
+        expected_writable_ui = self.data_path().resolve() / "static_ui"
+        self._writable_ui_identity = None
         try:
-            writable_ui.mkdir(parents=True, exist_ok=True)
-            self._copy_static_ui_assets(writable_ui)
+            if raw_writable_ui.is_symlink():
+                raise OSError("writable static UI root must not be a symlink")
+            raw_writable_ui.mkdir(parents=True, exist_ok=True)
+            if raw_writable_ui.is_symlink():
+                raise OSError("writable static UI root must not be a symlink")
+            writable_ui = raw_writable_ui.resolve()
+            if writable_ui != expected_writable_ui:
+                raise OSError("writable static UI root escaped plugin data directory")
+            root_stat = writable_ui.stat()
+            root_identity = (
+                int(root_stat.st_dev),
+                int(root_stat.st_ino),
+            )
+            self._copy_static_ui_assets(
+                writable_ui,
+                root_identity,
+            )
+            _ensure_generated_asset_dir(
+                writable_ui,
+                root_identity,
+            )
             asset_dir = writable_ui / _GENERATED_SUBDIR
-            if asset_dir.is_symlink():
-                raise OSError("generated asset directory must not be a symlink")
-            asset_dir.mkdir(parents=True, exist_ok=True)
+            self._writable_ui_dir = writable_ui
+            self._asset_dir = asset_dir
+            self._writable_ui_identity = root_identity
+            if not self._asset_dir_is_safe():
+                raise OSError("writable static UI root changed during setup")
             registered = self.register_static_ui(
                 str(writable_ui),
                 cache_control="no-cache",
             )
-            if registered:
-                self._writable_ui_dir = writable_ui
-                self._asset_dir = asset_dir
+            if registered and self._asset_dir_is_safe():
                 return True
+            if registered:
+                raise OSError("writable static UI root changed during registration")
         except Exception as exc:
             self.logger.warning(
                 "ImageGenerator writable UI setup failed: failure_class={}",
                 type(exc).__name__,
             )
+        self._asset_dir = None
+        self._writable_ui_dir = None
+        self._writable_ui_identity = None
 
         try:
             fallback_registered = self.register_static_ui(
@@ -1209,20 +1903,41 @@ class ImageGeneratorPlugin(NekoPluginBase):
             # files.
             self._asset_dir = None
             self._writable_ui_dir = self._source_static_dir
+            self._writable_ui_identity = None
         return fallback_registered
 
     def _asset_dir_is_safe(self) -> bool:
         asset_dir = self._asset_dir
         writable_ui = self._writable_ui_dir
-        if asset_dir is None or writable_ui is None:
+        expected_identity = self._writable_ui_identity
+        if (
+            asset_dir is None
+            or writable_ui is None
+            or expected_identity is None
+        ):
             return False
         try:
+            root_stat = writable_ui.stat()
             return (
-                not asset_dir.is_symlink()
+                not writable_ui.is_symlink()
+                and not asset_dir.is_symlink()
+                and (int(root_stat.st_dev), int(root_stat.st_ino))
+                == expected_identity
                 and asset_dir.resolve() == writable_ui.resolve() / _GENERATED_SUBDIR
             )
         except OSError:
             return False
+
+    def _unlink_cached_file(self, filename: str) -> bool:
+        writable_ui = self._writable_ui_dir
+        expected_identity = self._writable_ui_identity
+        if writable_ui is None or expected_identity is None:
+            raise OSError("generated asset cache is unavailable")
+        return _unlink_asset_file(
+            writable_ui,
+            expected_identity,
+            filename,
+        )
 
     def _cache_files(self) -> list[Path]:
         asset_dir = self._asset_dir
@@ -1257,7 +1972,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
         for path in self._cache_files():
             if _GENERATED_TEMP_FILE_PATTERN.fullmatch(path.name):
                 try:
-                    path.unlink()
+                    self._unlink_cached_file(path.name)
                 except OSError:
                     pass
                 else:
@@ -1280,7 +1995,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 kept_bytes += size
                 continue
             try:
-                path.unlink()
+                self._unlink_cached_file(path.name)
             except OSError:
                 pass
         # Report actual on-disk state, including files whose deletion failed,
@@ -1359,9 +2074,17 @@ class ImageGeneratorPlugin(NekoPluginBase):
         data: bytes,
         *,
         extension: str,
+        secrets: str | Iterable[str] | None = None,
     ) -> tuple[str, str]:
         asset_dir = self._asset_dir
-        if asset_dir is None or not self._asset_dir_is_safe():
+        writable_ui = self._writable_ui_dir
+        expected_identity = self._writable_ui_identity
+        if (
+            asset_dir is None
+            or writable_ui is None
+            or expected_identity is None
+            or not self._asset_dir_is_safe()
+        ):
             raise _GenerationFailure(
                 "本地图片缓存不可用，请检查插件数据目录权限",
                 "AssetCacheUnavailable",
@@ -1372,34 +2095,75 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 "无法创建安全的图片文件名",
                 "AssetCacheError",
             )
+        secret_values = _secret_values(secrets)
+        image_url = self._asset_url(filename)
+        for _attempt in range(7):
+            if not _value_contains_secret(image_url, secret_values):
+                break
+            filename = f"{uuid4().hex}.{extension}"
+            image_url = self._asset_url(filename)
+        else:
+            raise _GenerationFailure(
+                "无法创建不含凭据的安全图片链接，请更换 API 密钥或公开服务地址",
+                "SecretUrlCollision",
+            )
         await self._acquire_lock(self._cache_lock)
         target = asset_dir / filename
-        temp_path = asset_dir / f".{filename}.{uuid4().hex}.tmp"
+        temp_name = f".{filename}.{uuid4().hex}.tmp"
         try:
-            asset_dir.mkdir(parents=True, exist_ok=True)
             if not self._asset_dir_is_safe():
                 raise _GenerationFailure(
                     "本地图片缓存路径不安全，已拒绝写入",
                     "AssetCacheUnsafe",
                 )
-            await asyncio.to_thread(
-                _atomic_write_bytes,
-                temp_path,
-                target,
-                data,
-            )
             settings = self._settings_snapshot()
-            stats = await asyncio.to_thread(
-                self._prune_cache_sync,
-                settings,
+
+            def write_and_prune() -> dict[str, int]:
+                _atomic_write_bytes(
+                    writable_ui,
+                    expected_identity,
+                    temp_name,
+                    filename,
+                    data,
+                )
+                if not self._asset_dir_is_safe():
+                    raise _GenerationFailure(
+                        "本地图片缓存路径在写入期间发生变化，已拒绝结果",
+                        "AssetCacheUnsafe",
+                    )
+                return self._prune_cache_sync(settings)
+
+            worker = asyncio.create_task(
+                asyncio.to_thread(write_and_prune)
             )
+            try:
+                stats = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # to_thread cannot stop a filesystem write. Keep the cache
+                # lock until that worker has also enforced the configured
+                # bounds, then propagate cancellation to the caller.
+                while not worker.done():
+                    try:
+                        await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        continue
+                    except BaseException:
+                        break
+                if worker.done() and not worker.cancelled():
+                    try:
+                        worker.exception()
+                    except BaseException:
+                        pass
+                raise
             if (
-                not target.is_file()
+                not self._asset_dir_is_safe()
+                or not target.is_file()
+                or target.is_symlink()
                 or stats["count"] > int(settings["cache_max_count"])
                 or stats["total_bytes"] > int(settings["cache_max_bytes"])
             ):
                 try:
-                    target.unlink(missing_ok=True)
+                    self._unlink_cached_file(filename)
                 except OSError:
                     pass
                 await asyncio.to_thread(self._prune_cache_sync, settings)
@@ -1411,7 +2175,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
             raise
         except Exception:
             try:
-                target.unlink(missing_ok=True)
+                self._unlink_cached_file(filename)
             except OSError:
                 pass
             raise _GenerationFailure(
@@ -1419,149 +2183,12 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 "AssetCacheError",
             ) from None
         finally:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
             self._cache_lock.release()
-        return self._asset_url(filename), filename
+        return image_url, filename
 
     # ------------------------------------------------------------------
     # Safe provider request and output handling
     # ------------------------------------------------------------------
-
-    async def _ensure_download_url_allowed(
-        self,
-        url: str,
-        *,
-        api_base_url: str,
-    ) -> None:
-        # An operator may explicitly authorize a literal private/loopback
-        # provider address. Hostnames, including same-origin provider
-        # hostnames, must still resolve exclusively to public-unicast
-        # addresses so a configured public name is not a blanket private-net
-        # bypass. Every redirect is checked again by the caller.
-        if _origin_tuple(url) == _origin_tuple(api_base_url):
-            base = _parse_http_url(api_base_url)
-            hostname = str(base.hostname or "") if base is not None else ""
-            try:
-                literal = ipaddress.ip_address(hostname)
-            except ValueError:
-                literal = None
-            if literal is not None and not _is_public_unicast_ip(literal):
-                return
-        allowed = await asyncio.to_thread(
-            _url_resolves_to_public_unicast,
-            url,
-        )
-        if not allowed:
-            raise _GenerationFailure(
-                "图片下载地址指向了不允许的本地或私有网络",
-                "UnsafeImageUrl",
-            )
-
-    async def _download_image(
-        self,
-        initial_url: str,
-        *,
-        api_base_url: str,
-        timeout: float,
-        max_bytes: int,
-    ) -> tuple[bytes, str, str]:
-        current_url = _validate_output_url(initial_url)
-        client = self._get_client()
-        for redirect_index in range(_MAX_REDIRECTS + 1):
-            await self._ensure_download_url_allowed(
-                current_url,
-                api_base_url=api_base_url,
-            )
-            try:
-                async with client.stream(
-                    "GET",
-                    current_url,
-                    headers={
-                        "User-Agent": USER_AGENT,
-                        "Accept": "image/png,image/jpeg,image/gif,image/webp",
-                    },
-                    timeout=timeout,
-                    follow_redirects=False,
-                ) as response:
-                    status = int(response.status_code)
-                    if status in {301, 302, 303, 307, 308}:
-                        if redirect_index >= _MAX_REDIRECTS:
-                            raise _GenerationFailure(
-                                "图片下载重定向次数过多",
-                                "TooManyRedirects",
-                            )
-                        location = response.headers.get("location")
-                        if not location:
-                            raise _GenerationFailure(
-                                "图片下载重定向缺少目标地址",
-                                "MalformedRedirect",
-                            )
-                        current_url = _validate_output_url(
-                            urljoin(current_url, location)
-                        )
-                        continue
-                    if status < 200 or status >= 300:
-                        raise _GenerationFailure(
-                            f"下载生成图片失败（HTTP {status}）",
-                            "ImageDownloadHttpError",
-                        )
-
-                    content_length = response.headers.get("content-length")
-                    if content_length:
-                        try:
-                            declared_length = int(content_length)
-                        except ValueError:
-                            declared_length = -1
-                        if declared_length < 0:
-                            raise _GenerationFailure(
-                                "图片服务返回了无效的文件长度",
-                                "MalformedDownload",
-                            )
-                        if declared_length > max_bytes:
-                            raise _GenerationFailure(
-                                "生成图片超过了配置的最大下载字节数",
-                                "ImageTooLarge",
-                            )
-
-                    chunks: list[bytes] = []
-                    total = 0
-                    async for chunk in response.aiter_bytes():
-                        if not chunk:
-                            continue
-                        total += len(chunk)
-                        if total > max_bytes:
-                            raise _GenerationFailure(
-                                "生成图片超过了配置的最大下载字节数",
-                                "ImageTooLarge",
-                            )
-                        chunks.append(bytes(chunk))
-                    data = b"".join(chunks)
-                    mime, extension = _image_type(data)
-                    return data, mime, extension
-            except _GenerationFailure:
-                raise
-            except httpx.TimeoutException:
-                raise _GenerationFailure(
-                    "下载生成图片超时，请稍后重试",
-                    "DownloadTimeout",
-                ) from None
-            except httpx.RequestError:
-                raise _GenerationFailure(
-                    "无法下载生成图片，请检查服务网络",
-                    "DownloadNetworkError",
-                ) from None
-            except Exception:
-                raise _GenerationFailure(
-                    "下载生成图片时发生错误",
-                    "DownloadError",
-                ) from None
-        raise _GenerationFailure(
-            "图片下载重定向次数过多",
-            "TooManyRedirects",
-        )
 
     @staticmethod
     def _build_request_body(
@@ -1586,9 +2213,14 @@ class ImageGeneratorPlugin(NekoPluginBase):
         output_format = settings["output_format"]
         if output_format != "auto":
             body["output_format"] = output_format
-        response_format = settings["response_format"]
-        if response_format != "auto":
-            body["response_format"] = response_format
+        # GPT Image models always return Base64 and reject the legacy
+        # response_format field. Other OpenAI-compatible models need an
+        # explicit b64_json request so URL-only output can be refused without
+        # introducing a server-side download path.
+        model_name = str(settings["model"]).lower().rsplit("/", 1)[-1]
+        model_name = model_name.rsplit(":", 1)[-1]
+        if not model_name.startswith(("gpt-image-", "chatgpt-image-")):
+            body["response_format"] = "b64_json"
         return body
 
     async def _request_generation(
@@ -1609,7 +2241,12 @@ class ImageGeneratorPlugin(NekoPluginBase):
             quality=quality,
             style=style,
         )
-        client = self._get_client()
+        parsed_endpoint = _parse_http_url(endpoint)
+        endpoint_is_loopback = (
+            parsed_endpoint is not None
+            and _is_loopback_hostname(parsed_endpoint.hostname)
+        )
+        client = self._get_client(trust_env=not endpoint_is_loopback)
         max_bytes = int(settings["max_download_bytes"])
         max_json_bytes = ((max_bytes + 2) // 3) * 4 + 1_048_576
         try:
@@ -1621,6 +2258,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                     "Accept": "application/json",
+                    "Accept-Encoding": "identity",
                     "User-Agent": USER_AGENT,
                 },
                 timeout=float(settings["timeout_seconds"]),
@@ -1649,6 +2287,21 @@ class ImageGeneratorPlugin(NekoPluginBase):
                     )
 
                 response_headers = getattr(response, "headers", {})
+                content_encoding = (
+                    response_headers.get("content-encoding")
+                    if isinstance(response_headers, Mapping)
+                    else None
+                )
+                encodings = {
+                    item.strip().lower()
+                    for item in str(content_encoding or "").split(",")
+                    if item.strip()
+                }
+                if encodings.difference({"identity"}):
+                    raise _GenerationFailure(
+                        "图片服务返回了不支持的压缩响应",
+                        "UnsupportedContentEncoding",
+                    )
                 content_length = (
                     response_headers.get("content-length")
                     if isinstance(response_headers, Mapping)
@@ -1700,6 +2353,14 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 "请求图片生成服务时发生错误",
                 "ProviderRequestError",
             ) from None
+        finally:
+            try:
+                await client.aclose()
+            except Exception:
+                self.logger.warning(
+                    "ImageGenerator HTTP client close failed: "
+                    "failure_class=ClientCloseError"
+                )
 
         try:
             payload = json.loads(raw_response)
@@ -1727,27 +2388,26 @@ class ImageGeneratorPlugin(NekoPluginBase):
             )
         revised_prompt = _redact_text(
             first.get("revised_prompt"),
-            api_key,
+            self._known_secrets_snapshot(api_key),
             max_chars=_REVISED_PROMPT_MAX_CHARS,
         )
         b64_value = first.get("b64_json")
         url_value = first.get("url")
         if isinstance(b64_value, str) and b64_value.strip():
-            decoded, mime, extension = _decode_b64_image(
+            decoded, mime, extension = await asyncio.to_thread(
+                _decode_b64_image,
                 b64_value,
                 max_bytes=max_bytes,
             )
             return decoded, mime, extension, revised_prompt
         if isinstance(url_value, str) and url_value.strip():
-            downloaded, mime, extension = await self._download_image(
-                url_value,
-                api_base_url=str(settings["api_base_url"]),
-                timeout=float(settings["timeout_seconds"]),
-                max_bytes=max_bytes,
+            raise _GenerationFailure(
+                "图片服务只返回了远程 URL；为防止服务端请求伪造，"
+                "本插件仅接受 b64_json 图片数据",
+                "ProviderUrlOutputRejected",
             )
-            return downloaded, mime, extension, revised_prompt
         raise _GenerationFailure(
-            "图片服务未返回 url 或 b64_json",
+            "图片服务未返回 b64_json 图片数据",
             "MalformedResponse",
         )
 
@@ -1814,6 +2474,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
             "/" in filename
             or not _GENERATED_FILE_PATTERN.fullmatch(filename)
             or asset_dir is None
+            or not self._asset_dir_is_safe()
             or not (asset_dir / filename).is_file()
             or (asset_dir / filename).is_symlink()
         ):
@@ -1828,9 +2489,10 @@ class ImageGeneratorPlugin(NekoPluginBase):
         raw = await self._store_get(_HISTORY_STORE_KEY, [])
         if not isinstance(raw, list):
             return []
+        secrets = self._known_secrets_snapshot(api_key)
         history: list[dict[str, Any]] = []
         for item in raw:
-            normalized = _safe_history_record(item, api_key)
+            normalized = _safe_history_record(item, secrets)
             if normalized is not None:
                 history.append(self._project_history_record(normalized))
         return history
@@ -1843,12 +2505,14 @@ class ImageGeneratorPlugin(NekoPluginBase):
         status: str,
         result_url: str,
         api_key: str,
+        history_limit: int | None = None,
     ) -> None:
         if not bool(getattr(self.store, "enabled", False)):
             return
         await self._acquire_lock(self._history_lock)
         try:
             history = await self._load_history(api_key=api_key)
+            secrets = self._known_secrets_snapshot(api_key)
             history.insert(
                 0,
                 {
@@ -1856,12 +2520,12 @@ class ImageGeneratorPlugin(NekoPluginBase):
                     "timestamp": _now_iso(),
                     "model": _redact_text(
                         model,
-                        api_key,
+                        secrets,
                         max_chars=_MODEL_MAX_CHARS,
                     ),
                     "prompt_excerpt": _redact_text(
                         prompt,
-                        api_key,
+                        secrets,
                         max_chars=_PROMPT_EXCERPT_MAX_CHARS,
                     ),
                     "result_url": (
@@ -1872,7 +2536,12 @@ class ImageGeneratorPlugin(NekoPluginBase):
                     "status": status,
                 },
             )
-            limit = int(self._settings_snapshot()["history_limit"])
+            current_limit = int(self._settings_snapshot()["history_limit"])
+            limit = (
+                min(int(history_limit), current_limit)
+                if history_limit is not None
+                else current_limit
+            )
             if not await self._store_set(
                 _HISTORY_STORE_KEY,
                 history[:limit],
@@ -1917,8 +2586,8 @@ class ImageGeneratorPlugin(NekoPluginBase):
         action: str,
         auto_show_override: bool | None,
     ):
-        settings = self._settings_snapshot()
         try:
+            settings, api_key = await self._generation_config_snapshot()
             cleaned_prompt, resolved_size, resolved_quality, resolved_style = (
                 self._resolve_generation_options(
                     settings=settings,
@@ -1931,7 +2600,6 @@ class ImageGeneratorPlugin(NekoPluginBase):
         except SdkError as exc:
             return Err(exc)
 
-        api_key = await self._load_api_key()
         if not api_key:
             await self._record_history(
                 prompt=cleaned_prompt,
@@ -1939,6 +2607,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 status="failed",
                 result_url="",
                 api_key="",
+                history_limit=int(settings["history_limit"]),
             )
             return Err(
                 SdkError("尚未配置 API 密钥，请在 image_generator 管理面板中设置")
@@ -1983,6 +2652,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
             image_url, _filename = await self._save_asset(
                 image_bytes,
                 extension=extension,
+                secrets=self._known_secrets_snapshot(api_key),
             )
         except _GenerationFailure as exc:
             self._set_request_state(
@@ -2002,6 +2672,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 status="failed",
                 result_url="",
                 api_key=api_key,
+                history_limit=int(settings["history_limit"]),
             )
             self.logger.warning(
                 "ImageGenerator request failed: action={} failure_class={}",
@@ -2023,6 +2694,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 status="failed",
                 result_url="",
                 api_key=api_key,
+                history_limit=int(settings["history_limit"]),
             )
             self.logger.warning(
                 "ImageGenerator unexpected failure: action={} failure_class={}",
@@ -2057,6 +2729,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
             status="succeeded",
             result_url=image_url,
             api_key=api_key,
+            history_limit=int(settings["history_limit"]),
         )
         self._set_request_state(action=action, status="success")
         self.report_status({"status": "running"})
@@ -2068,13 +2741,16 @@ class ImageGeneratorPlugin(NekoPluginBase):
             push_attempted,
         )
         return Ok(
-            {
-                "message": message,
-                "image_url": image_url,
-                "display_markdown": markdown,
-                "display_instruction": instruction,
-                "revised_prompt": revised_prompt,
-            }
+            _redact_structure(
+                {
+                    "message": message,
+                    "image_url": image_url,
+                    "display_markdown": markdown,
+                    "display_instruction": instruction,
+                    "revised_prompt": revised_prompt,
+                },
+                self._known_secrets_snapshot(api_key),
+            )
         )
 
     # ------------------------------------------------------------------
@@ -2138,10 +2814,25 @@ class ImageGeneratorPlugin(NekoPluginBase):
         input_schema=_EMPTY_SCHEMA,
     )
     async def get_panel_state(self, **_: Any):
-        settings = self._settings_snapshot()
-        api_key = await self._load_api_key()
+        async with self._config_lock:
+            settings = self._settings_snapshot()
+            if bool(getattr(self.store, "enabled", False)):
+                key_read_ok, raw_api_key, api_key = await self._load_api_key_checked()
+            else:
+                key_read_ok, raw_api_key, api_key = True, "", ""
+            if not key_read_ok:
+                return Err(
+                    SdkError("无法安全读取 API 密钥（StoreError），请稍后刷新面板")
+                )
+            with self._state_lock:
+                defaults = {
+                    key: (list(value) if isinstance(value, list) else value)
+                    for key, value in self._manifest_settings.items()
+                }
+        self._remember_secrets(raw_api_key, api_key)
+        secrets = self._known_secrets_snapshot(raw_api_key, api_key)
         secret_warning: str | None = None
-        if api_key and _settings_contain_secret(settings, api_key):
+        if _settings_contain_secret(settings, secrets):
             settings = {
                 key: (list(value) if isinstance(value, list) else value)
                 for key, value in DEFAULT_SETTINGS.items()
@@ -2154,169 +2845,273 @@ class ImageGeneratorPlugin(NekoPluginBase):
             api_state = self._api_state
             last_request = dict(self._last_request)
             configuration_warning = secret_warning or self._configuration_warning
-            defaults = {
-                key: (list(value) if isinstance(value, list) else value)
-                for key, value in self._manifest_settings.items()
-            }
-        if api_key and _settings_contain_secret(defaults, api_key):
+        if _settings_contain_secret(defaults, secrets):
             defaults = {
                 key: (list(value) if isinstance(value, list) else value)
                 for key, value in DEFAULT_SETTINGS.items()
             }
+            configuration_warning = (
+                secret_warning or "检测到默认设置中包含 API 密钥；面板已隐藏这些设置"
+            )
+        try:
+            secret_envelope: dict[str, Any] | None = await self._issue_secret_envelope()
+        except SdkError:
+            secret_envelope = None
+            configuration_warning = (
+                configuration_warning
+                or "密钥加密组件不可用；请重新安装插件后再配置 API 密钥"
+            )
         cache.update(
             {
                 "max_count": settings["cache_max_count"],
                 "max_bytes": settings["cache_max_bytes"],
             }
         )
-        return Ok(
-            {
-                "running": running,
-                "api_state": api_state,
-                "configuration_warning": configuration_warning,
-                "store_enabled": bool(getattr(self.store, "enabled", False)),
-                "asset_cache_available": self._asset_dir is not None,
-                "api_key_configured": bool(api_key),
-                "api_key_hint": _api_key_hint(api_key),
-                "settings": settings,
-                "defaults": defaults,
-                "history": history[:20],
-                "cache": cache,
-                "last_request": last_request,
-            }
+        payload = {
+            "running": running,
+            "api_state": api_state,
+            "configuration_warning": configuration_warning,
+            "store_enabled": bool(getattr(self.store, "enabled", False)),
+            "asset_cache_available": self._asset_dir is not None,
+            "api_key_configured": bool(api_key),
+            "secret_envelope": secret_envelope,
+            "settings": settings,
+            "defaults": defaults,
+            "history": history[:20],
+            "cache": cache,
+            "last_request": last_request,
+        }
+        return Ok(_redact_structure(payload, secrets))
+
+    async def _sanitize_history_before_secret_change(
+        self,
+        *,
+        secrets: tuple[str, ...],
+        history_limit: int,
+    ) -> bool:
+        read_ok, raw_history = await self._store_get_checked(
+            _HISTORY_STORE_KEY,
+            [],
+        )
+        if not read_ok:
+            return False
+        if not isinstance(raw_history, list):
+            return await self._store_set(_HISTORY_STORE_KEY, [])
+        sanitized: list[dict[str, Any]] = []
+        for item in raw_history:
+            record = _safe_history_record(item, secrets)
+            if record is not None:
+                sanitized.append(self._project_history_record(record))
+        return await self._store_set(
+            _HISTORY_STORE_KEY,
+            sanitized[:history_limit],
         )
 
     @plugin_entry(
         id="save_settings",
         name="保存图片生成器设置",
-        description="校验并保存非秘密设置；API 密钥单独写入 PluginStore。",
+        description=(
+            "消费一次性 RSA-OAEP + AES-GCM 加密载荷，原子保存设置和 API 密钥。"
+        ),
         input_schema=_SAVE_SETTINGS_SCHEMA,
     )
     async def save_settings(
         self,
-        api_base_url: str,
-        model: str,
-        default_size: str,
-        default_quality: str,
-        default_style: str,
-        allowed_sizes: list[str],
-        allowed_qualities: list[str],
-        allowed_styles: list[str],
-        output_format: str,
-        response_format: str,
-        timeout_seconds: float,
-        max_download_bytes: int,
-        cache_max_count: int,
-        cache_max_bytes: int,
-        history_limit: int,
-        auto_show_in_chat: bool,
-        api_key: str = "",
-        clear_api_key: bool = False,
-        **_: Any,
+        encrypted_payload: str = "",
+        key_id: str = "",
+        **extra: Any,
     ):
-        if not isinstance(clear_api_key, bool):
-            return Err(SdkError("清除密钥开关必须是布尔值"))
-        if not isinstance(api_key, str):
-            return Err(SdkError("API 密钥必须是文本"))
+        unexpected = sorted(key for key in extra if key != "_ctx")
+        if unexpected:
+            return Err(SdkError("保存设置仅接受一次性加密载荷，请刷新管理面板"))
+        if not bool(getattr(self.store, "enabled", False)):
+            return Err(SdkError("插件存储已禁用，无法保存设置或 API 密钥"))
         try:
-            validated = _validate_settings(
-                {
-                    "api_base_url": api_base_url,
-                    "model": model,
-                    "default_size": default_size,
-                    "default_quality": default_quality,
-                    "default_style": default_style,
-                    "allowed_sizes": allowed_sizes,
-                    "allowed_qualities": allowed_qualities,
-                    "allowed_styles": allowed_styles,
-                    "output_format": output_format,
-                    "response_format": response_format,
-                    "timeout_seconds": timeout_seconds,
-                    "max_download_bytes": max_download_bytes,
-                    "cache_max_count": cache_max_count,
-                    "cache_max_bytes": cache_max_bytes,
-                    "history_limit": history_limit,
-                    "auto_show_in_chat": auto_show_in_chat,
-                },
-                base=self._manifest_settings,
-                require_all=True,
-            )
-            new_api_key = (
-                ""
-                if clear_api_key
-                else (_validate_api_key(api_key) if api_key.strip() else "")
+            document = await self._consume_encrypted_settings(
+                encrypted_payload=encrypted_payload,
+                key_id=key_id,
             )
         except SdkError as exc:
             return Err(exc)
 
-        if not bool(getattr(self.store, "enabled", False)):
-            return Err(SdkError("插件存储已禁用，无法保存设置或 API 密钥"))
-        await self._acquire_lock(self._settings_update_lock)
+        expected_fields = set(DEFAULT_SETTINGS) | {"api_key", "clear_api_key"}
+        if set(document) != expected_fields:
+            return Err(SdkError("加密设置文档字段不完整或包含未知字段"))
+        raw_new_key = document.get("api_key")
+        clear_api_key = document.get("clear_api_key")
+        if not isinstance(raw_new_key, str):
+            return Err(SdkError("加密设置文档中的 API 密钥格式无效"))
+        if not isinstance(clear_api_key, bool):
+            return Err(SdkError("加密设置文档中的清除密钥开关无效"))
+        if clear_api_key and raw_new_key.strip():
+            return Err(SdkError("不能同时提供新 API 密钥并清除密钥"))
+        raw_settings = {key: document[key] for key in DEFAULT_SETTINGS}
+
         key_changed = False
-        try:
-            old_settings = await self._store_get(_SETTINGS_STORE_KEY, None)
-            old_api_key = await self._store_get(_API_KEY_STORE_KEY, None)
-            effective_api_key = ""
-            if not clear_api_key:
-                if new_api_key:
-                    effective_api_key = new_api_key
-                elif isinstance(old_api_key, str):
-                    try:
-                        effective_api_key = _validate_api_key(old_api_key)
-                    except SdkError:
-                        effective_api_key = ""
-            if _settings_contain_secret(validated, effective_api_key):
-                return Err(SdkError("API 密钥不能出现在 API 地址、模型或允许列表中"))
-            if not await self._store_set(_SETTINGS_STORE_KEY, validated):
-                return Err(SdkError("保存设置失败（StoreError），请稍后重试"))
-
-            key_error: str | None = None
-            if clear_api_key:
-                deleted_ok, _existed = await self._store_delete(_API_KEY_STORE_KEY)
-                if not deleted_ok:
-                    key_error = "清除 API 密钥失败（StoreError）"
-                else:
-                    key_changed = True
-            elif new_api_key:
-                if not await self._store_set(
-                    _API_KEY_STORE_KEY,
-                    new_api_key,
-                ):
-                    key_error = "保存 API 密钥失败（StoreError）"
-                else:
-                    key_changed = True
-
-            if key_error is not None:
-                if old_settings is None:
-                    settings_restored, _ = await self._store_delete(_SETTINGS_STORE_KEY)
-                else:
-                    settings_restored = await self._store_set(
-                        _SETTINGS_STORE_KEY,
-                        old_settings,
-                    )
-                if old_api_key is None:
-                    key_restored, _ = await self._store_delete(_API_KEY_STORE_KEY)
-                else:
-                    key_restored = await self._store_set(
-                        _API_KEY_STORE_KEY,
-                        old_api_key,
-                    )
-                if not settings_restored or not key_restored:
-                    self.logger.warning(
-                        "ImageGenerator settings rollback incomplete: "
-                        "failure_class=StoreError"
-                    )
-                return Err(SdkError(key_error))
-
+        async with self._config_lock:
             with self._state_lock:
-                self._settings = validated
-                self._configuration_warning = (
-                    None
-                    if self._asset_dir is not None
-                    else "生成图片缓存不可用；管理面板可能可读，但生成已降级"
+                old_runtime_settings = {
+                    key: (list(value) if isinstance(value, list) else value)
+                    for key, value in self._settings.items()
+                }
+                old_configuration_warning = self._configuration_warning
+            settings_read_ok, old_settings = await self._store_get_checked(
+                _SETTINGS_STORE_KEY,
+                None,
+            )
+            key_read_ok, raw_old_key = await self._store_get_checked(
+                _API_KEY_STORE_KEY,
+                "",
+            )
+            if not settings_read_ok or not key_read_ok:
+                return Err(
+                    SdkError("无法在保存前安全读取当前设置或 API 密钥（StoreError）")
                 )
-        finally:
-            self._settings_update_lock.release()
+            old_key = raw_old_key if isinstance(raw_old_key, str) else ""
+            candidate_new_key = raw_new_key.strip()
+            self._remember_secrets(
+                old_key,
+                candidate_new_key if len(candidate_new_key) >= 8 else "",
+            )
+            secrets = self._known_secrets_snapshot(
+                old_key,
+                candidate_new_key,
+            )
+            if _value_contains_secret(
+                [raw_settings, self._manifest_settings],
+                secrets,
+            ):
+                return Err(
+                    SdkError("API 密钥不能出现在 API 地址、模型、默认值或允许列表中")
+                )
+            try:
+                validated = _validate_settings(
+                    raw_settings,
+                    base=self._manifest_settings,
+                    require_all=True,
+                )
+                new_api_key = (
+                    ""
+                    if clear_api_key
+                    else (
+                        _validate_api_key(candidate_new_key)
+                        if candidate_new_key
+                        else ""
+                    )
+                )
+            except SdkError as exc:
+                return Err(exc)
+            try:
+                validated_old_key = _validate_api_key(old_key) if old_key else ""
+            except SdkError:
+                validated_old_key = ""
+
+            effective_api_key = (
+                "" if clear_api_key else (new_api_key or validated_old_key)
+            )
+            await self._acquire_lock(self._history_lock)
+            try:
+                history_safe = await self._sanitize_history_before_secret_change(
+                    secrets=secrets,
+                    history_limit=int(validated["history_limit"]),
+                )
+                if not history_safe:
+                    return Err(
+                        SdkError("无法在更新密钥前安全清理历史记录（StoreError）")
+                    )
+
+                async def restore_previous_configuration() -> tuple[bool, bool]:
+                    key_removed, _ = await self._store_delete(_API_KEY_STORE_KEY)
+                    if not key_removed:
+                        return False, False
+                    if old_settings is None:
+                        settings_restored, _ = await self._store_delete(
+                            _SETTINGS_STORE_KEY
+                        )
+                    else:
+                        settings_restored = await self._store_set(
+                            _SETTINGS_STORE_KEY,
+                            old_settings,
+                        )
+                    if not settings_restored:
+                        return False, False
+                    # The rollback credential may become durable in a worker
+                    # thread just as this task is cancelled. Publish the old
+                    # runtime settings before awaiting that write so the old
+                    # key can never be observed with the new endpoint.
+                    with self._state_lock:
+                        self._settings = old_runtime_settings
+                        self._configuration_warning = old_configuration_warning
+                    if old_key:
+                        key_restored = await self._store_set(
+                            _API_KEY_STORE_KEY,
+                            old_key,
+                        )
+                    else:
+                        key_restored = True
+                    return settings_restored, key_restored
+
+                # Fail closed across process loss: remove the authoritative key
+                # before changing settings, then restore/write it only after the
+                # settings commit. Every crash-visible intermediate state has no
+                # usable credential instead of a key paired with the wrong URL.
+                key_staged, key_existed = await self._store_delete(
+                    _API_KEY_STORE_KEY
+                )
+                if not key_staged:
+                    return Err(
+                        SdkError(
+                            "无法在保存前安全暂存 API 密钥（StoreError），"
+                            "请稍后重试"
+                        )
+                    )
+
+                if not await self._store_set(_SETTINGS_STORE_KEY, validated):
+                    settings_restored, key_restored = (
+                        await restore_previous_configuration()
+                    )
+                    if not settings_restored or not key_restored:
+                        self.logger.warning(
+                            "ImageGenerator settings rollback incomplete: "
+                            "failure_class=StoreError"
+                        )
+                    return Err(SdkError("保存设置失败（StoreError），请稍后重试"))
+
+                # Publish the matching settings before the credential write.
+                # PluginStore uses a worker thread, so task cancellation can
+                # arrive after a durable key commit. At every await boundary,
+                # runtime settings must therefore already match any new key
+                # that may have reached the Store.
+                with self._state_lock:
+                    self._settings = validated
+                    self._configuration_warning = (
+                        None
+                        if self._asset_dir is not None
+                        else "生成图片缓存不可用；管理面板可能可读，但生成已降级"
+                    )
+
+                if effective_api_key and not await self._store_set(
+                    _API_KEY_STORE_KEY,
+                    effective_api_key,
+                ):
+                    settings_restored, key_restored = (
+                        await restore_previous_configuration()
+                    )
+                    if not settings_restored or not key_restored:
+                        self.logger.warning(
+                            "ImageGenerator settings rollback incomplete: "
+                            "failure_class=StoreError"
+                        )
+                    return Err(SdkError("保存 API 密钥失败（StoreError）"))
+
+                key_changed = (
+                    key_existed
+                    if clear_api_key
+                    else effective_api_key != validated_old_key
+                )
+            finally:
+                self._history_lock.release()
+
         try:
             await self._prune_cache()
         except Exception as exc:
@@ -2324,18 +3119,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 "ImageGenerator cache prune after save failed: failure_class={}",
                 type(exc).__name__,
             )
-        current_api_key = await self._load_api_key()
-        await self._acquire_lock(self._history_lock)
-        try:
-            history = await self._load_history(api_key=current_api_key)
-            if len(history) > int(validated["history_limit"]):
-                await self._store_set(
-                    _HISTORY_STORE_KEY,
-                    history[: int(validated["history_limit"])],
-                )
-        finally:
-            self._history_lock.release()
-        key_configured = bool(current_api_key)
+        key_configured = bool(effective_api_key)
         self.logger.info(
             "ImageGenerator settings saved: output_format={} "
             "response_format={} key_changed={} key_configured={} auto_show={}",
@@ -2346,12 +3130,14 @@ class ImageGeneratorPlugin(NekoPluginBase):
             validated["auto_show_in_chat"],
         )
         return Ok(
-            {
-                "saved": True,
-                "settings": self._settings_snapshot(),
-                "api_key_configured": key_configured,
-                "api_key_hint": _api_key_hint(current_api_key),
-            }
+            _redact_structure(
+                {
+                    "saved": True,
+                    "settings": self._settings_snapshot(),
+                    "api_key_configured": key_configured,
+                },
+                self._known_secrets_snapshot(effective_api_key),
+            )
         )
 
     @plugin_entry(
@@ -2363,23 +3149,41 @@ class ImageGeneratorPlugin(NekoPluginBase):
     async def reset_settings(self, **_: Any):
         if not bool(getattr(self.store, "enabled", False)):
             return Err(SdkError("插件存储已禁用，无法恢复默认设置"))
-        await self._acquire_lock(self._settings_update_lock)
-        try:
+        async with self._config_lock:
+            key_read_ok, raw_api_key = await self._store_get_checked(
+                _API_KEY_STORE_KEY,
+                "",
+            )
+            if not key_read_ok:
+                return Err(SdkError("无法在恢复设置前安全读取 API 密钥（StoreError）"))
+            api_key = raw_api_key if isinstance(raw_api_key, str) else ""
+            self._remember_secrets(api_key)
+            secrets = self._known_secrets_snapshot(api_key)
+            target_settings = {
+                key: (list(value) if isinstance(value, list) else value)
+                for key, value in self._manifest_settings.items()
+            }
+            if _settings_contain_secret(target_settings, secrets):
+                return Err(
+                    SdkError(
+                        "默认设置包含当前或历史 API 密钥，已拒绝恢复；"
+                        "请检查 plugin.toml"
+                    )
+                )
             deleted_ok, _existed = await self._store_delete(_SETTINGS_STORE_KEY)
             if not deleted_ok:
                 return Err(SdkError("恢复默认设置失败（StoreError）"))
             with self._state_lock:
-                self._settings = {
-                    key: (list(value) if isinstance(value, list) else value)
-                    for key, value in self._manifest_settings.items()
-                }
+                self._settings = target_settings
                 self._configuration_warning = (
                     None
                     if self._asset_dir is not None
                     else "生成图片缓存不可用；管理面板可能可读，但生成已降级"
                 )
-        finally:
-            self._settings_update_lock.release()
+            try:
+                key_configured = bool(_validate_api_key(api_key)) if api_key else False
+            except SdkError:
+                key_configured = False
         try:
             await self._prune_cache()
         except Exception as exc:
@@ -2388,11 +3192,14 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 type(exc).__name__,
             )
         return Ok(
-            {
-                "reset": True,
-                "settings": self._settings_snapshot(),
-                "api_key_configured": bool(await self._load_api_key()),
-            }
+            _redact_structure(
+                {
+                    "reset": True,
+                    "settings": self._settings_snapshot(),
+                    "api_key_configured": key_configured,
+                },
+                secrets,
+            )
         )
 
     @plugin_entry(
@@ -2404,11 +3211,48 @@ class ImageGeneratorPlugin(NekoPluginBase):
     async def clear_api_key(self, **_: Any):
         if not bool(getattr(self.store, "enabled", False)):
             return Err(SdkError("插件存储已禁用，无法清除 API 密钥"))
-        await self._acquire_lock(self._settings_update_lock)
-        try:
+        async with self._config_lock:
+            key_read_ok, raw_api_key = await self._store_get_checked(
+                _API_KEY_STORE_KEY,
+                "",
+            )
+            settings_read_ok, stored_settings = await self._store_get_checked(
+                _SETTINGS_STORE_KEY,
+                None,
+            )
+            if not key_read_ok or not settings_read_ok:
+                return Err(
+                    SdkError("无法在清除前安全读取当前设置或 API 密钥（StoreError）")
+                )
+            api_key = raw_api_key if isinstance(raw_api_key, str) else ""
+            current_settings = self._settings_snapshot()
+            self._remember_secrets(api_key)
+            secrets = self._known_secrets_snapshot(api_key)
+            if _value_contains_secret(
+                [
+                    stored_settings,
+                    current_settings,
+                    self._manifest_settings,
+                ],
+                secrets,
+            ):
+                return Err(
+                    SdkError(
+                        "设置中仍包含 API 密钥；请先通过加密面板保存安全设置，"
+                        "再清除密钥"
+                    )
+                )
+            await self._acquire_lock(self._history_lock)
+            try:
+                history_safe = await self._sanitize_history_before_secret_change(
+                    secrets=secrets,
+                    history_limit=int(current_settings["history_limit"]),
+                )
+            finally:
+                self._history_lock.release()
+            if not history_safe:
+                return Err(SdkError("无法在清除密钥前安全清理历史记录（StoreError）"))
             deleted_ok, existed = await self._store_delete(_API_KEY_STORE_KEY)
-        finally:
-            self._settings_update_lock.release()
         if not deleted_ok:
             return Err(SdkError("清除 API 密钥失败（StoreError）"))
         self.logger.info("ImageGenerator API key cleared: existed={}", existed)
@@ -2416,7 +3260,6 @@ class ImageGeneratorPlugin(NekoPluginBase):
             {
                 "cleared": existed,
                 "api_key_configured": False,
-                "api_key_hint": None,
             }
         )
 
@@ -2436,9 +3279,23 @@ class ImageGeneratorPlugin(NekoPluginBase):
             )
         except SdkError as exc:
             return Err(exc)
-        api_key = await self._load_api_key()
+        async with self._config_lock:
+            if bool(getattr(self.store, "enabled", False)):
+                key_read_ok, raw_api_key, api_key = await self._load_api_key_checked()
+                if not key_read_ok:
+                    return Err(
+                        SdkError("无法安全读取 API 密钥（StoreError），请稍后重试")
+                    )
+            else:
+                raw_api_key = api_key = ""
+            self._remember_secrets(raw_api_key, api_key)
         history = (await self._load_history(api_key=api_key))[:resolved_limit]
-        return Ok({"history": history, "count": len(history)})
+        return Ok(
+            _redact_structure(
+                {"history": history, "count": len(history)},
+                self._known_secrets_snapshot(api_key),
+            )
+        )
 
     @plugin_entry(
         id="clear_history",
@@ -2483,6 +3340,6 @@ __all__ = [
     "_image_type",
     "_new_http_client",
     "_normalize_api_base_url",
-    "_url_resolves_to_public_unicast",
+    "_sanitize_image",
     "_validate_settings",
 ]

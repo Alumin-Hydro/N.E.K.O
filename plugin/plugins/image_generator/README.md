@@ -16,17 +16,18 @@ Content-Type: application/json
 
 请求体包含 `model`、`prompt`、`n = 1`，以及配置后适用的 `size`、`quality`、
 `style`。面板中的“图片格式”对应 OpenAI 的 `output_format`
-（`png` / `jpeg` / `webp`）；“响应方式”是兼容接口常见的
-`response_format`（`url` / `b64_json`）。任一项选择 `auto` 都会省略对应
-参数，由提供商决定。插件接受 `data[0].url` 或 `data[0].b64_json`，并读取
-可选的 `revised_prompt`。
+（`png` / `jpeg` / `webp`）。出于 SSRF 与隐私安全考虑，插件将响应接收策略
+固定为 Base64：只接受 `data[0].b64_json`，不会读取或下载提供商返回的远程
+`data[0].url`。对于 DALL·E 与一般兼容模型，请求会发送
+`response_format = b64_json`；GPT Image 模型本身固定返回 Base64 且不支持该旧字段，
+因此插件会省略字段但仍只接受 Base64。响应可包含可选的 `revised_prompt`。
 
 不同提供商对模型、尺寸、质量、风格、`output_format` 和
-`response_format` 的支持不同。请把面板允许列表设置为提供商真实支持的值；
+`response_format = b64_json` 的支持不同。请把面板允许列表设置为提供商真实支持的值；
 提供商忽略或拒绝字段时，以其文档为准。Base URL 应包含版本路径（例如
 `https://api.example.com/v1`），但不要包含 `/images/generations`。
-除可信的本机/内网自托管服务外应使用 HTTPS；使用普通 HTTP 会让 Bearer 密钥依赖
-所在网络的保密性。
+公网与内网服务必须使用 HTTPS；只有 `localhost`、`127.0.0.0/8` 或 `::1`
+回环开发地址允许使用普通 HTTP。
 
 兼容范围有意保持清晰：当前只支持 Bearer 密钥、固定追加
 `/images/generations`、不带查询参数的 Base URL，以及 `auto` 或 `宽x高`
@@ -36,26 +37,28 @@ Content-Type: application/json
 ## 安全与存储
 
 - API 密钥只写入 `PluginStore` 的独立记录，不出现在 `plugin.toml`、日志、面板响应、
-  生成历史或工具结果中。面板只显示“已配置”和可选末四位提示。
-- 空密钥保存会保留旧值；只有“清除密钥”或 `clear_api_key=true` 才会删除。
+  生成历史或工具结果中。面板只显示是否已配置，不返回任何密钥片段。
+- 面板从 `get_panel_state` 获取一个短时、一次性的 RSA 公钥信封；浏览器使用
+  WebCrypto 生成临时 AES-256-GCM 密钥加密完整保存载荷（所有设置与可选 API
+  密钥），再以 RSA-OAEP SHA-256 包装该 AES 密钥。`save_settings` 的 `/runs`
+  参数只包含密文和信封编号，因此即使宿主记录任务参数，也没有明文设置或凭据。
+  RSA 私钥只存在于插件进程内，对称密钥不会返回给面板。过期、重复使用或未知信封
+  会被拒绝。
+- 空密钥保存会保留旧值；只有面板中的“清除密钥”动作才会删除。
 - 提供商错误正文不会回显或写入日志。提示词、修订提示和历史摘要有长度上限并会对
   密钥形态做脱敏。
-- URL 图片会在服务器端流式下载，逐跳验证重定向，拒绝非 HTTP(S)、凭据 URL、
-  私网/回环/链路本地目标，并同时执行 `Content-Length` 与实际读取字节上限。
-  用户明确配置的私网/回环 IP 字面量 API 地址可用于本地自托管服务；同源域名仍须
-  解析为公网单播地址。
-- Base64 与 URL 图片都会验证魔数，只接受 PNG、JPEG、GIF、WebP。文件名由随机
-  ID 生成，不使用提示词或远端路径。
+- 提供商 URL 图片会直接拒绝，服务器不会为响应中的 URL 发起二次网络请求，从而
+  消除 URL 下载路径的 DNS 重绑定竞态。
+- Base64 图片先执行严格大小限制，再通过 Pillow 完整解码、`verify()`、尺寸与像素
+  上限检查，并安全重编码为 PNG、JPEG 或 WebP。损坏、截断、格式伪装和解压缩炸弹
+  图片都会拒绝。文件名由随机 ID 生成，不使用提示词或远端路径。
 - 最近历史仅保存时间、模型、截断提示摘要、本地结果 URL 和状态。历史数量与本地
   文件缓存的数量/总字节数都受面板设置约束；缓存淘汰后，对外读取历史时会隐藏已
   失效的本地链接。
 
-域名校验在连接前执行并在每次重定向重复，但通用 HTTP 客户端随后仍会独立解析域名，
-因此无法完全消除恶意 DNS 重绑定的检查/连接竞态。请只配置可信提供商；高安全部署可
-使用受控出口代理或网络层访问策略。
-
 生成文件位于插件数据目录的可写静态 UI 副本中，通过
-`/plugin/image_generator/ui/generated/...` 提供。源插件目录不会被运行时写入。
+`/plugin/image_generator/ui/generated/...` 提供。管理面板只会预览同源且匹配该
+路径的缓存图片，绝不会加载历史或结果中的任意远程 URL。源插件目录不会被运行时写入。
 
 ## 聊天显示
 

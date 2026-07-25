@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import io
 import json
 import re
 import shutil
 import subprocess
+import threading
 import tomllib
 import zipfile
 from pathlib import Path
@@ -16,8 +18,14 @@ from typing import Any
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from fastapi import FastAPI
+from PIL import Image
 
 import plugin.plugins.image_generator as image_generator_module
+from plugin._types.models import RunCreateResponse
 from plugin.neko_plugin_cli.public import build_plugin
 from plugin.plugins.image_generator import (
     DEFAULT_SETTINGS,
@@ -33,16 +41,27 @@ from plugin.plugins.image_generator import (
 from plugin.sdk.plugin import Err, Ok, SdkError
 from plugin.sdk.plugin.llm_tool import LLM_TOOL_META_ATTR
 from plugin.sdk.shared.constants import EVENT_META_ATTR
+from plugin.runs.manager import ExportItem, ExportListResponse, RunRecord
+from plugin.server.routes import runs as runs_route_module
 
 pytestmark = pytest.mark.plugin_unit
 
 PLUGIN_DIR = Path(__file__).resolve().parents[3] / "plugins" / "image_generator"
 PLUGIN_TOML = PLUGIN_DIR / "plugin.toml"
+PLUGIN_PYPROJECT = PLUGIN_DIR / "pyproject.toml"
 PANEL_HTML = PLUGIN_DIR / "static" / "index.html"
 I18N_DIR = PLUGIN_DIR / "i18n"
 
 SECRET = "sk-unit-test-super-secret-9876"
-PNG_BYTES = b"\x89PNG\r\n\x1a\nunit-test-pixels"
+
+
+def _real_png_bytes() -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (8, 6), (18, 108, 214)).save(output, format="PNG")
+    return output.getvalue()
+
+
+PNG_BYTES = _real_png_bytes()
 PNG_B64 = base64.b64encode(PNG_BYTES).decode("ascii")
 LOCALES = {"zh-CN", "zh-TW", "en", "ja", "ko", "es", "pt", "ru"}
 
@@ -347,6 +366,11 @@ def prepare_asset_cache(
     asset_dir.mkdir(parents=True)
     plugin._writable_ui_dir = writable_ui
     plugin._asset_dir = asset_dir
+    root_stat = writable_ui.stat()
+    plugin._writable_ui_identity = (
+        int(root_stat.st_dev),
+        int(root_stat.st_ino),
+    )
     return asset_dir
 
 
@@ -355,6 +379,62 @@ def save_payload(**overrides: Any) -> dict[str, Any]:
     payload.update({"api_key": "", "clear_api_key": False})
     payload.update(overrides)
     return payload
+
+
+def encrypt_save_document(
+    document: dict[str, Any],
+    envelope: dict[str, Any],
+) -> str:
+    key_id = envelope["key_id"]
+    binding = f"image_generator:{key_id}".encode("utf-8")
+    public_key = serialization.load_der_public_key(
+        base64.b64decode(envelope["public_key_spki_b64"], validate=True)
+    )
+    aes_key = AESGCM.generate_key(bit_length=256)
+    iv = b"\x01\x23\x45\x67\x89\xab\xcd\xef\x10\x32\x54\x76"
+    wrapped_key = public_key.encrypt(
+        aes_key,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=binding,
+        ),
+    )
+    ciphertext = AESGCM(aes_key).encrypt(
+        iv,
+        json.dumps(
+            document,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        binding,
+    )
+    outer = {
+        "v": 1,
+        "wrapped_key": base64.b64encode(wrapped_key).decode("ascii"),
+        "iv": base64.b64encode(iv).decode("ascii"),
+        "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+    }
+    return base64.b64encode(
+        json.dumps(outer, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+
+
+async def encrypted_save_payload(
+    plugin: ImageGeneratorPlugin,
+    **overrides: Any,
+) -> dict[str, str]:
+    state = await plugin.get_panel_state()
+    assert state.is_ok()
+    envelope = state.value["secret_envelope"]
+    assert envelope["algorithm"] == "RSA-OAEP-256+A256GCM"
+    return {
+        "encrypted_payload": encrypt_save_document(
+            save_payload(**overrides),
+            envelope,
+        ),
+        "key_id": envelope["key_id"],
+    }
 
 
 def generation_payload(
@@ -376,7 +456,7 @@ def install_client(
     monkeypatch: pytest.MonkeyPatch,
     client: FakeClient,
 ) -> None:
-    monkeypatch.setattr(plugin, "_get_client", lambda: client)
+    monkeypatch.setattr(plugin, "_get_client", lambda **_kwargs: client)
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +569,7 @@ async def test_host_simulation_startup_generate_and_shutdown(
     monkeypatch.setattr(
         image_generator_module,
         "_new_http_client",
-        lambda: client,
+        lambda **_kwargs: client,
     )
 
     started = await plugin.startup()
@@ -516,7 +596,10 @@ async def test_startup_reports_degraded_without_writable_asset_cache(
 ) -> None:
     plugin, _ctx, _store = make_plugin()
 
-    def fail_copy(_target: Path) -> None:
+    def fail_copy(
+        _target: Path,
+        _identity: tuple[int, int],
+    ) -> None:
         raise OSError("read-only data directory")
 
     monkeypatch.setattr(plugin, "_copy_static_ui_assets", fail_copy)
@@ -533,13 +616,13 @@ async def test_startup_reports_degraded_without_writable_asset_cache(
     await plugin.shutdown()
 
 
-def test_http_client_is_replaced_per_event_loop_and_closed_best_effort(
+def test_http_clients_are_per_call_and_never_retained_across_event_loops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plugin, _ctx, _store = make_plugin()
     clients: list[FakeClient] = []
 
-    def factory() -> FakeClient:
+    def factory(**_kwargs: Any) -> FakeClient:
         client = FakeClient()
         clients.append(client)
         return client
@@ -551,14 +634,17 @@ def test_http_client_is_replaced_per_event_loop_and_closed_best_effort(
 
     first = asyncio.run(get_client())
     second = asyncio.run(get_client())
+    asyncio.run(first.aclose())
+    asyncio.run(second.aclose())
     stopped = asyncio.run(plugin.shutdown())
 
     assert first is not second
     assert clients == [first, second]
     assert first.is_closed is True
     assert second.is_closed is True
+    assert not hasattr(plugin, "_retired_clients")
     assert stopped.is_ok()
-    assert stopped.value["clients_seen"] == 2
+    assert stopped.value["clients_seen"] == 0
 
 
 def test_real_http_client_configuration() -> None:
@@ -568,6 +654,38 @@ def test_real_http_client_configuration() -> None:
         assert client.headers["User-Agent"] == USER_AGENT
     finally:
         asyncio.run(client.aclose())
+
+
+@pytest.mark.asyncio
+async def test_loopback_provider_disables_environment_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    client = FakeClient([FakeResponse(generation_payload())])
+    trust_env_values: list[bool] = []
+
+    def client_factory(*, trust_env: bool = True) -> FakeClient:
+        trust_env_values.append(trust_env)
+        return client
+
+    monkeypatch.setattr(
+        image_generator_module,
+        "_new_http_client",
+        client_factory,
+    )
+    settings = copy.deepcopy(DEFAULT_SETTINGS)
+    settings["api_base_url"] = "http://127.0.0.1:48999/v1"
+
+    await plugin._request_generation(
+        settings=settings,
+        api_key=SECRET,
+        prompt="local provider without proxy",
+        size="auto",
+        quality="auto",
+        style="",
+    )
+
+    assert trust_env_values == [False]
 
 
 # ---------------------------------------------------------------------------
@@ -583,34 +701,48 @@ async def test_save_key_empty_keep_explicit_clear_and_panel_redaction(
     prepare_asset_cache(plugin, tmp_path)
 
     saved = await plugin.save_settings(
-        **save_payload(api_key=SECRET, model="portable-image-model")
+        **await encrypted_save_payload(
+            plugin,
+            api_key=SECRET,
+            model="portable-image-model",
+        )
     )
     assert saved.is_ok()
     assert store.data["api_key"] == SECRET
     assert saved.value["api_key_configured"] is True
-    assert saved.value["api_key_hint"] == "••••9876"
+    assert "api_key_hint" not in saved.value
     assert SECRET not in json.dumps(saved.value, ensure_ascii=False)
 
     kept = await plugin.save_settings(
-        **save_payload(api_key="", model="portable-image-model-v2")
+        **await encrypted_save_payload(
+            plugin,
+            api_key="",
+            model="portable-image-model-v2",
+        )
     )
     assert kept.is_ok()
     assert store.data["api_key"] == SECRET
-    assert kept.value["api_key_hint"] == "••••9876"
+    assert "api_key_hint" not in kept.value
 
     panel = await plugin.get_panel_state()
     assert panel.is_ok()
     assert panel.value["api_key_configured"] is True
-    assert panel.value["api_key_hint"] == "••••9876"
+    assert "api_key_hint" not in panel.value
     assert "api_key" not in panel.value["settings"]
     assert SECRET not in json.dumps(panel.value, ensure_ascii=False)
     assert SECRET not in ctx.logger.rendered()
 
-    cleared = await plugin.save_settings(**save_payload(clear_api_key=True, api_key=""))
+    cleared = await plugin.save_settings(
+        **await encrypted_save_payload(
+            plugin,
+            clear_api_key=True,
+            api_key="",
+        )
+    )
     assert cleared.is_ok()
     assert "api_key" not in store.data
     assert cleared.value["api_key_configured"] is False
-    assert cleared.value["api_key_hint"] is None
+    assert "api_key_hint" not in cleared.value
 
 
 @pytest.mark.asyncio
@@ -620,7 +752,11 @@ async def test_reset_settings_and_clear_key_entries_are_independent(
     plugin, _ctx, store = make_plugin()
     prepare_asset_cache(plugin, tmp_path)
     saved = await plugin.save_settings(
-        **save_payload(api_key=SECRET, model="custom-model")
+        **await encrypted_save_payload(
+            plugin,
+            api_key=SECRET,
+            model="custom-model",
+        )
     )
     assert saved.is_ok()
 
@@ -636,7 +772,6 @@ async def test_reset_settings_and_clear_key_entries_are_independent(
     assert cleared.value == {
         "cleared": True,
         "api_key_configured": False,
-        "api_key_hint": None,
     }
     assert "api_key" not in store.data
 
@@ -650,7 +785,11 @@ async def test_settings_and_key_persist_across_real_store_instances(
     started = await first.startup()
     assert started.is_ok()
     saved = await first.save_settings(
-        **save_payload(api_key=SECRET, model="persisted-model")
+        **await encrypted_save_payload(
+            first,
+            api_key=SECRET,
+            model="persisted-model",
+        )
     )
     assert saved.is_ok()
     await first.shutdown()
@@ -665,7 +804,7 @@ async def test_settings_and_key_persist_across_real_store_instances(
     assert state.is_ok()
     assert state.value["settings"]["model"] == "persisted-model"
     assert state.value["api_key_configured"] is True
-    assert state.value["api_key_hint"] == "••••9876"
+    assert "api_key_hint" not in state.value
     assert SECRET not in json.dumps(state.value, ensure_ascii=False)
     await second.shutdown()
     closed_again = await second.store.close()
@@ -714,7 +853,7 @@ async def test_invalid_stored_config_surfaces_safe_warning() -> None:
 
 
 @pytest.mark.asyncio
-async def test_key_write_failure_rolls_back_persisted_settings(
+async def test_key_write_failure_rolls_back_settings_and_fails_closed(
     tmp_path: Path,
 ) -> None:
     old_settings = copy.deepcopy(DEFAULT_SETTINGS)
@@ -729,7 +868,8 @@ async def test_key_write_failure_rolls_back_persisted_settings(
     prepare_asset_cache(plugin, tmp_path)
 
     result = await plugin.save_settings(
-        **save_payload(
+        **await encrypted_save_payload(
+            plugin,
             api_key="sk-replacement-secret-1234",
             model="new-model",
         )
@@ -737,7 +877,7 @@ async def test_key_write_failure_rolls_back_persisted_settings(
 
     assert result.is_err()
     assert store.data["settings"] == old_settings
-    assert store.data["api_key"] == SECRET
+    assert "api_key" not in store.data
     assert plugin._settings["model"] == DEFAULT_SETTINGS["model"]
 
 
@@ -748,7 +888,13 @@ async def test_api_key_cannot_be_misfiled_into_returned_settings(
     plugin, ctx, store = make_plugin()
     prepare_asset_cache(plugin, tmp_path)
 
-    result = await plugin.save_settings(**save_payload(api_key=SECRET, model=SECRET))
+    result = await plugin.save_settings(
+        **await encrypted_save_payload(
+            plugin,
+            api_key=SECRET,
+            model=SECRET,
+        )
+    )
 
     assert result.is_err()
     assert store.data == {}
@@ -763,7 +909,9 @@ async def test_invalid_settings_and_disabled_store_return_result_errors(
     plugin, _ctx, _store = make_plugin(store=FakeStore(enabled=False))
     prepare_asset_cache(plugin, tmp_path)
 
-    disabled = await plugin.save_settings(**save_payload(api_key=SECRET))
+    disabled = await plugin.save_settings(
+        **await encrypted_save_payload(plugin, api_key=SECRET)
+    )
     assert disabled.is_err()
     assert isinstance(disabled.error, SdkError)
     assert "存储" in str(disabled.error)
@@ -771,13 +919,17 @@ async def test_invalid_settings_and_disabled_store_return_result_errors(
     enabled, _ctx, _store = make_plugin()
     prepare_asset_cache(enabled, tmp_path / "enabled")
     invalid = await enabled.save_settings(
-        **save_payload(api_base_url="file:///tmp/provider")
+        **await encrypted_save_payload(
+            enabled,
+            api_base_url="file:///tmp/provider",
+        )
     )
     assert invalid.is_err()
     assert "http" in str(invalid.error).lower()
 
     bad_default = await enabled.save_settings(
-        **save_payload(
+        **await encrypted_save_payload(
+            enabled,
             default_size="2048x2048",
             allowed_sizes=["1024x1024"],
         )
@@ -829,35 +981,11 @@ def test_base_url_normalization_rejects_credentials_query_and_fragment() -> None
             _normalize_api_base_url(unsafe)
 
 
-@pytest.mark.asyncio
-async def test_same_origin_hostname_does_not_bypass_public_dns_check(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_remote_provider_download_surface_is_absent() -> None:
     plugin, _ctx, _store = make_plugin()
-    seen: list[str] = []
-
-    def reject_dns(url: str) -> bool:
-        seen.append(url)
-        return False
-
-    monkeypatch.setattr(
-        image_generator_module,
-        "_url_resolves_to_public_unicast",
-        reject_dns,
-    )
-    with pytest.raises(Exception, match="私有网络"):
-        await plugin._ensure_download_url_allowed(
-            "https://provider.example/result.png",
-            api_base_url="https://provider.example/v1",
-        )
-    assert seen == ["https://provider.example/result.png"]
-
-    seen.clear()
-    await plugin._ensure_download_url_allowed(
-        "http://127.0.0.1:8080/result.png",
-        api_base_url="http://127.0.0.1:8080/v1",
-    )
-    assert seen == []
+    assert not hasattr(plugin, "_download_image")
+    assert not hasattr(plugin, "_ensure_download_url_allowed")
+    assert not hasattr(image_generator_module, "_url_resolves_to_public_unicast")
 
 
 # ---------------------------------------------------------------------------
@@ -916,6 +1044,7 @@ async def test_exact_request_body_headers_and_b64_response(
                 "Authorization": f"Bearer {SECRET}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
+                "Accept-Encoding": "identity",
                 "User-Agent": USER_AGENT,
             },
             "timeout": 19.5,
@@ -927,7 +1056,7 @@ async def test_exact_request_body_headers_and_b64_response(
 
 
 @pytest.mark.asyncio
-async def test_auto_request_omits_optional_and_provider_format_fields(
+async def test_auto_gpt_image_request_omits_optional_and_legacy_response_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plugin, _ctx, _store = make_plugin()
@@ -951,54 +1080,31 @@ async def test_auto_request_omits_optional_and_provider_format_fields(
 
 
 @pytest.mark.asyncio
-async def test_url_response_is_safely_streamed_without_forwarding_key(
+async def test_url_response_is_rejected_without_any_download(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        image_generator_module,
-        "_url_resolves_to_public_unicast",
-        lambda _url: True,
-    )
     plugin, _ctx, _store = make_plugin()
     remote_url = "https://images.example/assets/result.png"
     client = FakeClient(
         [FakeResponse(generation_payload(b64_json=None, url=remote_url))],
-        streams=[
-            FakeStreamResponse(
-                [PNG_BYTES[:8], PNG_BYTES[8:]],
-                headers={"content-length": str(len(PNG_BYTES))},
-            )
-        ],
     )
     install_client(plugin, monkeypatch, client)
     settings = copy.deepcopy(DEFAULT_SETTINGS)
     settings["api_base_url"] = "https://images.example/v1"
 
-    data, mime, extension, revised = await plugin._request_generation(
-        settings=settings,
-        api_key=SECRET,
-        prompt="stream it",
-        size="1024x1024",
-        quality="auto",
-        style="",
-    )
+    with pytest.raises(Exception) as caught:
+        await plugin._request_generation(
+            settings=settings,
+            api_key=SECRET,
+            prompt="reject remote URL",
+            size="1024x1024",
+            quality="auto",
+            style="",
+        )
 
-    assert (data, mime, extension) == (PNG_BYTES, "image/png", "png")
-    assert revised == "更清晰的测试提示"
-    assert client.stream_calls == [
-        {
-            "method": "GET",
-            "url": remote_url,
-            "headers": {
-                "User-Agent": USER_AGENT,
-                "Accept": "image/png,image/jpeg,image/gif,image/webp",
-            },
-            "timeout": DEFAULT_SETTINGS["timeout_seconds"],
-            "follow_redirects": False,
-        }
-    ]
-    assert "Authorization" not in client.stream_calls[0]["headers"]
-    assert SECRET not in json.dumps(client.stream_calls[0])
+    assert getattr(caught.value, "failure_class", "") == "ProviderUrlOutputRejected"
+    assert "b64_json" in str(caught.value)
+    assert client.stream_calls == []
 
 
 @pytest.mark.asyncio
@@ -1100,7 +1206,7 @@ async def test_generation_uses_one_end_to_end_timeout_budget(
     ("value", "expected"),
     [
         ("not-base64!", "Base64"),
-        (base64.b64encode(b"plain text").decode("ascii"), "PNG"),
+        (base64.b64encode(b"plain text").decode("ascii"), "损坏"),
         ("data:text/plain;base64,SGVsbG8=", "数据 URL"),
     ],
 )
@@ -1129,6 +1235,82 @@ def test_decode_rejects_oversized_b64_before_returning_bytes() -> None:
         _decode_b64_image(oversized, max_bytes=1_024)
 
 
+def test_palette_png_transparency_survives_safe_reencoding() -> None:
+    source = Image.new("P", (2, 1))
+    source.putpalette(
+        [
+            255,
+            0,
+            0,
+            0,
+            0,
+            255,
+            *([0] * (256 * 3 - 6)),
+        ]
+    )
+    source.putdata([0, 1])
+    raw = io.BytesIO()
+    source.save(
+        raw,
+        format="PNG",
+        transparency=bytes([0, 128]),
+    )
+
+    sanitized, mime, extension = _decode_b64_image(
+        base64.b64encode(raw.getvalue()).decode("ascii"),
+        max_bytes=1_000_000,
+    )
+
+    assert (mime, extension) == ("image/png", "png")
+    with Image.open(io.BytesIO(sanitized)) as decoded:
+        assert [pixel[3] for pixel in decoded.convert("RGBA").getdata()] == [0, 128]
+
+
+@pytest.mark.parametrize(
+    ("source_format", "expected_mime", "expected_extension"),
+    [
+        ("PNG", "image/png", "png"),
+        ("JPEG", "image/jpeg", "jpg"),
+        ("WEBP", "image/webp", "webp"),
+    ],
+)
+def test_supported_image_formats_are_verified_and_reencoded(
+    source_format: str,
+    expected_mime: str,
+    expected_extension: str,
+) -> None:
+    raw = io.BytesIO()
+    Image.new("RGB", (7, 5), (91, 42, 173)).save(raw, format=source_format)
+
+    sanitized, mime, extension = _decode_b64_image(
+        base64.b64encode(raw.getvalue()).decode("ascii"),
+        max_bytes=1_000_000,
+    )
+
+    assert (mime, extension) == (expected_mime, expected_extension)
+    with Image.open(io.BytesIO(sanitized)) as decoded:
+        assert decoded.format == source_format
+        decoded.load()
+
+
+def test_jpeg_exif_orientation_is_applied_before_metadata_is_removed() -> None:
+    source = Image.new("RGB", (2, 3), (24, 116, 207))
+    exif = Image.Exif()
+    exif[274] = 6
+    raw = io.BytesIO()
+    source.save(raw, format="JPEG", exif=exif)
+
+    sanitized, mime, extension = _decode_b64_image(
+        base64.b64encode(raw.getvalue()).decode("ascii"),
+        max_bytes=1_000_000,
+    )
+
+    assert (mime, extension) == ("image/jpeg", "jpg")
+    with Image.open(io.BytesIO(sanitized)) as decoded:
+        assert decoded.size == (3, 2)
+        assert decoded.getexif().get(274) is None
+
+
 @pytest.mark.asyncio
 async def test_provider_json_stream_is_bounded_before_parsing(
     monkeypatch: pytest.MonkeyPatch,
@@ -1155,6 +1337,49 @@ async def test_provider_json_stream_is_bounded_before_parsing(
 
 
 @pytest.mark.asyncio
+async def test_provider_rejects_compressed_response_before_decompression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+
+    class CompressedResponse(FakeStreamResponse):
+        def __init__(self) -> None:
+            super().__init__(
+                [],
+                headers={
+                    "content-encoding": "gzip",
+                    "content-length": "128",
+                },
+            )
+            self.iterated = False
+
+        async def aiter_bytes(self):
+            self.iterated = True
+            raise AssertionError("compressed response must not be decompressed")
+            yield b""  # pragma: no cover
+
+    response = CompressedResponse()
+    client = FakeClient([response])  # type: ignore[list-item]
+    install_client(plugin, monkeypatch, client)
+
+    with pytest.raises(Exception) as caught:
+        await plugin._request_generation(
+            settings=copy.deepcopy(DEFAULT_SETTINGS),
+            api_key=SECRET,
+            prompt="reject compressed response",
+            size="auto",
+            quality="auto",
+            style="",
+        )
+
+    assert getattr(caught.value, "failure_class", "") == (
+        "UnsupportedContentEncoding"
+    )
+    assert response.iterated is False
+    assert client.post_calls[0]["headers"]["Accept-Encoding"] == "identity"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "url",
     [
@@ -1165,7 +1390,7 @@ async def test_provider_json_stream_is_bounded_before_parsing(
         "http://169.254.169.254/latest/meta-data",
     ],
 )
-async def test_unsafe_image_urls_return_err_without_download(
+async def test_all_provider_image_urls_return_err_without_download(
     url: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1178,44 +1403,8 @@ async def test_unsafe_image_urls_return_err_without_download(
     result = await plugin.generate_image(prompt="unsafe URL")
 
     assert result.is_err()
-    assert "不安全" in str(result.error) or "不允许" in str(result.error)
+    assert "b64_json" in str(result.error)
     assert client.stream_calls == []
-
-
-@pytest.mark.asyncio
-async def test_url_download_declared_and_streamed_oversize_paths(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setattr(
-        image_generator_module,
-        "_url_resolves_to_public_unicast",
-        lambda _url: True,
-    )
-    url = "https://api.openai.com/asset.png"
-    streams = [
-        FakeStreamResponse(
-            [],
-            headers={"content-length": "2048"},
-        ),
-        FakeStreamResponse(
-            [PNG_BYTES, b"x" * 2_000],
-        ),
-    ]
-    for index, stream in enumerate(streams):
-        plugin, _ctx, _store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
-        prepare_asset_cache(plugin, tmp_path / str(index))
-        plugin._settings = copy.deepcopy(DEFAULT_SETTINGS)
-        plugin._settings["max_download_bytes"] = 1_024
-        client = FakeClient(
-            [FakeResponse(generation_payload(b64_json=None, url=url))],
-            streams=[stream],
-        )
-        install_client(plugin, monkeypatch, client)
-
-        result = await plugin.generate_image(prompt="too large")
-        assert result.is_err()
-        assert "最大下载字节数" in str(result.error)
 
 
 # ---------------------------------------------------------------------------
@@ -1281,6 +1470,38 @@ async def test_generate_pushes_small_markdown_without_inline_image_data(
     )
     assert SECRET not in history_json
     assert PNG_B64 not in history_json
+
+
+@pytest.mark.asyncio
+async def test_generated_url_cannot_collide_with_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    colliding_secret = "generated"
+    plugin, ctx, store = make_plugin(
+        store=FakeStore(data={"api_key": colliding_secret})
+    )
+    asset_dir = prepare_asset_cache(plugin, tmp_path)
+    install_client(
+        plugin,
+        monkeypatch,
+        FakeClient([FakeResponse(generation_payload())]),
+    )
+
+    result = await plugin.generate_image(prompt="secret collision")
+
+    assert result.is_err()
+    assert colliding_secret not in json.dumps(
+        {
+            "result": str(result.error),
+            "pushed": ctx.pushed,
+            "history": store.data.get("recent_generations", []),
+            "status": ctx.status_updates,
+            "logs": ctx.logger.rendered(),
+        },
+        ensure_ascii=False,
+    )
+    assert list(asset_dir.iterdir()) == []
 
 
 @pytest.mark.asyncio
@@ -1456,14 +1677,14 @@ async def test_asset_save_refuses_success_when_cache_delete_fails(
     plugin._settings["cache_max_count"] = 1
     old_file = asset_dir / f"{'d' * 32}.png"
     old_file.write_bytes(PNG_BYTES)
-    original_unlink = Path.unlink
+    original_unlink = plugin._unlink_cached_file
 
-    def guarded_unlink(path: Path, *args: Any, **kwargs: Any) -> None:
-        if path == old_file:
+    def guarded_unlink(filename: str) -> bool:
+        if filename == old_file.name:
             raise OSError("simulated undeletable cache file")
-        original_unlink(path, *args, **kwargs)
+        return original_unlink(filename)
 
-    monkeypatch.setattr(Path, "unlink", guarded_unlink)
+    monkeypatch.setattr(plugin, "_unlink_cached_file", guarded_unlink)
 
     with pytest.raises(Exception, match="容量限制"):
         await plugin._save_asset(PNG_BYTES, extension="png")
@@ -1473,6 +1694,51 @@ async def test_asset_save_refuses_success_when_cache_delete_fails(
         "total_bytes": len(PNG_BYTES),
     }
     assert list(asset_dir.glob("*.tmp")) == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_asset_write_finishes_pruning_before_releasing_cache_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    asset_dir = prepare_asset_cache(plugin, tmp_path)
+    plugin._settings = copy.deepcopy(DEFAULT_SETTINGS)
+    plugin._settings["cache_max_count"] = 1
+    old_file = asset_dir / f"{'c' * 32}.png"
+    old_file.write_bytes(PNG_BYTES)
+    write_started = threading.Event()
+    allow_write = threading.Event()
+    original_atomic_write = image_generator_module._atomic_write_bytes
+
+    def delayed_write(*args: Any, **kwargs: Any) -> None:
+        write_started.set()
+        if not allow_write.wait(timeout=5):
+            raise TimeoutError("test did not release delayed write")
+        original_atomic_write(*args, **kwargs)
+
+    monkeypatch.setattr(
+        image_generator_module,
+        "_atomic_write_bytes",
+        delayed_write,
+    )
+    task = asyncio.create_task(
+        plugin._save_asset(PNG_BYTES, extension="png")
+    )
+    assert await asyncio.to_thread(write_started.wait, 2)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    acquired = plugin._cache_lock.acquire(blocking=False)
+    if acquired:
+        plugin._cache_lock.release()
+    assert not task.done()
+    assert acquired is False
+
+    allow_write.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert plugin._cache_stats_sync()["count"] <= 1
 
 
 @pytest.mark.asyncio
@@ -1488,6 +1754,182 @@ async def test_asset_cache_rejects_symlink_escape(tmp_path: Path) -> None:
         await plugin._save_asset(PNG_BYTES, extension="png")
 
     assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_startup_rejects_symlinked_writable_ui_root(
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    writable_ui = plugin.data_path("static_ui")
+    writable_ui.parent.mkdir(parents=True)
+    outside = tmp_path / "outside-static-root"
+    outside.mkdir()
+    writable_ui.symlink_to(outside, target_is_directory=True)
+
+    started = await plugin.startup()
+
+    assert started.is_ok()
+    assert started.value["asset_cache_available"] is False
+    assert list(outside.iterdir()) == []
+    await plugin.shutdown()
+
+
+def test_startup_copy_cannot_follow_writable_root_symlink_race(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    writable_ui = plugin.data_path("static_ui")
+    parked = tmp_path / "parked-static-ui"
+    outside = tmp_path / "outside-static-ui"
+    outside.mkdir()
+    original_write = image_generator_module._atomic_write_ui_index
+
+    def swap_then_write(*args: Any, **kwargs: Any) -> Any:
+        writable_ui.rename(parked)
+        writable_ui.symlink_to(outside, target_is_directory=True)
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(
+        image_generator_module,
+        "_atomic_write_ui_index",
+        swap_then_write,
+    )
+
+    plugin._register_writable_static_ui()
+
+    assert list(outside.iterdir()) == []
+    assert plugin._asset_dir is None
+
+
+def test_static_registration_rechecks_writable_root_after_host_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    writable_ui = plugin.data_path("static_ui")
+    parked = tmp_path / "parked-registered-ui"
+    outside = tmp_path / "outside-registered-ui"
+    outside.mkdir()
+    (outside / "index.html").write_text("outside", encoding="utf-8")
+    original_register = plugin.register_static_ui
+    swapped = False
+
+    def swap_during_first_register(*args: Any, **kwargs: Any) -> bool:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            writable_ui.rename(parked)
+            writable_ui.symlink_to(outside, target_is_directory=True)
+        return original_register(*args, **kwargs)
+
+    monkeypatch.setattr(
+        plugin,
+        "register_static_ui",
+        swap_during_first_register,
+    )
+
+    registered = plugin._register_writable_static_ui()
+    static_config = plugin.get_static_ui_config()
+
+    assert registered is True
+    assert plugin._asset_dir is None
+    assert static_config is not None
+    assert Path(static_config["directory"]).resolve() == (
+        PLUGIN_DIR / "static"
+    ).resolve()
+
+
+@pytest.mark.asyncio
+async def test_asset_cache_rejects_replaced_writable_ui_root(
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    asset_dir = prepare_asset_cache(plugin, tmp_path)
+    writable_ui = asset_dir.parent
+    original_ui = tmp_path / "original-static-root"
+    writable_ui.rename(original_ui)
+    outside = tmp_path / "outside-replacement"
+    outside.mkdir()
+    writable_ui.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(Exception, match="缓存不可用|路径不安全"):
+        await plugin._save_asset(PNG_BYTES, extension="png")
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_asset_save_does_not_create_directories_after_root_swap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    asset_dir = prepare_asset_cache(plugin, tmp_path / "cache")
+    writable_ui = asset_dir.parent
+    parked = tmp_path / "parked-static-root"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_acquire = plugin._acquire_lock
+
+    async def acquire_then_swap(lock: Any) -> None:
+        await original_acquire(lock)
+        writable_ui.rename(parked)
+        writable_ui.symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(plugin, "_acquire_lock", acquire_then_swap)
+
+    with pytest.raises(Exception, match="缓存|路径"):
+        await plugin._save_asset(b"payload", extension="png")
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_asset_write_cannot_follow_symlink_swapped_after_safety_check(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    asset_dir = prepare_asset_cache(plugin, tmp_path / "cache")
+    parked = tmp_path / "parked-generated"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_atomic_write = image_generator_module._atomic_write_bytes
+
+    def swap_then_write(*args: Any, **kwargs: Any) -> None:
+        asset_dir.rename(parked)
+        asset_dir.symlink_to(outside, target_is_directory=True)
+        original_atomic_write(*args, **kwargs)
+
+    monkeypatch.setattr(
+        image_generator_module,
+        "_atomic_write_bytes",
+        swap_then_write,
+    )
+
+    with pytest.raises(Exception, match="缓存|保存"):
+        await plugin._save_asset(b"payload", extension="png")
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_asset_write_fails_closed_without_anchored_filesystem_support(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    asset_dir = prepare_asset_cache(plugin, tmp_path)
+    monkeypatch.setattr(
+        image_generator_module,
+        "_anchored_asset_io_supported",
+        lambda: False,
+    )
+    monkeypatch.setattr(image_generator_module.os, "name", "unsupported")
+
+    with pytest.raises(Exception, match="保存"):
+        await plugin._save_asset(b"payload", extension="png")
+    assert list(asset_dir.iterdir()) == []
 
 
 @pytest.mark.asyncio
@@ -1514,6 +1956,100 @@ async def test_panel_test_generation_uses_real_entry_without_chat_push(
     panel = await plugin.get_panel_state()
     assert panel.value["last_request"]["action"] == "test_generation"
     assert panel.value["last_request"]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_panel_runs_create_poll_export_http_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "run-image-generator-contract"
+    exported_state = {
+        "running": True,
+        "api_key_configured": False,
+        "settings": copy.deepcopy(DEFAULT_SETTINGS),
+    }
+
+    class ContractRunService:
+        created_payload: Any = None
+
+        async def create_run(
+            self,
+            payload: Any,
+            *,
+            client_host: str | None,
+        ) -> RunCreateResponse:
+            assert client_host
+            self.created_payload = payload
+            return RunCreateResponse(run_id=run_id, status="queued")
+
+        def get_run(self, requested_run_id: str) -> RunRecord:
+            assert requested_run_id == run_id
+            return RunRecord(
+                run_id=run_id,
+                plugin_id="image_generator",
+                entry_id="get_panel_state",
+                status="succeeded",
+                created_at=1.0,
+                updated_at=2.0,
+                finished_at=2.0,
+            )
+
+        def list_export_for_run(
+            self,
+            *,
+            run_id: str,
+            after: str | None,
+            limit: int,
+        ) -> ExportListResponse:
+            assert run_id == "run-image-generator-contract"
+            assert after is None
+            assert limit == 200
+            return ExportListResponse(
+                items=[
+                    ExportItem(
+                        export_item_id="export-image-generator-contract",
+                        run_id=run_id,
+                        type="json",
+                        created_at=2.0,
+                        json={
+                            "success": True,
+                            "data": exported_state,
+                        },
+                    )
+                ]
+            )
+
+    service = ContractRunService()
+    monkeypatch.setattr(runs_route_module, "run_service", service)
+    app = FastAPI()
+    app.include_router(runs_route_module.router)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        created = await client.post(
+            "/runs",
+            json={
+                "plugin_id": "image_generator",
+                "entry_id": "get_panel_state",
+                "args": {},
+            },
+        )
+        polled = await client.get(f"/runs/{run_id}")
+        exported = await client.get(f"/runs/{run_id}/export")
+
+    assert created.status_code == 200
+    assert created.json()["run_id"] == run_id
+    assert polled.status_code == 200
+    assert polled.json()["status"] == "succeeded"
+    assert exported.status_code == 200
+    item = exported.json()["items"][0]
+    assert item["type"] == "json"
+    assert item["json"] == {"success": True, "data": exported_state}
+    assert service.created_payload.plugin_id == "image_generator"
+    assert service.created_payload.entry_id == "get_panel_state"
+    assert service.created_payload.args == {}
 
 
 # ---------------------------------------------------------------------------
@@ -1546,10 +2082,13 @@ def test_manifest_has_legal_runtime_store_ui_and_no_secret() -> None:
         "auto_start": True,
     }
     assert manifest["image_generator"]["output_format"] == "auto"
-    assert manifest["image_generator"]["response_format"] == "auto"
+    assert manifest["image_generator"]["response_format"] == "b64_json"
     assert "api_key" not in manifest["image_generator"]
     assert SECRET not in manifest_text
     assert not (PLUGIN_DIR / "requirements.txt").exists()
+    project = tomllib.loads(PLUGIN_PYPROJECT.read_text(encoding="utf-8"))["project"]
+    assert project["requires-python"] == "==3.11.*"
+    assert project["dependencies"] == ["N.E.K.O>=0.8.3"]
 
 
 def test_all_locale_bundles_have_identical_nonempty_key_sets() -> None:
@@ -1613,9 +2152,31 @@ def test_static_panel_is_self_contained_accessible_and_calls_real_entries() -> N
             rf"""callPlugin\(\s*['"]{entry_id}['"]""",
             html,
         ), entry_id
-    assert "transientSecret" in html
-    assert "args.api_key = ''" in html
+    assert "encryptSavePayload" in html
+    assert "window.crypto.subtle.importKey" in html
+    assert "window.crypto.subtle.encrypt" in html
+    assert "currentState.secret_envelope" in html
+    assert "encrypted_payload:" in html
+    assert "wrapped_key:" in html
+    assert "callPlugin('save_settings', encryptedArgs)" in html
+    assert "transientSecret" not in html
+    assert "args.api_key" not in html
+    assert "api_key_hint" not in html
+    api_key_input = re.search(
+        r'<input\s+[^>]*id="apiKey"[^>]*>',
+        html,
+        flags=re.DOTALL,
+    )
+    assert api_key_input is not None
+    assert not re.search(r"\bname\s*=", api_key_input.group(0))
     assert "clear_api_key: false" in html
+    assert "img-src 'self'" in html
+    assert "parsed.origin !== location.origin" in html
+    assert r"/^[0-9a-f]{32}\.(?:png|jpg|webp)$/" in html
+    # The valid default style is the empty string (omit the provider field).
+    # Marking this select as required makes the browser reject the default form,
+    # so settings cannot be saved from a freshly installed panel.
+    assert not re.search(r'<select id="defaultStyle"[^>]*\brequired\b', html)
 
 
 def test_static_panel_inline_javascript_passes_node_syntax_check() -> None:
@@ -1637,6 +2198,72 @@ def test_static_panel_inline_javascript_passes_node_syntax_check() -> None:
     assert completed.returncode == 0, completed.stderr
 
 
+def test_static_panel_rejects_numeric_constraints_before_encrypted_save() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is unavailable")
+    html = PANEL_HTML.read_text(encoding="utf-8")
+    scripts = re.findall(r"<script>(.*?)</script>", html, flags=re.DOTALL)
+    assert len(scripts) == 1
+    functions = []
+    for name in ("positiveNumber", "validateCacheCapacity"):
+        match = re.search(
+            rf"^      function {name}\([^)]*\) \{{.*?^      \}}",
+            scripts[0],
+            flags=re.DOTALL | re.MULTILINE,
+        )
+        assert match is not None, name
+        functions.append(match.group(0))
+
+    completed = subprocess.run(
+        [node, "-"],
+        input="\n".join(
+            [
+                "const t = (_key, fallback, values = {}) => "
+                "fallback.replace('{field}', values.field || 'field');",
+                *functions,
+                """
+const label = { textContent: 'Numeric field' };
+function expectThrow(callback) {
+  let threw = false;
+  try {
+    callback();
+  } catch (_error) {
+    threw = true;
+  }
+  if (!threw) process.exit(2);
+}
+expectThrow(() => positiveNumber({
+  value: '1',
+  validity: { valid: false },
+  labels: [label],
+  name: 'timeout_seconds',
+}, 120));
+expectThrow(() => positiveNumber({
+  value: '1.5',
+  validity: { valid: true },
+  labels: [label],
+  name: 'cache_max_count',
+}, 20, true));
+if (positiveNumber({
+  value: '5',
+  validity: { valid: true },
+  labels: [label],
+  name: 'timeout_seconds',
+}, 120) !== 5) process.exit(3);
+expectThrow(() => validateCacheCapacity(20, 10));
+validateCacheCapacity(10, 20);
+""",
+            ]
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_built_archive_contains_backend_panel_readme_and_all_locales(
     tmp_path: Path,
 ) -> None:
@@ -1650,6 +2277,7 @@ def test_built_archive_contains_backend_panel_readme_and_all_locales(
 
     required_suffixes = {
         "plugin.toml",
+        "pyproject.toml",
         "__init__.py",
         "README.md",
         "static/index.html",
@@ -1659,3 +2287,4 @@ def test_built_archive_contains_backend_panel_readme_and_all_locales(
         assert any(name.endswith(suffix) for name in names), suffix
     assert not any("__pycache__" in name for name in names)
     assert not any("/generated/" in name for name in names)
+    assert "payload/dependencies.toml" in names
