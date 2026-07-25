@@ -1,0 +1,1661 @@
+"""Unit, packaging, and static-panel coverage for the image generator plugin."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import copy
+import json
+import re
+import shutil
+import subprocess
+import tomllib
+import zipfile
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+
+import plugin.plugins.image_generator as image_generator_module
+from plugin.neko_plugin_cli.public import build_plugin
+from plugin.plugins.image_generator import (
+    DEFAULT_SETTINGS,
+    GENERATE_IMAGE_SCHEMA,
+    PLUGIN_VERSION,
+    USER_AGENT,
+    ImageGeneratorPlugin,
+    _decode_b64_image,
+    _new_http_client,
+    _normalize_api_base_url,
+    _validate_settings,
+)
+from plugin.sdk.plugin import Err, Ok, SdkError
+from plugin.sdk.plugin.llm_tool import LLM_TOOL_META_ATTR
+from plugin.sdk.shared.constants import EVENT_META_ATTR
+
+pytestmark = pytest.mark.plugin_unit
+
+PLUGIN_DIR = Path(__file__).resolve().parents[3] / "plugins" / "image_generator"
+PLUGIN_TOML = PLUGIN_DIR / "plugin.toml"
+PANEL_HTML = PLUGIN_DIR / "static" / "index.html"
+I18N_DIR = PLUGIN_DIR / "i18n"
+
+SECRET = "sk-unit-test-super-secret-9876"
+PNG_BYTES = b"\x89PNG\r\n\x1a\nunit-test-pixels"
+PNG_B64 = base64.b64encode(PNG_BYTES).decode("ascii")
+LOCALES = {"zh-CN", "zh-TW", "en", "ja", "ko", "es", "pt", "ru"}
+
+
+class FakeLogger:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, tuple[Any, ...]]] = []
+
+    def _record(self, level: str, *args: Any, **_kwargs: Any) -> None:
+        self.records.append((level, args))
+
+    def debug(self, *args: Any, **kwargs: Any) -> None:
+        self._record("debug", *args, **kwargs)
+
+    def info(self, *args: Any, **kwargs: Any) -> None:
+        self._record("info", *args, **kwargs)
+
+    def warning(self, *args: Any, **kwargs: Any) -> None:
+        self._record("warning", *args, **kwargs)
+
+    def error(self, *args: Any, **kwargs: Any) -> None:
+        self._record("error", *args, **kwargs)
+
+    def exception(self, *args: Any, **kwargs: Any) -> None:
+        self._record("exception", *args, **kwargs)
+
+    def rendered(self) -> str:
+        return "\n".join(
+            " ".join(str(item) for item in args) for _level, args in self.records
+        )
+
+
+class FakeStore:
+    def __init__(
+        self,
+        *,
+        enabled: bool = True,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        self.enabled = enabled
+        self.data = copy.deepcopy(data or {})
+        self.get_calls: list[str] = []
+        self.set_calls: list[tuple[str, Any]] = []
+        self.delete_calls: list[str] = []
+        self.fail_get = False
+        self.fail_set = False
+        self.fail_delete = False
+        self.fail_set_keys: set[str] = set()
+        self.fail_delete_keys: set[str] = set()
+
+    async def get(self, key: str, default: Any = None):
+        self.get_calls.append(key)
+        if self.fail_get:
+            return Err(SdkError("private store read detail"))
+        return Ok(copy.deepcopy(self.data.get(key, default)))
+
+    async def set(self, key: str, value: Any):
+        self.set_calls.append((key, copy.deepcopy(value)))
+        if self.fail_set or key in self.fail_set_keys:
+            return Err(SdkError("private store write detail"))
+        self.data[key] = copy.deepcopy(value)
+        return Ok(None)
+
+    async def delete(self, key: str):
+        self.delete_calls.append(key)
+        if self.fail_delete or key in self.fail_delete_keys:
+            return Err(SdkError("private store delete detail"))
+        existed = key in self.data
+        self.data.pop(key, None)
+        return Ok(existed)
+
+
+def effective_config(**settings_overrides: Any) -> dict[str, Any]:
+    settings = copy.deepcopy(DEFAULT_SETTINGS)
+    settings.update(settings_overrides)
+    return {
+        "plugin": {
+            "store": {"enabled": True},
+            "ui": {"enabled": True},
+        },
+        "image_generator": settings,
+    }
+
+
+class FakeContext:
+    plugin_id = "image_generator"
+    metadata: dict[str, Any] = {}
+    bus = None
+
+    def __init__(
+        self,
+        *,
+        config: dict[str, Any] | None = None,
+        config_path: Path = PLUGIN_TOML,
+    ) -> None:
+        self.logger = FakeLogger()
+        self.config_path = config_path
+        self.config = copy.deepcopy(config or effective_config())
+        self._effective_config = self.config
+        self.pushed: list[dict[str, Any]] = []
+        self.status_updates: list[dict[str, Any]] = []
+
+    async def get_own_config(self, timeout: float = 5.0) -> dict[str, Any]:
+        del timeout
+        return {"config": copy.deepcopy(self.config)}
+
+    def push_message(self, **kwargs: Any) -> dict[str, bool]:
+        self.pushed.append(copy.deepcopy(kwargs))
+        return {"ok": True}
+
+    def update_status(self, status: dict[str, Any]) -> None:
+        self.status_updates.append(copy.deepcopy(status))
+
+
+class FakeResponse:
+    def __init__(
+        self,
+        payload: Any = None,
+        *,
+        status_code: int = 200,
+        json_error: BaseException | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.payload = payload
+        self.status_code = status_code
+        self.json_error = json_error
+        self.headers = dict(headers or {})
+        self.json_calls = 0
+
+    def json(self) -> Any:
+        self.json_calls += 1
+        if self.json_error is not None:
+            raise self.json_error
+        return copy.deepcopy(self.payload)
+
+    async def aiter_bytes(self):
+        if self.json_error is not None:
+            yield b"{invalid-json"
+            return
+        yield json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
+
+
+class FakeStreamResponse:
+    def __init__(
+        self,
+        chunks: list[bytes] | None = None,
+        *,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+        iteration_error: BaseException | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.headers = dict(headers or {})
+        self.chunks = list(chunks or [])
+        self.iteration_error = iteration_error
+
+    async def aiter_bytes(self):
+        for chunk in self.chunks:
+            yield chunk
+        if self.iteration_error is not None:
+            raise self.iteration_error
+
+
+class FakeStreamContext:
+    def __init__(self, response: Any) -> None:
+        self.response = response
+
+    async def __aenter__(self) -> Any:
+        return self.response
+
+    async def __aexit__(
+        self,
+        _exc_type: Any,
+        _exc: Any,
+        _traceback: Any,
+    ) -> bool:
+        return False
+
+
+class FakeClient:
+    def __init__(
+        self,
+        responses: list[FakeResponse] | None = None,
+        *,
+        post_error: BaseException | None = None,
+        streams: list[FakeStreamResponse] | None = None,
+        close_error: BaseException | None = None,
+    ) -> None:
+        self.responses = list(responses or [])
+        self.post_error = post_error
+        self.streams = list(streams or [])
+        self.close_error = close_error
+        self.post_calls: list[dict[str, Any]] = []
+        self.stream_calls: list[dict[str, Any]] = []
+        self.is_closed = False
+
+    async def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        follow_redirects: bool,
+    ) -> FakeResponse:
+        self.post_calls.append(
+            {
+                "url": url,
+                "json": copy.deepcopy(json),
+                "headers": dict(headers),
+                "timeout": timeout,
+                "follow_redirects": follow_redirects,
+            }
+        )
+        if self.post_error is not None:
+            raise self.post_error
+        if not self.responses:
+            raise AssertionError("fake client ran out of POST responses")
+        return self.responses.pop(0)
+
+    def stream(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        timeout: float,
+        follow_redirects: bool,
+        json: dict[str, Any] | None = None,
+    ) -> FakeStreamContext:
+        if method == "POST":
+            self.post_calls.append(
+                {
+                    "url": url,
+                    "json": copy.deepcopy(json),
+                    "headers": dict(headers),
+                    "timeout": timeout,
+                    "follow_redirects": follow_redirects,
+                }
+            )
+            if self.post_error is not None:
+                raise self.post_error
+            if not self.responses:
+                raise AssertionError("fake client ran out of POST stream responses")
+            return FakeStreamContext(self.responses.pop(0))
+        self.stream_calls.append(
+            {
+                "method": method,
+                "url": url,
+                "headers": dict(headers),
+                "timeout": timeout,
+                "follow_redirects": follow_redirects,
+            }
+        )
+        if not self.streams:
+            raise AssertionError("fake client ran out of stream responses")
+        return FakeStreamContext(self.streams.pop(0))
+
+    async def aclose(self) -> None:
+        if self.close_error is not None:
+            raise self.close_error
+        self.is_closed = True
+
+
+@pytest.fixture(autouse=True)
+def isolate_runtime_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(
+        "NEKO_STORAGE_SELECTED_ROOT",
+        str(tmp_path / "runtime"),
+    )
+    for name in (
+        "NEKO_STORAGE_ANCHOR_ROOT",
+        "NEKO_PLUGIN_SERVER_ORIGIN",
+        "NEKO_USER_PLUGIN_SERVER_ORIGIN",
+        "NEKO_SERVER_ORIGIN",
+        "NEKO_USER_PLUGIN_SERVER_PORT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def make_plugin(
+    *,
+    store: FakeStore | None = None,
+    config: dict[str, Any] | None = None,
+) -> tuple[ImageGeneratorPlugin, FakeContext, FakeStore]:
+    ctx = FakeContext(config=config)
+    plugin = ImageGeneratorPlugin(ctx)
+    fake_store = store or FakeStore()
+    plugin.store = fake_store
+    return plugin, ctx, fake_store
+
+
+def prepare_asset_cache(
+    plugin: ImageGeneratorPlugin,
+    tmp_path: Path,
+) -> Path:
+    writable_ui = tmp_path / "writable-static"
+    asset_dir = writable_ui / "generated"
+    asset_dir.mkdir(parents=True)
+    plugin._writable_ui_dir = writable_ui
+    plugin._asset_dir = asset_dir
+    return asset_dir
+
+
+def save_payload(**overrides: Any) -> dict[str, Any]:
+    payload = copy.deepcopy(DEFAULT_SETTINGS)
+    payload.update({"api_key": "", "clear_api_key": False})
+    payload.update(overrides)
+    return payload
+
+
+def generation_payload(
+    *,
+    b64_json: Any = PNG_B64,
+    url: Any = None,
+    revised_prompt: Any = "更清晰的测试提示",
+) -> dict[str, Any]:
+    item: dict[str, Any] = {"revised_prompt": revised_prompt}
+    if b64_json is not None:
+        item["b64_json"] = b64_json
+    if url is not None:
+        item["url"] = url
+    return {"data": [item]}
+
+
+def install_client(
+    plugin: ImageGeneratorPlugin,
+    monkeypatch: pytest.MonkeyPatch,
+    client: FakeClient,
+) -> None:
+    monkeypatch.setattr(plugin, "_get_client", lambda: client)
+
+
+# ---------------------------------------------------------------------------
+# Decorator and lifecycle metadata
+# ---------------------------------------------------------------------------
+
+
+def test_generate_image_is_dual_registered_with_bounded_schema() -> None:
+    method = ImageGeneratorPlugin.generate_image
+    entry = getattr(method, EVENT_META_ATTR)
+    tool = getattr(method, LLM_TOOL_META_ATTR)
+
+    assert entry.event_type == "plugin_entry"
+    assert entry.id == "generate_image"
+    assert entry.input_schema == GENERATE_IMAGE_SCHEMA
+    assert entry.timeout == 300.0
+    assert entry.llm_result_fields == [
+        "message",
+        "image_url",
+        "display_markdown",
+        "display_instruction",
+        "revised_prompt",
+    ]
+    assert "api_key" not in entry.llm_result_fields
+    assert "b64_json" not in entry.llm_result_fields
+
+    assert tool.name == "generate_image"
+    assert tool.parameters == GENERATE_IMAGE_SCHEMA
+    assert tool.timeout_seconds == 300.0
+    assert GENERATE_IMAGE_SCHEMA["required"] == ["prompt"]
+    assert GENERATE_IMAGE_SCHEMA["additionalProperties"] is False
+    assert GENERATE_IMAGE_SCHEMA["properties"]["prompt"]["maxLength"] == 4_000
+    assert "画一张" in tool.description
+
+
+@pytest.mark.parametrize(
+    ("method_name", "lifecycle_id"),
+    [("startup", "startup"), ("shutdown", "shutdown")],
+)
+def test_lifecycle_metadata(method_name: str, lifecycle_id: str) -> None:
+    meta = getattr(getattr(ImageGeneratorPlugin, method_name), EVENT_META_ATTR)
+    assert meta.event_type == "lifecycle"
+    assert meta.id == lifecycle_id
+    assert meta.kind == "lifecycle"
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "get_panel_state",
+        "save_settings",
+        "reset_settings",
+        "clear_api_key",
+        "get_recent_history",
+        "clear_history",
+        "test_generation",
+    ],
+)
+def test_panel_methods_are_real_entries_not_llm_tools(
+    method_name: str,
+) -> None:
+    method = getattr(ImageGeneratorPlugin, method_name)
+    entry = getattr(method, EVENT_META_ATTR)
+    assert entry.event_type == "plugin_entry"
+    assert entry.id == method_name
+    assert getattr(method, LLM_TOOL_META_ATTR, None) is None
+    if method_name == "test_generation":
+        assert entry.timeout == 300.0
+
+
+@pytest.mark.asyncio
+async def test_startup_registers_writable_static_ui_and_shutdown(
+    tmp_path: Path,
+) -> None:
+    plugin, ctx, store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+
+    started = await plugin.startup()
+
+    assert started.is_ok()
+    assert started.value == {
+        "status": "running",
+        "store_enabled": True,
+        "api_key_configured": True,
+        "ui_registered": True,
+        "asset_cache_available": True,
+    }
+    static_config = plugin.get_static_ui_config()
+    assert static_config is not None
+    writable_dir = plugin.data_path("static_ui").resolve()
+    assert Path(static_config["directory"]).resolve() == writable_dir
+    assert (writable_dir / "index.html").read_bytes() == PANEL_HTML.read_bytes()
+    assert (writable_dir / "generated").is_dir()
+    assert static_config["cache_control"] == "no-cache"
+    assert ctx.status_updates[-1]["status"] == "running"
+
+    stopped = await plugin.shutdown()
+    assert stopped.is_ok()
+    assert stopped.value["status"] == "shutdown"
+    assert ctx.status_updates[-1] == {"status": "shutdown"}
+    assert store.data["api_key"] == SECRET
+    assert not (PLUGIN_DIR / "static" / "generated").exists()
+
+
+@pytest.mark.asyncio
+async def test_host_simulation_startup_generate_and_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin, ctx, store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+    client = FakeClient([FakeResponse(generation_payload())])
+    monkeypatch.setattr(
+        image_generator_module,
+        "_new_http_client",
+        lambda: client,
+    )
+
+    started = await plugin.startup()
+    generated = await plugin.generate_image(prompt="画一张生命周期测试图片")
+    stopped = await plugin.shutdown()
+
+    assert started.is_ok()
+    assert generated.is_ok()
+    assert stopped.is_ok()
+    assert client.is_closed is True
+    assert len(client.post_calls) == 1
+    assert client.post_calls[0]["url"].endswith("/images/generations")
+    assert ctx.pushed[0]["parts"][0]["text"].startswith("### 图片已生成")
+    assert store.data["api_key"] == SECRET
+    assert SECRET not in json.dumps(
+        store.data["recent_generations"],
+        ensure_ascii=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_startup_reports_degraded_without_writable_asset_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+
+    def fail_copy(_target: Path) -> None:
+        raise OSError("read-only data directory")
+
+    monkeypatch.setattr(plugin, "_copy_static_ui_assets", fail_copy)
+
+    started = await plugin.startup()
+    state = await plugin.get_panel_state()
+
+    assert started.is_ok()
+    assert started.value["status"] == "degraded"
+    assert started.value["asset_cache_available"] is False
+    assert state.value["asset_cache_available"] is False
+    assert "缓存不可用" in state.value["configuration_warning"]
+    assert not (PLUGIN_DIR / "static" / "generated").exists()
+    await plugin.shutdown()
+
+
+def test_http_client_is_replaced_per_event_loop_and_closed_best_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    clients: list[FakeClient] = []
+
+    def factory() -> FakeClient:
+        client = FakeClient()
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(image_generator_module, "_new_http_client", factory)
+
+    async def get_client() -> FakeClient:
+        return plugin._get_client()  # type: ignore[return-value]
+
+    first = asyncio.run(get_client())
+    second = asyncio.run(get_client())
+    stopped = asyncio.run(plugin.shutdown())
+
+    assert first is not second
+    assert clients == [first, second]
+    assert first.is_closed is True
+    assert second.is_closed is True
+    assert stopped.is_ok()
+    assert stopped.value["clients_seen"] == 2
+
+
+def test_real_http_client_configuration() -> None:
+    client = _new_http_client()
+    try:
+        assert client.follow_redirects is False
+        assert client.headers["User-Agent"] == USER_AGENT
+    finally:
+        asyncio.run(client.aclose())
+
+
+# ---------------------------------------------------------------------------
+# Settings, credentials, and Store persistence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_save_key_empty_keep_explicit_clear_and_panel_redaction(
+    tmp_path: Path,
+) -> None:
+    plugin, ctx, store = make_plugin()
+    prepare_asset_cache(plugin, tmp_path)
+
+    saved = await plugin.save_settings(
+        **save_payload(api_key=SECRET, model="portable-image-model")
+    )
+    assert saved.is_ok()
+    assert store.data["api_key"] == SECRET
+    assert saved.value["api_key_configured"] is True
+    assert saved.value["api_key_hint"] == "••••9876"
+    assert SECRET not in json.dumps(saved.value, ensure_ascii=False)
+
+    kept = await plugin.save_settings(
+        **save_payload(api_key="", model="portable-image-model-v2")
+    )
+    assert kept.is_ok()
+    assert store.data["api_key"] == SECRET
+    assert kept.value["api_key_hint"] == "••••9876"
+
+    panel = await plugin.get_panel_state()
+    assert panel.is_ok()
+    assert panel.value["api_key_configured"] is True
+    assert panel.value["api_key_hint"] == "••••9876"
+    assert "api_key" not in panel.value["settings"]
+    assert SECRET not in json.dumps(panel.value, ensure_ascii=False)
+    assert SECRET not in ctx.logger.rendered()
+
+    cleared = await plugin.save_settings(**save_payload(clear_api_key=True, api_key=""))
+    assert cleared.is_ok()
+    assert "api_key" not in store.data
+    assert cleared.value["api_key_configured"] is False
+    assert cleared.value["api_key_hint"] is None
+
+
+@pytest.mark.asyncio
+async def test_reset_settings_and_clear_key_entries_are_independent(
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, store = make_plugin()
+    prepare_asset_cache(plugin, tmp_path)
+    saved = await plugin.save_settings(
+        **save_payload(api_key=SECRET, model="custom-model")
+    )
+    assert saved.is_ok()
+
+    reset = await plugin.reset_settings()
+    assert reset.is_ok()
+    assert reset.value["settings"] == DEFAULT_SETTINGS
+    assert reset.value["api_key_configured"] is True
+    assert store.data["api_key"] == SECRET
+    assert "settings" not in store.data
+
+    cleared = await plugin.clear_api_key()
+    assert cleared.is_ok()
+    assert cleared.value == {
+        "cleared": True,
+        "api_key_configured": False,
+        "api_key_hint": None,
+    }
+    assert "api_key" not in store.data
+
+
+@pytest.mark.asyncio
+async def test_settings_and_key_persist_across_real_store_instances(
+    tmp_path: Path,
+) -> None:
+    first_ctx = FakeContext()
+    first = ImageGeneratorPlugin(first_ctx)
+    started = await first.startup()
+    assert started.is_ok()
+    saved = await first.save_settings(
+        **save_payload(api_key=SECRET, model="persisted-model")
+    )
+    assert saved.is_ok()
+    await first.shutdown()
+    closed = await first.store.close()
+    assert closed.is_ok()
+
+    second_ctx = FakeContext()
+    second = ImageGeneratorPlugin(second_ctx)
+    restarted = await second.startup()
+    assert restarted.is_ok()
+    state = await second.get_panel_state()
+    assert state.is_ok()
+    assert state.value["settings"]["model"] == "persisted-model"
+    assert state.value["api_key_configured"] is True
+    assert state.value["api_key_hint"] == "••••9876"
+    assert SECRET not in json.dumps(state.value, ensure_ascii=False)
+    await second.shutdown()
+    closed_again = await second.store.close()
+    assert closed_again.is_ok()
+
+
+@pytest.mark.asyncio
+async def test_manifest_coupled_defaults_and_allowlists_validate_together() -> None:
+    config = effective_config(
+        default_size="2048x2048",
+        allowed_sizes=["2048x2048"],
+    )
+    plugin, _ctx, _store = make_plugin(config=config)
+
+    started = await plugin.startup()
+    state = await plugin.get_panel_state()
+
+    assert started.is_ok()
+    assert state.value["settings"]["default_size"] == "2048x2048"
+    assert state.value["settings"]["allowed_sizes"] == ["2048x2048"]
+    assert state.value["configuration_warning"] is None
+    await plugin.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_invalid_stored_config_surfaces_safe_warning() -> None:
+    store = FakeStore(
+        data={
+            "settings": {
+                "default_size": "not-a-size",
+                "model": SECRET,
+            }
+        }
+    )
+    plugin, ctx, _store = make_plugin(store=store)
+
+    started = await plugin.startup()
+    state = await plugin.get_panel_state()
+
+    assert started.is_ok()
+    assert state.value["settings"]["default_size"] == "1024x1024"
+    assert "无效" in state.value["configuration_warning"]
+    assert SECRET not in state.value["configuration_warning"]
+    assert SECRET not in ctx.logger.rendered()
+    await plugin.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_key_write_failure_rolls_back_persisted_settings(
+    tmp_path: Path,
+) -> None:
+    old_settings = copy.deepcopy(DEFAULT_SETTINGS)
+    store = FakeStore(
+        data={
+            "api_key": SECRET,
+            "settings": old_settings,
+        }
+    )
+    store.fail_set_keys.add("api_key")
+    plugin, _ctx, _store = make_plugin(store=store)
+    prepare_asset_cache(plugin, tmp_path)
+
+    result = await plugin.save_settings(
+        **save_payload(
+            api_key="sk-replacement-secret-1234",
+            model="new-model",
+        )
+    )
+
+    assert result.is_err()
+    assert store.data["settings"] == old_settings
+    assert store.data["api_key"] == SECRET
+    assert plugin._settings["model"] == DEFAULT_SETTINGS["model"]
+
+
+@pytest.mark.asyncio
+async def test_api_key_cannot_be_misfiled_into_returned_settings(
+    tmp_path: Path,
+) -> None:
+    plugin, ctx, store = make_plugin()
+    prepare_asset_cache(plugin, tmp_path)
+
+    result = await plugin.save_settings(**save_payload(api_key=SECRET, model=SECRET))
+
+    assert result.is_err()
+    assert store.data == {}
+    assert SECRET not in str(result.error)
+    assert SECRET not in ctx.logger.rendered()
+
+
+@pytest.mark.asyncio
+async def test_invalid_settings_and_disabled_store_return_result_errors(
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin(store=FakeStore(enabled=False))
+    prepare_asset_cache(plugin, tmp_path)
+
+    disabled = await plugin.save_settings(**save_payload(api_key=SECRET))
+    assert disabled.is_err()
+    assert isinstance(disabled.error, SdkError)
+    assert "存储" in str(disabled.error)
+
+    enabled, _ctx, _store = make_plugin()
+    prepare_asset_cache(enabled, tmp_path / "enabled")
+    invalid = await enabled.save_settings(
+        **save_payload(api_base_url="file:///tmp/provider")
+    )
+    assert invalid.is_err()
+    assert "http" in str(invalid.error).lower()
+
+    bad_default = await enabled.save_settings(
+        **save_payload(
+            default_size="2048x2048",
+            allowed_sizes=["1024x1024"],
+        )
+    )
+    assert bad_default.is_err()
+    assert "允许列表" in str(bad_default.error)
+
+
+def test_settings_validation_separates_file_and_transport_formats() -> None:
+    raw = copy.deepcopy(DEFAULT_SETTINGS)
+    raw.update(
+        {
+            "output_format": "webp",
+            "response_format": "b64_json",
+        }
+    )
+    validated = _validate_settings(
+        raw,
+        base=DEFAULT_SETTINGS,
+        require_all=True,
+    )
+    assert validated["output_format"] == "webp"
+    assert validated["response_format"] == "b64_json"
+    with pytest.raises(SdkError, match="输出格式"):
+        _validate_settings(
+            {"output_format": "b64_json"},
+            base=DEFAULT_SETTINGS,
+            require_all=False,
+        )
+    with pytest.raises(SdkError, match="响应格式"):
+        _validate_settings(
+            {"response_format": "png"},
+            base=DEFAULT_SETTINGS,
+            require_all=False,
+        )
+
+
+def test_base_url_normalization_rejects_credentials_query_and_fragment() -> None:
+    assert _normalize_api_base_url("HTTPS://example.com/v1/") == (
+        "https://example.com/v1"
+    )
+    for unsafe in (
+        "file:///tmp/api",
+        "https://user:pass@example.com/v1",
+        "https://example.com/v1?token=secret",
+        "https://example.com/v1#fragment",
+    ):
+        with pytest.raises(SdkError):
+            _normalize_api_base_url(unsafe)
+
+
+@pytest.mark.asyncio
+async def test_same_origin_hostname_does_not_bypass_public_dns_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    seen: list[str] = []
+
+    def reject_dns(url: str) -> bool:
+        seen.append(url)
+        return False
+
+    monkeypatch.setattr(
+        image_generator_module,
+        "_url_resolves_to_public_unicast",
+        reject_dns,
+    )
+    with pytest.raises(Exception, match="私有网络"):
+        await plugin._ensure_download_url_allowed(
+            "https://provider.example/result.png",
+            api_base_url="https://provider.example/v1",
+        )
+    assert seen == ["https://provider.example/result.png"]
+
+    seen.clear()
+    await plugin._ensure_download_url_allowed(
+        "http://127.0.0.1:8080/result.png",
+        api_base_url="http://127.0.0.1:8080/v1",
+    )
+    assert seen == []
+
+
+# ---------------------------------------------------------------------------
+# Provider request/response handling and redaction
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_exact_request_body_headers_and_b64_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    response = FakeResponse(
+        generation_payload(
+            revised_prompt=f"keep composition; remove {SECRET}",
+        )
+    )
+    client = FakeClient([response])
+    install_client(plugin, monkeypatch, client)
+    settings = copy.deepcopy(DEFAULT_SETTINGS)
+    settings.update(
+        {
+            "api_base_url": "https://images.example/v1/",
+            "model": "portable-model",
+            "output_format": "png",
+            "response_format": "b64_json",
+            "timeout_seconds": 19.5,
+        }
+    )
+
+    data, mime, extension, revised = await plugin._request_generation(
+        settings=settings,
+        api_key=SECRET,
+        prompt="一只在雨夜散步的猫",
+        size="1024x1024",
+        quality="high",
+        style="vivid",
+    )
+
+    assert (data, mime, extension) == (PNG_BYTES, "image/png", "png")
+    assert revised == "keep composition; remove [REDACTED]"
+    assert client.post_calls == [
+        {
+            "url": "https://images.example/v1/images/generations",
+            "json": {
+                "model": "portable-model",
+                "prompt": "一只在雨夜散步的猫",
+                "n": 1,
+                "size": "1024x1024",
+                "quality": "high",
+                "style": "vivid",
+                "output_format": "png",
+                "response_format": "b64_json",
+            },
+            "headers": {
+                "Authorization": f"Bearer {SECRET}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
+            },
+            "timeout": 19.5,
+            "follow_redirects": False,
+        }
+    ]
+    assert SECRET not in json.dumps(client.post_calls[0]["json"])
+    assert SECRET not in revised
+
+
+@pytest.mark.asyncio
+async def test_auto_request_omits_optional_and_provider_format_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    client = FakeClient([FakeResponse(generation_payload())])
+    install_client(plugin, monkeypatch, client)
+
+    await plugin._request_generation(
+        settings=copy.deepcopy(DEFAULT_SETTINGS),
+        api_key=SECRET,
+        prompt="minimal",
+        size="auto",
+        quality="auto",
+        style="",
+    )
+
+    assert client.post_calls[0]["json"] == {
+        "model": "gpt-image-1",
+        "prompt": "minimal",
+        "n": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_url_response_is_safely_streamed_without_forwarding_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        image_generator_module,
+        "_url_resolves_to_public_unicast",
+        lambda _url: True,
+    )
+    plugin, _ctx, _store = make_plugin()
+    remote_url = "https://images.example/assets/result.png"
+    client = FakeClient(
+        [FakeResponse(generation_payload(b64_json=None, url=remote_url))],
+        streams=[
+            FakeStreamResponse(
+                [PNG_BYTES[:8], PNG_BYTES[8:]],
+                headers={"content-length": str(len(PNG_BYTES))},
+            )
+        ],
+    )
+    install_client(plugin, monkeypatch, client)
+    settings = copy.deepcopy(DEFAULT_SETTINGS)
+    settings["api_base_url"] = "https://images.example/v1"
+
+    data, mime, extension, revised = await plugin._request_generation(
+        settings=settings,
+        api_key=SECRET,
+        prompt="stream it",
+        size="1024x1024",
+        quality="auto",
+        style="",
+    )
+
+    assert (data, mime, extension) == (PNG_BYTES, "image/png", "png")
+    assert revised == "更清晰的测试提示"
+    assert client.stream_calls == [
+        {
+            "method": "GET",
+            "url": remote_url,
+            "headers": {
+                "User-Agent": USER_AGENT,
+                "Accept": "image/png,image/jpeg,image/gif,image/webp",
+            },
+            "timeout": DEFAULT_SETTINGS["timeout_seconds"],
+            "follow_redirects": False,
+        }
+    ]
+    assert "Authorization" not in client.stream_calls[0]["headers"]
+    assert SECRET not in json.dumps(client.stream_calls[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        FakeResponse(None),
+        FakeResponse({}),
+        FakeResponse({"data": []}),
+        FakeResponse({"data": ["not-an-object"]}),
+        FakeResponse({"data": [{"revised_prompt": "nothing here"}]}),
+    ],
+)
+async def test_malformed_provider_payload_returns_friendly_err(
+    response: FakeResponse,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+    prepare_asset_cache(plugin, tmp_path)
+    install_client(plugin, monkeypatch, FakeClient([response]))
+
+    result = await plugin.generate_image(prompt="malformed response")
+
+    assert result.is_err()
+    assert isinstance(result.error, SdkError)
+    assert "图片服务" in str(result.error)
+    assert SECRET not in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_bad_json_http_error_and_timeout_are_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    request = httpx.Request("POST", "https://api.openai.com/v1/images/generations")
+    cases = [
+        (
+            FakeClient([FakeResponse(json_error=ValueError(f"bad json {SECRET}"))]),
+            "无法解析",
+        ),
+        (
+            FakeClient(
+                [
+                    FakeResponse(
+                        {"error": f"Authorization: Bearer {SECRET}"},
+                        status_code=401,
+                    )
+                ]
+            ),
+            "凭据",
+        ),
+        (
+            FakeClient(
+                post_error=httpx.ReadTimeout(
+                    f"Bearer {SECRET}",
+                    request=request,
+                )
+            ),
+            "超时",
+        ),
+    ]
+
+    for index, (client, expected) in enumerate(cases):
+        plugin, ctx, _store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+        prepare_asset_cache(plugin, tmp_path / str(index))
+        install_client(plugin, monkeypatch, client)
+        result = await plugin.generate_image(prompt=f"case {index}")
+        assert result.is_err()
+        assert expected in str(result.error)
+        assert SECRET not in str(result.error)
+        assert SECRET not in ctx.logger.rendered()
+
+
+@pytest.mark.asyncio
+async def test_generation_uses_one_end_to_end_timeout_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+    prepare_asset_cache(plugin, tmp_path)
+    plugin._settings = copy.deepcopy(DEFAULT_SETTINGS)
+    plugin._settings["timeout_seconds"] = 0.01
+
+    async def slow_request(**_kwargs: Any):
+        await asyncio.sleep(1)
+        return PNG_BYTES, "image/png", "png", ""
+
+    monkeypatch.setattr(plugin, "_request_generation", slow_request)
+
+    result = await plugin.generate_image(prompt="deadline")
+
+    assert result.is_err()
+    assert "总超时时间" in str(result.error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("not-base64!", "Base64"),
+        (base64.b64encode(b"plain text").decode("ascii"), "PNG"),
+        ("data:text/plain;base64,SGVsbG8=", "数据 URL"),
+    ],
+)
+async def test_invalid_base64_image_paths_return_friendly_err(
+    value: str,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+    prepare_asset_cache(plugin, tmp_path)
+    install_client(
+        plugin,
+        monkeypatch,
+        FakeClient([FakeResponse(generation_payload(b64_json=value))]),
+    )
+
+    result = await plugin.generate_image(prompt="invalid image")
+    assert result.is_err()
+    assert expected in str(result.error)
+
+
+def test_decode_rejects_oversized_b64_before_returning_bytes() -> None:
+    oversized = base64.b64encode(PNG_BYTES + b"x" * 2_000).decode("ascii")
+    with pytest.raises(Exception, match="最大字节数"):
+        _decode_b64_image(oversized, max_bytes=1_024)
+
+
+@pytest.mark.asyncio
+async def test_provider_json_stream_is_bounded_before_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+    prepare_asset_cache(plugin, tmp_path)
+    plugin._settings = copy.deepcopy(DEFAULT_SETTINGS)
+    plugin._settings["max_download_bytes"] = 1_024
+    plugin._settings["cache_max_bytes"] = 2_048
+    raw_response = FakeStreamResponse(
+        [b"x" * 600_000, b"y" * 600_000],
+    )
+    install_client(
+        plugin,
+        monkeypatch,
+        FakeClient([raw_response]),  # type: ignore[list-item]
+    )
+
+    result = await plugin.generate_image(prompt="bounded provider response")
+
+    assert result.is_err()
+    assert "最大字节数" in str(result.error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "https://user:pass@example.com/result.png",
+        "http://127.0.0.1/private.png",
+        "http://169.254.169.254/latest/meta-data",
+    ],
+)
+async def test_unsafe_image_urls_return_err_without_download(
+    url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+    prepare_asset_cache(plugin, tmp_path)
+    client = FakeClient([FakeResponse(generation_payload(b64_json=None, url=url))])
+    install_client(plugin, monkeypatch, client)
+
+    result = await plugin.generate_image(prompt="unsafe URL")
+
+    assert result.is_err()
+    assert "不安全" in str(result.error) or "不允许" in str(result.error)
+    assert client.stream_calls == []
+
+
+@pytest.mark.asyncio
+async def test_url_download_declared_and_streamed_oversize_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        image_generator_module,
+        "_url_resolves_to_public_unicast",
+        lambda _url: True,
+    )
+    url = "https://api.openai.com/asset.png"
+    streams = [
+        FakeStreamResponse(
+            [],
+            headers={"content-length": "2048"},
+        ),
+        FakeStreamResponse(
+            [PNG_BYTES, b"x" * 2_000],
+        ),
+    ]
+    for index, stream in enumerate(streams):
+        plugin, _ctx, _store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+        prepare_asset_cache(plugin, tmp_path / str(index))
+        plugin._settings = copy.deepcopy(DEFAULT_SETTINGS)
+        plugin._settings["max_download_bytes"] = 1_024
+        client = FakeClient(
+            [FakeResponse(generation_payload(b64_json=None, url=url))],
+            streams=[stream],
+        )
+        install_client(plugin, monkeypatch, client)
+
+        result = await plugin.generate_image(prompt="too large")
+        assert result.is_err()
+        assert "最大下载字节数" in str(result.error)
+
+
+# ---------------------------------------------------------------------------
+# User-visible result, bounded history, and cache
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_generate_pushes_small_markdown_without_inline_image_data(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin, ctx, store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+    asset_dir = prepare_asset_cache(plugin, tmp_path)
+    client = FakeClient([FakeResponse(generation_payload())])
+    install_client(plugin, monkeypatch, client)
+
+    result = await plugin.generate_image(
+        prompt="画一只雨夜霓虹街头的猫",
+        size="1024x1024",
+        quality="auto",
+        style="",
+    )
+
+    assert result.is_ok()
+    assert set(result.value) == {
+        "message",
+        "image_url",
+        "display_markdown",
+        "display_instruction",
+        "revised_prompt",
+    }
+    assert result.value["image_url"].startswith(
+        "http://127.0.0.1:48916/plugin/image_generator/ui/generated/"
+    )
+    assert result.value["display_markdown"] == (
+        "### 图片已生成\n\n"
+        f"![AI 生成图片]({result.value['image_url']})\n\n"
+        f"[打开原图]({result.value['image_url']})"
+    )
+    assert "尝试直接显示" in result.value["message"]
+    assert "display_markdown" in result.value["display_instruction"]
+    assert len(list(asset_dir.iterdir())) == 1
+
+    assert len(ctx.pushed) == 1
+    pushed = ctx.pushed[0]
+    assert pushed["visibility"] == ["chat"]
+    assert pushed["ai_behavior"] == "blind"
+    assert pushed["source"] == "image_generator"
+    assert pushed["metadata"] == {"event_type": "image_generated"}
+    assert pushed["parts"] == [
+        {"type": "text", "text": result.value["display_markdown"]}
+    ]
+    serialized_push = json.dumps(pushed, ensure_ascii=False)
+    serialized_result = json.dumps(result.value, ensure_ascii=False)
+    assert len(serialized_push.encode()) < 256 * 1024
+    assert len(serialized_result.encode()) < 16 * 1024
+    assert PNG_B64 not in serialized_push + serialized_result
+    assert SECRET not in serialized_push + serialized_result
+    history_json = json.dumps(
+        store.data["recent_generations"],
+        ensure_ascii=False,
+    )
+    assert SECRET not in history_json
+    assert PNG_B64 not in history_json
+
+
+@pytest.mark.asyncio
+async def test_auto_show_disabled_returns_explicit_display_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin, ctx, _store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+    prepare_asset_cache(plugin, tmp_path)
+    plugin._settings = copy.deepcopy(DEFAULT_SETTINGS)
+    plugin._settings["auto_show_in_chat"] = False
+    install_client(
+        plugin,
+        monkeypatch,
+        FakeClient([FakeResponse(generation_payload())]),
+    )
+
+    result = await plugin.generate_image(prompt="do not auto push")
+
+    assert result.is_ok()
+    assert ctx.pushed == []
+    assert "返回的链接" in result.value["message"]
+    assert "display_markdown" in result.value["display_instruction"]
+    assert "{MASTER_NAME}" in result.value["display_instruction"]
+
+
+@pytest.mark.asyncio
+async def test_missing_key_and_invalid_allowlist_option_are_result_errors(
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, store = make_plugin()
+    prepare_asset_cache(plugin, tmp_path)
+
+    missing = await plugin.generate_image(prompt="need credentials")
+    assert missing.is_err()
+    assert "API 密钥" in str(missing.error)
+    assert store.data["recent_generations"][0]["status"] == "failed"
+
+    invalid = await plugin.generate_image(
+        prompt="wrong size",
+        size="999x999",
+    )
+    assert invalid.is_err()
+    assert "允许列表" in str(invalid.error)
+
+
+@pytest.mark.asyncio
+async def test_history_and_file_cache_are_bounded_and_secret_free(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = FakeStore(data={"api_key": SECRET})
+    plugin, _ctx, _store = make_plugin(store=store)
+    asset_dir = prepare_asset_cache(plugin, tmp_path)
+    plugin._settings = copy.deepcopy(DEFAULT_SETTINGS)
+    plugin._settings.update(
+        {
+            "history_limit": 2,
+            "cache_max_count": 2,
+            "auto_show_in_chat": False,
+        }
+    )
+    install_client(
+        plugin,
+        monkeypatch,
+        FakeClient(
+            [
+                FakeResponse(generation_payload()),
+                FakeResponse(generation_payload()),
+                FakeResponse(generation_payload()),
+            ]
+        ),
+    )
+
+    for index in range(3):
+        result = await plugin.generate_image(
+            prompt=f"prompt {index} containing {SECRET}"
+        )
+        assert result.is_ok()
+
+    history = store.data["recent_generations"]
+    assert len(history) == 2
+    assert all(item["status"] == "succeeded" for item in history)
+    assert all(len(item["prompt_excerpt"]) <= 180 for item in history)
+    assert len(list(asset_dir.iterdir())) == 2
+    assert store.data["api_key"] == SECRET
+    stored_history = json.dumps(history, ensure_ascii=False)
+    assert SECRET not in stored_history
+    assert PNG_B64 not in stored_history
+    assert "b64_json" not in stored_history
+
+    recent = await plugin.get_recent_history(limit=1)
+    assert recent.is_ok()
+    assert recent.value["count"] == 1
+    assert len(recent.value["history"]) == 1
+
+    cleared = await plugin.clear_history()
+    assert cleared.is_ok()
+    assert cleared.value["count"] == 0
+    assert "recent_generations" not in store.data
+    assert len(list(asset_dir.iterdir())) == 2
+
+
+@pytest.mark.asyncio
+async def test_history_projection_hides_pruned_local_asset_links(
+    tmp_path: Path,
+) -> None:
+    missing_name = f"{'c' * 32}.png"
+    result_url = (
+        f"http://127.0.0.1:48916/plugin/image_generator/ui/generated/{missing_name}"
+    )
+    store = FakeStore(
+        data={
+            "recent_generations": [
+                {
+                    "id": "history-record",
+                    "timestamp": "2026-07-26T00:00:00+08:00",
+                    "model": "gpt-image-1",
+                    "prompt_excerpt": "missing cached image",
+                    "result_url": result_url,
+                    "status": "succeeded",
+                }
+            ]
+        }
+    )
+    plugin, _ctx, _store = make_plugin(store=store)
+    prepare_asset_cache(plugin, tmp_path)
+
+    recent = await plugin.get_recent_history()
+
+    assert recent.is_ok()
+    assert recent.value["history"][0]["status"] == "succeeded"
+    assert recent.value["history"][0]["result_url"] == ""
+
+
+@pytest.mark.asyncio
+async def test_cache_pruning_enforces_total_bytes_and_safe_file_pattern(
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    asset_dir = prepare_asset_cache(plugin, tmp_path)
+    plugin._settings = copy.deepcopy(DEFAULT_SETTINGS)
+    plugin._settings.update(
+        {
+            "cache_max_count": 10,
+            "cache_max_bytes": 1_024,
+        }
+    )
+    first = asset_dir / f"{'a' * 32}.png"
+    second = asset_dir / f"{'b' * 32}.png"
+    ignored = asset_dir / "../must-not-be-touched.txt"
+    first.write_bytes(b"a" * 700)
+    second.write_bytes(b"b" * 700)
+    ignored.resolve().write_text("outside", encoding="utf-8")
+    first.touch()
+    second.touch()
+
+    stats = await plugin._prune_cache()
+
+    assert stats == {"count": 1, "total_bytes": 700}
+    assert len(plugin._generated_files()) == 1
+    assert ignored.resolve().read_text(encoding="utf-8") == "outside"
+
+
+@pytest.mark.asyncio
+async def test_asset_save_refuses_success_when_cache_delete_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    asset_dir = prepare_asset_cache(plugin, tmp_path)
+    plugin._settings = copy.deepcopy(DEFAULT_SETTINGS)
+    plugin._settings["cache_max_count"] = 1
+    old_file = asset_dir / f"{'d' * 32}.png"
+    old_file.write_bytes(PNG_BYTES)
+    original_unlink = Path.unlink
+
+    def guarded_unlink(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path == old_file:
+            raise OSError("simulated undeletable cache file")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", guarded_unlink)
+
+    with pytest.raises(Exception, match="容量限制"):
+        await plugin._save_asset(PNG_BYTES, extension="png")
+
+    assert plugin._cache_stats_sync() == {
+        "count": 1,
+        "total_bytes": len(PNG_BYTES),
+    }
+    assert list(asset_dir.glob("*.tmp")) == []
+
+
+@pytest.mark.asyncio
+async def test_asset_cache_rejects_symlink_escape(tmp_path: Path) -> None:
+    plugin, _ctx, _store = make_plugin()
+    asset_dir = prepare_asset_cache(plugin, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    asset_dir.rmdir()
+    asset_dir.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(Exception, match="缓存不可用|路径不安全"):
+        await plugin._save_asset(PNG_BYTES, extension="png")
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_panel_test_generation_uses_real_entry_without_chat_push(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin, ctx, store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+    prepare_asset_cache(plugin, tmp_path)
+
+    async def fake_request(**kwargs: Any) -> tuple[bytes, str, str, str]:
+        assert kwargs["prompt"] == "面板付费测试"
+        assert kwargs["api_key"] == SECRET
+        return PNG_BYTES, "image/png", "png", "修订后的面板提示"
+
+    monkeypatch.setattr(plugin, "_request_generation", fake_request)
+    result = await plugin.test_generation(prompt="面板付费测试")
+
+    assert result.is_ok()
+    assert ctx.pushed == []
+    assert result.value["revised_prompt"] == "修订后的面板提示"
+    assert "display_markdown" in result.value["display_instruction"]
+    assert store.data["recent_generations"][0]["status"] == "succeeded"
+    panel = await plugin.get_panel_state()
+    assert panel.value["last_request"]["action"] == "test_generation"
+    assert panel.value["last_request"]["status"] == "success"
+
+
+# ---------------------------------------------------------------------------
+# Manifest, i18n, static panel, and package contents
+# ---------------------------------------------------------------------------
+
+
+def test_manifest_has_legal_runtime_store_ui_and_no_secret() -> None:
+    manifest_text = PLUGIN_TOML.read_text(encoding="utf-8")
+    manifest = tomllib.loads(manifest_text)
+    plugin = manifest["plugin"]
+
+    assert plugin["id"] == "image_generator"
+    assert plugin["version"] == PLUGIN_VERSION == "0.1.0"
+    assert plugin["entry"] == ("plugin.plugins.image_generator:ImageGeneratorPlugin")
+    assert plugin["sdk"]["recommended"] == ">=0.1.0,<0.2.0"
+    assert plugin["sdk"]["supported"] == ">=0.1.0,<0.3.0"
+    assert plugin["store"]["enabled"] is True
+    assert plugin["ui"]["enabled"] is True
+    assert plugin["i18n"] == {
+        "default_locale": "zh-CN",
+        "locales_dir": "i18n",
+    }
+    panel = plugin["ui"]["panel"][0]
+    assert panel["entry"] == "static/index.html"
+    assert panel["mode"] == "static"
+    assert {"state:read", "action:call", "runs:read"} <= set(panel["permissions"])
+    assert manifest["plugin_runtime"] == {
+        "enabled": True,
+        "auto_start": True,
+    }
+    assert manifest["image_generator"]["output_format"] == "auto"
+    assert manifest["image_generator"]["response_format"] == "auto"
+    assert "api_key" not in manifest["image_generator"]
+    assert SECRET not in manifest_text
+    assert not (PLUGIN_DIR / "requirements.txt").exists()
+
+
+def test_all_locale_bundles_have_identical_nonempty_key_sets() -> None:
+    locale_paths = {
+        path.stem: path for path in I18N_DIR.glob("*.json") if path.is_file()
+    }
+    assert set(locale_paths) == LOCALES
+
+    bundles = {
+        locale: json.loads(path.read_text(encoding="utf-8"))
+        for locale, path in locale_paths.items()
+    }
+    expected_keys = set(bundles["zh-CN"])
+    assert expected_keys
+    assert {
+        "field.api_key",
+        "field.output_format",
+        "field.response_format",
+        "action.test",
+        "test.cost_warning",
+        "status.test_success",
+    } <= expected_keys
+    for locale, bundle in bundles.items():
+        assert set(bundle) == expected_keys, locale
+        assert all(
+            isinstance(value, str) and value.strip() for value in bundle.values()
+        ), locale
+
+
+def test_static_panel_is_self_contained_accessible_and_calls_real_entries() -> None:
+    html = PANEL_HTML.read_text(encoding="utf-8")
+    assert '<html lang="zh-CN">' in html
+    assert 'name="viewport"' in html
+    assert 'type="password"' in html
+    assert 'autocomplete="new-password"' in html
+    assert 'aria-live="polite"' in html
+    assert "SUPPORTED_LOCALES" in html
+    assert "test.cost_warning" in html
+    assert not re.search(
+        r"""(?:src|href)\s*=\s*["']https?://""",
+        html,
+        flags=re.IGNORECASE,
+    )
+
+    assert "const PLUGIN_ID = 'image_generator'" in html
+    assert "const RUNS_URL = '/runs'" in html
+    assert "plugin_id: PLUGIN_ID" in html
+    assert "entry_id: entryId" in html
+    assert "args," in html
+    assert "/export" in html
+    for entry_id in (
+        "get_panel_state",
+        "save_settings",
+        "reset_settings",
+        "clear_api_key",
+        "get_recent_history",
+        "clear_history",
+        "test_generation",
+    ):
+        assert re.search(
+            rf"""callPlugin\(\s*['"]{entry_id}['"]""",
+            html,
+        ), entry_id
+    assert "transientSecret" in html
+    assert "args.api_key = ''" in html
+    assert "clear_api_key: false" in html
+
+
+def test_static_panel_inline_javascript_passes_node_syntax_check() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is unavailable")
+    html = PANEL_HTML.read_text(encoding="utf-8")
+    scripts = re.findall(r"<script>(.*?)</script>", html, flags=re.DOTALL)
+    assert len(scripts) == 1
+
+    completed = subprocess.run(
+        [node, "--check", "-"],
+        input=scripts[0],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_built_archive_contains_backend_panel_readme_and_all_locales(
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "image_generator.neko-plugin"
+    result = build_plugin(PLUGIN_DIR, package_path)
+    assert result.plugin_id == "image_generator"
+    assert package_path.is_file()
+
+    with zipfile.ZipFile(package_path) as archive:
+        names = set(archive.namelist())
+
+    required_suffixes = {
+        "plugin.toml",
+        "__init__.py",
+        "README.md",
+        "static/index.html",
+        *(f"i18n/{locale}.json" for locale in LOCALES),
+    }
+    for suffix in required_suffixes:
+        assert any(name.endswith(suffix) for name in names), suffix
+    assert not any("__pycache__" in name for name in names)
+    assert not any("/generated/" in name for name in names)
