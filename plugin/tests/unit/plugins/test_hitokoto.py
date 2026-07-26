@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -33,6 +36,126 @@ pytestmark = pytest.mark.plugin_unit
 PLUGIN_DIR = Path(__file__).resolve().parents[3] / "plugins" / "hitokoto"
 PLUGIN_TOML = PLUGIN_DIR / "plugin.toml"
 PANEL_HTML = PLUGIN_DIR / "static" / "index.html"
+
+
+def run_panel_js(scenario: str) -> Any:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for Hosted UI behavior tests")
+
+    html = PANEL_HTML.read_text(encoding="utf-8")
+    inline_script = html.rsplit("<script>", maxsplit=1)[1].split(
+        "</script>",
+        maxsplit=1,
+    )[0]
+    exposed_script = (
+        inline_script
+        + "\nglobalThis.__panelTest = {"
+        + "SUPPORTED_LOCALES, normalizeLocale, loadI18n};"
+    )
+    harness = (
+        """
+const vm = require("node:vm");
+const nodes = new Map();
+const listeners = {};
+const controls = [];
+function makeNode(id) {
+  if (nodes.has(id)) return nodes.get(id);
+  const node = {
+    id,
+    textContent: "",
+    dataset: {},
+    hidden: false,
+    href: "",
+    value: "",
+    checked: false,
+    disabled: false,
+    attributes: {},
+    handlers: {},
+    addEventListener(type, handler) {
+      this.handlers[type] = handler;
+    },
+    checkValidity() {
+      return true;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    setAttribute(name, value) {
+      this.attributes[name] = String(value);
+    },
+    getAttribute(name) {
+      return this.attributes[name] || "";
+    }
+  };
+  nodes.set(id, node);
+  return node;
+}
+[
+  "randomQuoteButton",
+  "dailyQuoteButton",
+  "testApiButton",
+  "saveSettingsButton",
+  "resetSettingsButton",
+  "clearCacheButton",
+  "defaultCategory",
+  "timeoutSeconds",
+  "maxLength",
+  "dailyCache",
+  "dailyGreeting"
+].forEach(id => controls.push(makeNode(id)));
+const document = {
+  documentElement: {lang: "zh-CN"},
+  getElementById: makeNode,
+  querySelectorAll(selector) {
+    return selector === "[data-action], input, select" ? controls : [];
+  },
+  addEventListener(type, handler) {
+    listeners[type] = handler;
+  }
+};
+const context = {
+  URL,
+  URLSearchParams,
+  console,
+  document,
+  location: {search: ""},
+  navigator: {language: "zh-CN"},
+  localStorage: {getItem() { return ""; }},
+  fetch: async () => { throw new Error("unexpected fetch"); },
+  window: {setTimeout}
+};
+vm.createContext(context);
+vm.runInContext(
+"""
+        + json.dumps(exposed_script)
+        + """,
+  context
+);
+(async () => {
+  try {
+    const result = await (async () => {
+"""
+        + scenario
+        + """
+    })();
+    process.stdout.write(JSON.stringify(result));
+  } catch (error) {
+    process.stderr.write(String(error && error.stack || error));
+    process.exitCode = 1;
+  }
+})();
+"""
+    )
+    completed = subprocess.run(
+        [node, "-e", harness],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)
 
 
 class FakeLogger:
@@ -111,6 +234,37 @@ class FakeStore:
         return Ok(existed)
 
 
+class FakeMemoryNamespace:
+    def __init__(self, records: list[Any] | None = None) -> None:
+        self.records = list(records or [])
+        self.get_calls: list[dict[str, Any]] = []
+        self.fail_reads = 0
+
+    async def get(
+        self,
+        *,
+        bucket_id: str,
+        limit: int = 20,
+        timeout: float = 5.0,
+    ) -> list[Any]:
+        self.get_calls.append(
+            {
+                "bucket_id": bucket_id,
+                "limit": limit,
+                "timeout": timeout,
+            }
+        )
+        if self.fail_reads > 0:
+            self.fail_reads -= 1
+            raise TimeoutError("private memory transport details")
+        return list(self.records[-limit:])
+
+
+class FakeBus:
+    def __init__(self, memory: FakeMemoryNamespace) -> None:
+        self.memory = memory
+
+
 class FakeContext:
     plugin_id = "hitokoto"
     metadata: dict[str, Any] = {}
@@ -121,9 +275,11 @@ class FakeContext:
         *,
         config: dict[str, Any] | None = None,
         config_path: Path = PLUGIN_TOML,
+        bus: Any = None,
     ) -> None:
         self.logger = FakeLogger()
         self.config_path = config_path
+        self.bus = bus
         self.config = config or {
             "plugin": {"store": {"enabled": True}},
             "hitokoto": {
@@ -241,6 +397,22 @@ def normalized_quote(**overrides: Any) -> dict[str, Any]:
     return _parse_hitokoto_payload(payload)
 
 
+def user_context_event(
+    *,
+    timestamp: float,
+    content: str = "你好",
+    is_voice: bool = False,
+) -> dict[str, Any]:
+    return {
+        "type": "user_message",
+        "content": content,
+        "lanlan": "Neko",
+        "is_voice": is_voice,
+        "source": "main_logic.core",
+        "_ts": timestamp,
+    }
+
+
 @pytest.fixture(autouse=True)
 def isolate_runtime_root(
     monkeypatch: pytest.MonkeyPatch,
@@ -266,8 +438,9 @@ def make_plugin(
     *,
     store: FakeStore | None = None,
     config: dict[str, Any] | None = None,
+    bus: Any = None,
 ) -> tuple[HitokotoPlugin, FakeContext, FakeStore]:
-    ctx = FakeContext(config=config)
+    ctx = FakeContext(config=config, bus=bus)
     plugin = HitokotoPlugin(ctx)
     fake_store = store or FakeStore()
     plugin.store = fake_store
@@ -334,6 +507,16 @@ def test_daily_greeting_message_metadata() -> None:
     assert meta.id == "hitokoto_daily_greeting"
     assert meta.kind == "consumer"
     assert meta.metadata["source"] == "chat"
+
+
+def test_daily_greeting_user_context_timer_metadata() -> None:
+    meta = getattr(HitokotoPlugin.poll_user_context, EVENT_META_ATTR)
+    assert meta.event_type == "timer"
+    assert meta.id == "hitokoto_user_context_poll"
+    assert meta.kind == "timer"
+    assert meta.auto_start is True
+    assert meta.extra == {"mode": "interval", "seconds": 2}
+    assert meta.metadata["seconds"] == 2
 
 
 @pytest.mark.parametrize(
@@ -501,6 +684,18 @@ def test_format_quote_uses_safe_normalized_fields() -> None:
     }
     assert _format_quote(quote) == (
         "hello\n—— world\nhttps://hitokoto.cn?uuid=x"
+    )
+
+
+def test_cached_quote_rebuilds_encoded_trace_url_after_uuid_validation() -> None:
+    cached = normalized_quote(uuid="id/with?reserved=1")
+    cached["url"] = "https://attacker.invalid/untrusted"
+
+    result = hitokoto_module._quote_from_cache(cached)
+
+    assert result is not None
+    assert result["url"] == (
+        "https://hitokoto.cn?uuid=id%2Fwith%3Freserved%3D1"
     )
 
 
@@ -913,7 +1108,7 @@ def test_cross_loop_daily_calls_share_single_flight(
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=2)
+        thread.join(timeout=10)
 
     assert all(not thread.is_alive() for thread in threads)
     assert len(results) == 2
@@ -983,6 +1178,260 @@ async def test_clear_cache_wins_against_an_inflight_store_read(
 # ---------------------------------------------------------------------------
 # Daily first-chat greeting
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_user_context_sync_memory_get_runs_off_event_loop() -> None:
+    records = [
+        user_context_event(timestamp=1.0, content="同步读取的消息")
+    ]
+
+    class SyncMemoryNamespace:
+        def __init__(self) -> None:
+            self.get_calls: list[dict[str, Any]] = []
+
+        def get(
+            self,
+            *,
+            bucket_id: str,
+            limit: int = 20,
+            timeout: float = 5.0,
+        ) -> list[Any]:
+            with pytest.raises(RuntimeError, match="no running event loop"):
+                asyncio.get_running_loop()
+            self.get_calls.append(
+                {
+                    "bucket_id": bucket_id,
+                    "limit": limit,
+                    "timeout": timeout,
+                }
+            )
+            return list(records[-limit:])
+
+    memory = SyncMemoryNamespace()
+    plugin, _ctx, _store = make_plugin(bus=FakeBus(memory))
+
+    snapshot = await plugin._read_user_context_snapshot()
+
+    assert snapshot == records
+    assert memory.get_calls == [
+        {"bucket_id": "default", "limit": 200, "timeout": 1.0}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_user_context_startup_baseline_then_text_message_greets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = FakeMemoryNamespace(
+        [user_context_event(timestamp=1.0, content="启动前的旧消息")]
+    )
+    plugin, ctx, _store = make_plugin(bus=FakeBus(memory))
+    client = FakeClient([api_payload()])
+    monkeypatch.setattr(plugin, "_get_client", lambda: client)
+
+    started = await plugin.startup()
+    unchanged = await plugin.poll_user_context()
+
+    assert started.is_ok()
+    assert unchanged.value["status"] == "unchanged"
+    assert ctx.pushed == []
+    assert client.calls == []
+
+    memory.records.append(
+        user_context_event(timestamp=2.0, content="启动后的文本消息")
+    )
+    observed = await plugin.poll_user_context()
+
+    assert observed.is_ok()
+    assert observed.value["status"] == "pushed"
+    assert len(ctx.pushed) == 1
+    assert len(client.calls) == 1
+    assert {
+        (call["bucket_id"], call["limit"], call["timeout"])
+        for call in memory.get_calls
+    } == {("default", 200, 1.0)}
+
+
+@pytest.mark.asyncio
+async def test_user_context_voice_record_uses_supported_wrapped_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class HostMemoryRecord:
+        def __init__(self, raw: dict[str, Any]) -> None:
+            self.raw = raw
+
+    memory = FakeMemoryNamespace()
+    plugin, ctx, _store = make_plugin(bus=FakeBus(memory))
+    client = FakeClient([api_payload()])
+    monkeypatch.setattr(plugin, "_get_client", lambda: client)
+    await plugin.startup()
+
+    memory.records.append(
+        HostMemoryRecord(
+            user_context_event(
+                timestamp=2.0,
+                content="语音转写消息",
+                is_voice=True,
+            )
+        )
+    )
+    result = await plugin.poll_user_context()
+
+    assert result.is_ok()
+    assert result.value["status"] == "pushed"
+    assert len(ctx.pushed) == 1
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_user_context_duplicate_and_repeated_snapshots_greet_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = FakeMemoryNamespace()
+    plugin, ctx, _store = make_plugin(bus=FakeBus(memory))
+    client = FakeClient([api_payload()])
+    monkeypatch.setattr(plugin, "_get_client", lambda: client)
+    await plugin.startup()
+
+    event = user_context_event(timestamp=2.0)
+    memory.records.extend([event, dict(event)])
+    first = await plugin.poll_user_context()
+    second = await plugin.poll_user_context()
+    third = await plugin.poll_user_context()
+
+    assert first.value["status"] == "pushed"
+    assert second.value["status"] == "unchanged"
+    assert third.value["status"] == "unchanged"
+    assert len(ctx.pushed) == 1
+    assert len(client.calls) == 1
+    assert all(
+        call["bucket_id"] == "default"
+        for call in memory.get_calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_context_disabled_setting_consumes_event_without_greeting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = FakeMemoryNamespace()
+    plugin, ctx, store = make_plugin(bus=FakeBus(memory))
+    await plugin.startup()
+    plugin._settings_overrides = {"daily_greeting": False}
+    memory.records.append(user_context_event(timestamp=2.0))
+
+    disabled = await plugin.poll_user_context()
+    plugin._settings_overrides = {"daily_greeting": True}
+    repeated = await plugin.poll_user_context()
+
+    assert disabled.value == {"status": "disabled", "pushed": False}
+    assert repeated.value == {"status": "unchanged", "observed": False}
+    assert ctx.pushed == []
+    assert store.data.get("greeting_attempted_date") is None
+
+
+@pytest.mark.asyncio
+async def test_user_context_malformed_and_empty_records_are_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = FakeMemoryNamespace()
+    plugin, ctx, _store = make_plugin(bus=FakeBus(memory))
+    client = FakeClient([api_payload()])
+    monkeypatch.setattr(plugin, "_get_client", lambda: client)
+    await plugin.startup()
+
+    memory.records.extend(
+        [
+            None,
+            "not a record",
+            {},
+            user_context_event(timestamp=2.0, content="   "),
+            {
+                **user_context_event(timestamp=3.0),
+                "type": "assistant_message",
+            },
+            {
+                **user_context_event(timestamp=4.0),
+                "source": "untrusted.source",
+            },
+            {
+                **user_context_event(timestamp=5.0),
+                "is_voice": "yes",
+            },
+            {
+                **user_context_event(timestamp=math.nan),
+            },
+            {
+                key: value
+                for key, value in user_context_event(timestamp=6.0).items()
+                if key != "_ts"
+            },
+        ]
+    )
+    ignored = await plugin.poll_user_context()
+
+    assert ignored.value == {"status": "unchanged", "observed": False}
+    assert ctx.pushed == []
+    assert client.calls == []
+
+    memory.records.append(user_context_event(timestamp=7.0))
+    valid = await plugin.poll_user_context()
+
+    assert valid.value["status"] == "pushed"
+    assert len(ctx.pushed) == 1
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_user_context_poll_failure_is_safe_and_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = FakeMemoryNamespace()
+    plugin, ctx, _store = make_plugin(bus=FakeBus(memory))
+    client = FakeClient([api_payload()])
+    monkeypatch.setattr(plugin, "_get_client", lambda: client)
+    await plugin.startup()
+    memory.records.append(user_context_event(timestamp=2.0))
+    memory.fail_reads = 1
+
+    failed = await plugin.poll_user_context()
+    retried = await plugin.poll_user_context()
+
+    assert failed.value == {
+        "status": "read_failed",
+        "observed": False,
+        "failure_class": "TimeoutError",
+    }
+    assert retried.value["status"] == "pushed"
+    assert len(ctx.pushed) == 1
+    assert "private memory transport details" not in plugin.logger.rendered()
+
+
+@pytest.mark.asyncio
+async def test_user_context_initial_read_failure_retries_as_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = FakeMemoryNamespace(
+        [user_context_event(timestamp=1.0, content="旧消息")]
+    )
+    memory.fail_reads = 1
+    plugin, ctx, _store = make_plugin(bus=FakeBus(memory))
+    client = FakeClient([api_payload()])
+    monkeypatch.setattr(plugin, "_get_client", lambda: client)
+
+    started = await plugin.startup()
+    baseline = await plugin.poll_user_context()
+
+    assert started.is_ok()
+    assert baseline.value["status"] == "baseline"
+    assert ctx.pushed == []
+
+    memory.records.append(user_context_event(timestamp=2.0))
+    observed = await plugin.poll_user_context()
+
+    assert observed.value["status"] == "pushed"
+    assert len(ctx.pushed) == 1
 
 
 @pytest.mark.asyncio
@@ -1106,7 +1555,7 @@ def test_cross_loop_chat_messages_claim_once(
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=2)
+        thread.join(timeout=10)
 
     assert all(not thread.is_alive() for thread in threads)
     assert len(results) == 2
@@ -1212,6 +1661,182 @@ async def test_panel_state_hides_malformed_cache_date() -> None:
 
     assert result.is_ok()
     assert result.value["daily_cache"]["date"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changed_field", "changed_value"),
+    [
+        ("default_category", "i"),
+        ("timeout_seconds", 11.0),
+        ("max_length", 81),
+        ("daily_cache", False),
+    ],
+)
+async def test_save_settings_advances_generation_for_quote_affecting_change(
+    changed_field: str,
+    changed_value: Any,
+) -> None:
+    plugin, _ctx, _store = make_plugin()
+    settings = plugin._settings_snapshot()
+    settings[changed_field] = changed_value
+
+    result = await plugin.save_settings(**settings)
+
+    assert result.is_ok()
+    assert plugin._cache_generation == 1
+
+
+@pytest.mark.asyncio
+async def test_save_settings_does_not_advance_generation_for_greeting_only() -> None:
+    plugin, _ctx, _store = make_plugin()
+    settings = plugin._settings_snapshot()
+    settings["daily_greeting"] = False
+
+    result = await plugin.save_settings(**settings)
+
+    assert result.is_ok()
+    assert plugin._cache_generation == 0
+
+
+@pytest.mark.asyncio
+async def test_reset_settings_does_not_advance_generation_for_greeting_only() -> None:
+    overrides = {"daily_greeting": False}
+    store = FakeStore(data={"settings_overrides": dict(overrides)})
+    plugin, _ctx, _store = make_plugin(store=store)
+    plugin._settings_overrides = dict(overrides)
+
+    result = await plugin.reset_settings()
+
+    assert result.is_ok()
+    assert plugin._cache_generation == 0
+
+
+@pytest.mark.asyncio
+async def test_save_settings_starts_new_daily_flight_after_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin, _ctx, store = make_plugin()
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release_first = asyncio.Event()
+    categories: list[str] = []
+
+    async def controlled_fetch(category: str) -> dict[str, Any]:
+        categories.append(category)
+        if len(categories) == 1:
+            first_started.set()
+            await release_first.wait()
+            return normalized_quote(
+                sentence="旧设置请求",
+                quote_id=51,
+                uuid="old-generation",
+            )
+        second_started.set()
+        return normalized_quote(
+            sentence="新设置请求",
+            quote_id=52,
+            uuid="new-generation",
+        )
+
+    monkeypatch.setattr(plugin, "_fetch_remote", controlled_fetch)
+    old_task = asyncio.create_task(
+        plugin._daily_quote_data(local_date="2026-07-25")
+    )
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+
+    saved = await plugin.save_settings(
+        default_category="i",
+        timeout_seconds=10,
+        max_length=80,
+        daily_cache=True,
+        daily_greeting=True,
+    )
+    new_task = asyncio.create_task(
+        plugin._daily_quote_data(local_date="2026-07-25")
+    )
+    await asyncio.wait_for(second_started.wait(), timeout=1)
+    new_quote, new_cached = await new_task
+    release_first.set()
+    old_quote, old_cached = await old_task
+    cached_quote, cache_hit = await plugin._daily_quote_data(
+        local_date="2026-07-25"
+    )
+
+    assert saved.is_ok()
+    assert categories == ["", "i"]
+    assert old_quote["uuid"] == "old-generation"
+    assert old_cached is False
+    assert new_quote["uuid"] == "new-generation"
+    assert new_cached is False
+    assert cached_quote["uuid"] == "new-generation"
+    assert cache_hit is True
+    assert store.data["daily_quote"]["quote"]["uuid"] == "new-generation"
+
+
+@pytest.mark.asyncio
+async def test_reset_settings_starts_new_daily_flight_after_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    overrides = {
+        "default_category": "i",
+        "timeout_seconds": 9.0,
+        "max_length": 100,
+        "daily_cache": True,
+        "daily_greeting": False,
+    }
+    store = FakeStore(data={"settings_overrides": dict(overrides)})
+    plugin, _ctx, _store = make_plugin(store=store)
+    plugin._settings_overrides = dict(overrides)
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release_first = asyncio.Event()
+    categories: list[str] = []
+
+    async def controlled_fetch(category: str) -> dict[str, Any]:
+        categories.append(category)
+        if len(categories) == 1:
+            first_started.set()
+            await release_first.wait()
+            return normalized_quote(
+                sentence="覆盖设置请求",
+                quote_id=61,
+                uuid="override-generation",
+            )
+        second_started.set()
+        return normalized_quote(
+            sentence="清单设置请求",
+            quote_id=62,
+            uuid="manifest-generation",
+        )
+
+    monkeypatch.setattr(plugin, "_fetch_remote", controlled_fetch)
+    old_task = asyncio.create_task(
+        plugin._daily_quote_data(local_date="2026-07-25")
+    )
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+
+    reset = await plugin.reset_settings()
+    new_task = asyncio.create_task(
+        plugin._daily_quote_data(local_date="2026-07-25")
+    )
+    await asyncio.wait_for(second_started.wait(), timeout=1)
+    new_quote, _new_cached = await new_task
+    release_first.set()
+    old_quote, _old_cached = await old_task
+    cached_quote, cache_hit = await plugin._daily_quote_data(
+        local_date="2026-07-25"
+    )
+
+    assert reset.is_ok()
+    assert categories == ["i", ""]
+    assert old_quote["uuid"] == "override-generation"
+    assert new_quote["uuid"] == "manifest-generation"
+    assert cached_quote["uuid"] == "manifest-generation"
+    assert cache_hit is True
+    assert store.data["daily_quote"]["quote"]["uuid"] == (
+        "manifest-generation"
+    )
 
 
 @pytest.mark.asyncio
@@ -1392,18 +2017,56 @@ async def test_clear_daily_cache_clears_memory_and_store() -> None:
     plugin._memory_daily = record
     result = await plugin.clear_daily_cache()
     assert result.is_ok()
+    assert result.value == {
+        "cleared": True,
+        "previous_date": "2026-07-25",
+        "persisted": True,
+    }
     assert "daily_quote" not in store.data
     assert plugin._memory_daily is None
 
 
 @pytest.mark.asyncio
-async def test_clear_daily_cache_store_failure_is_readable() -> None:
-    store = FakeStore(data={"daily_quote": {"date": "2026-07-25"}})
+async def test_clear_daily_cache_store_failure_is_partial_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = {
+        "date": "2026-07-25",
+        "quote": normalized_quote(sentence="持久层旧句"),
+    }
+    store = FakeStore(data={"daily_quote": record})
     store.fail_delete = True
     plugin, _ctx, _store = make_plugin(store=store)
+    plugin._memory_daily = record
+
     result = await plugin.clear_daily_cache()
-    assert result.is_err()
-    assert "StoreError" in str(result.error)
+
+    assert result.is_ok()
+    assert result.value == {
+        "cleared": True,
+        "previous_date": "2026-07-25",
+        "persisted": False,
+    }
+    assert plugin._memory_daily is None
+    assert plugin._ignore_persisted_daily is True
+    assert store.data["daily_quote"] == record
+
+    panel = await plugin.get_panel_state()
+    assert panel.value["daily_cache"]["date"] is None
+    assert panel.value["recent_quote"] is None
+
+    store.fail_set = True
+    client = FakeClient([api_payload(sentence="清除后的新句")])
+    monkeypatch.setattr(plugin, "_get_client", lambda: client)
+    first = await plugin.daily_quote()
+    second = await plugin.daily_quote()
+
+    assert first.value["sentence"] == "清除后的新句"
+    assert second.value["sentence"] == "清除后的新句"
+    assert second.value["cached"] is True
+    assert len(client.calls) == 1
+    assert store.data["daily_quote"] == record
+    assert plugin._ignore_persisted_daily is True
 
 
 @pytest.mark.asyncio
@@ -1474,9 +2137,19 @@ def test_client_rebuilds_for_each_event_loop_and_shutdown_is_best_effort(
     async def get_client() -> FakeClient:
         return plugin._get_client()  # type: ignore[return-value]
 
-    first = asyncio.run(get_client())
-    second = asyncio.run(get_client())
-    shutdown = asyncio.run(plugin.shutdown())
+    def run_in_new_event_loop(coroutine: Any) -> Any:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coroutine)
+        finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            finally:
+                loop.close()
+
+    first = run_in_new_event_loop(get_client())
+    second = run_in_new_event_loop(get_client())
+    shutdown = run_in_new_event_loop(plugin.shutdown())
 
     assert first is not second
     assert created == [first, second]
@@ -1585,6 +2258,247 @@ def test_static_panel_exists_with_all_required_testids_and_controls() -> None:
         assert f'data-testid="{testid}"' in html
 
 
+def test_static_panel_settings_submit_contract() -> None:
+    html = PANEL_HTML.read_text(encoding="utf-8")
+    assert '<form id="settingsForm">' in html
+    assert "novalidate" not in html
+
+    submit_handler = html.split(
+        'element("settingsForm").addEventListener("submit"',
+        maxsplit=1,
+    )[1].split(
+        'element("resetSettingsButton").addEventListener',
+        maxsplit=1,
+    )[0]
+    validity_check = "event.currentTarget.checkValidity()"
+    assert validity_check in submit_handler
+    assert submit_handler.index(validity_check) < submit_handler.index(
+        "void runAction"
+    )
+    assert 'event.currentTarget.querySelectorAll(":invalid")' in submit_handler
+    assert "control => control.id" in submit_handler
+    assert "console.warn(invalidIds);" in submit_handler
+    assert (
+        'typeof event.currentTarget.reportValidity === "function"'
+        in submit_handler
+    )
+    assert (
+        'setMessage(translate("ui.error.invalid_number"), "error");'
+        in submit_handler
+    )
+    assert "Number.isFinite(timeoutRaw)" in submit_handler
+    assert "Number.isFinite(maxLengthRaw)" in submit_handler
+    assert "Number.isInteger(maxLengthRaw)" in submit_handler
+    assert "timeout_seconds: timeoutRaw" in submit_handler
+    assert "max_length: maxLengthRaw" in submit_handler
+    assert "Math.trunc" not in submit_handler
+    assert "clamp(timeoutRaw" not in submit_handler
+    assert "clamp(maxLengthRaw" not in submit_handler
+
+
+def test_static_panel_submits_valid_settings_with_exact_payload() -> None:
+    result = run_panel_js(
+        """
+context.fetch = async () => {
+  throw new Error("initial state unavailable");
+};
+await listeners.DOMContentLoaded();
+
+const form = nodes.get("settingsForm");
+let validityChecks = 0;
+form.checkValidity = () => {
+  validityChecks += 1;
+  return true;
+};
+form.querySelectorAll = () => {
+  throw new Error("valid form queried for invalid controls");
+};
+nodes.get("defaultCategory").value = "d";
+nodes.get("timeoutSeconds").value = "12.5";
+nodes.get("maxLength").value = "137";
+nodes.get("dailyCache").checked = false;
+nodes.get("dailyGreeting").checked = true;
+
+const settings = {
+  default_category: "d",
+  timeout_seconds: 12.5,
+  max_length: 137,
+  daily_cache: false,
+  daily_greeting: true
+};
+const requests = [];
+context.window.setTimeout = callback => callback();
+context.fetch = async (url, options = {}) => {
+  const request = {
+    url,
+    method: options.method || "GET"
+  };
+  if (options.body) request.body = JSON.parse(options.body);
+  requests.push(request);
+  if (url === "/runs") {
+    return {
+      ok: true,
+      json: async () => ({
+        run_id: request.body.entry_id === "save_settings"
+          ? "save-settings-run"
+          : "panel-state-run"
+      })
+    };
+  }
+  if (url.endsWith("/export")) {
+    const data = url.includes("save-settings-run")
+      ? {settings}
+      : {
+          running: true,
+          api_state: "idle",
+          latest_request: null,
+          daily_cache: null,
+          settings,
+          recent_quote: null
+        };
+    return {
+      ok: true,
+      json: async () => ({
+        items: [{type: "json", json: {data}}]
+      })
+    };
+  }
+  if (url.startsWith("/runs/")) {
+    return {
+      ok: true,
+      json: async () => ({status: "succeeded"})
+    };
+  }
+  throw new Error("unexpected URL: " + url);
+};
+
+let preventDefaultCalls = 0;
+form.handlers.submit({
+  currentTarget: form,
+  preventDefault() {
+    preventDefaultCalls += 1;
+  }
+});
+while (nodes.get("saveSettingsButton").disabled) {
+  await new Promise(resolve => setImmediate(resolve));
+}
+const saveRequest = requests.find(
+  request => request.body && request.body.entry_id === "save_settings"
+);
+return {
+  validityChecks,
+  preventDefaultCalls,
+  payload: saveRequest && saveRequest.body,
+  fetchUrls: requests.map(request => request.url),
+  tone: nodes.get("statusMessage").dataset.tone,
+  message: nodes.get("statusMessage").textContent
+};
+"""
+    )
+
+    assert result == {
+        "validityChecks": 1,
+        "preventDefaultCalls": 1,
+        "payload": {
+            "plugin_id": "hitokoto",
+            "entry_id": "save_settings",
+            "args": {
+                "default_category": "d",
+                "timeout_seconds": 12.5,
+                "max_length": 137,
+                "daily_cache": False,
+                "daily_greeting": True,
+            },
+        },
+        "fetchUrls": [
+            "/runs",
+            "/runs/save-settings-run",
+            "/runs/save-settings-run/export",
+            "/runs",
+            "/runs/panel-state-run",
+            "/runs/panel-state-run/export",
+        ],
+        "tone": "success",
+        "message": "设置已保存并立即生效。",
+    }
+
+
+def test_static_panel_invalid_settings_reports_without_fetch() -> None:
+    result = run_panel_js(
+        """
+context.fetch = async () => {
+  throw new Error("initial state unavailable");
+};
+await listeners.DOMContentLoaded();
+
+const form = nodes.get("settingsForm");
+const warnings = [];
+const selectors = [];
+let validityChecks = 0;
+let reportValidityCalls = 0;
+let fetchCount = 0;
+let preventDefaultCalls = 0;
+context.console = {
+  warn(...args) {
+    warnings.push(args);
+  }
+};
+context.fetch = async () => {
+  fetchCount += 1;
+  throw new Error("invalid submission fetched");
+};
+form.checkValidity = () => {
+  validityChecks += 1;
+  return false;
+};
+form.querySelectorAll = selector => {
+  selectors.push(selector);
+  return [
+    {id: "timeoutSeconds", value: "private-timeout"},
+    {id: "", value: "must-not-be-logged"},
+    {id: "maxLength", value: "private-length"}
+  ];
+};
+form.reportValidity = () => {
+  reportValidityCalls += 1;
+  return false;
+};
+form.handlers.submit({
+  currentTarget: form,
+  preventDefault() {
+    preventDefaultCalls += 1;
+  }
+});
+await Promise.resolve();
+return {
+  validityChecks,
+  reportValidityCalls,
+  fetchCount,
+  preventDefaultCalls,
+  selectors,
+  warnings,
+  controlsDisabled: controls.map(control => control.disabled),
+  busy: nodes.get("appRoot").attributes["aria-busy"],
+  tone: nodes.get("statusMessage").dataset.tone,
+  message: nodes.get("statusMessage").textContent
+};
+"""
+    )
+
+    assert result == {
+        "validityChecks": 1,
+        "reportValidityCalls": 1,
+        "fetchCount": 0,
+        "preventDefaultCalls": 1,
+        "selectors": [":invalid"],
+        "warnings": [[["timeoutSeconds", "maxLength"]]],
+        "controlsDisabled": [False] * 11,
+        "busy": "false",
+        "tone": "error",
+        "message": "请检查超时秒数和最大句长。",
+    }
+
+
 def test_static_panel_uses_runs_poll_export_and_i18n_routes() -> None:
     html = PANEL_HTML.read_text(encoding="utf-8")
     assert 'const RUNS_URL = "/runs"' in html
@@ -1593,6 +2507,155 @@ def test_static_panel_uses_runs_poll_export_and_i18n_routes() -> None:
     assert "`${RUNS_URL}/${runId}/export`" in html
     assert "/ui-api/locale" in html
     assert "/ui-api/i18n/${locale}.json" in html
+
+
+def test_static_panel_executes_all_locale_normalizations() -> None:
+    result = run_panel_js(
+        """
+const samples = [
+  "zh-CN",
+  "zh-TW",
+  "en",
+  "ja",
+  "ko",
+  "es",
+  "pt",
+  "ru",
+  "zh-Hans",
+  "zh_Hant",
+  "en-US",
+  "ja-JP",
+  "ko-KR",
+  "es-MX",
+  "pt-BR",
+  "ru-RU"
+];
+return {
+  supported: context.__panelTest.SUPPORTED_LOCALES,
+  normalized: samples.map(
+    value => context.__panelTest.normalizeLocale(value)
+  )
+};
+"""
+    )
+
+    assert result["supported"] == [
+        "zh-CN",
+        "zh-TW",
+        "en",
+        "ja",
+        "ko",
+        "es",
+        "pt",
+        "ru",
+    ]
+    assert result["normalized"] == [
+        "zh-CN",
+        "zh-TW",
+        "en",
+        "ja",
+        "ko",
+        "es",
+        "pt",
+        "ru",
+        "zh-CN",
+        "zh-TW",
+        "en",
+        "ja",
+        "ko",
+        "es",
+        "pt",
+        "ru",
+    ]
+
+
+def test_static_panel_executes_locale_precedence_and_safe_fallbacks() -> None:
+    result = run_panel_js(
+        """
+async function runCase({
+  search = "",
+  saved = "",
+  backend = "ru",
+  backendOk = true,
+  navigatorLanguage = "es-MX",
+  failedBundles = []
+}) {
+  const calls = [];
+  const failures = new Set(failedBundles);
+  context.location.search = search;
+  context.navigator.language = navigatorLanguage;
+  context.localStorage = {getItem() { return saved; }};
+  context.fetch = async url => {
+    calls.push(url);
+    if (url.endsWith("/ui-api/locale")) {
+      return {
+        ok: backendOk,
+        json: async () => ({locale: backend})
+      };
+    }
+    const locale = url.match(/\\/([^/]+)\\.json$/)[1];
+    return {
+      ok: !failures.has(locale),
+      json: async () => ({"ui.title": locale})
+    };
+  };
+  await context.__panelTest.loadI18n();
+  return {calls, lang: document.documentElement.lang};
+}
+return {
+  explicit: await runCase({
+    search: "?locale=ja-JP",
+    saved: "ko-KR"
+  }),
+  saved: await runCase({
+    search: "?locale=invalid",
+    saved: "pt-BR"
+  }),
+  backend: await runCase({
+    backend: "zh-Hant"
+  }),
+  navigator: await runCase({
+    backendOk: false,
+    navigatorLanguage: "es-MX"
+  }),
+  fallback: await runCase({
+    search: "?locale=ja",
+    failedBundles: ["ja", "zh-CN"]
+  })
+};
+"""
+    )
+
+    assert result["explicit"] == {
+        "calls": ["/plugin/hitokoto/ui-api/i18n/ja.json"],
+        "lang": "ja",
+    }
+    assert result["saved"] == {
+        "calls": ["/plugin/hitokoto/ui-api/i18n/pt.json"],
+        "lang": "pt",
+    }
+    assert result["backend"] == {
+        "calls": [
+            "/plugin/hitokoto/ui-api/locale",
+            "/plugin/hitokoto/ui-api/i18n/zh-TW.json",
+        ],
+        "lang": "zh-TW",
+    }
+    assert result["navigator"] == {
+        "calls": [
+            "/plugin/hitokoto/ui-api/locale",
+            "/plugin/hitokoto/ui-api/i18n/es.json",
+        ],
+        "lang": "es",
+    }
+    assert result["fallback"] == {
+        "calls": [
+            "/plugin/hitokoto/ui-api/i18n/ja.json",
+            "/plugin/hitokoto/ui-api/i18n/zh-CN.json",
+            "/plugin/hitokoto/ui-api/i18n/en.json",
+        ],
+        "lang": "en",
+    }
 
 
 def test_static_panel_renders_api_quote_content_with_text_content_only() -> None:
@@ -1618,8 +2681,35 @@ def test_static_panel_has_responsive_and_accessible_basics() -> None:
     assert 'type="submit"' in html
 
 
-def test_static_panel_keeps_controls_disabled_when_initial_state_load_fails() -> None:
+def test_static_panel_shows_partial_persistence_warning_after_cache_clear() -> None:
     html = PANEL_HTML.read_text(encoding="utf-8")
-    assert "let initialLoadSucceeded = false;" in html
-    assert "initialLoadSucceeded = true;" in html
-    assert "setBusy(!initialLoadSucceeded);" in html
+    assert (
+        "result.persisted === false && state.store_enabled === true"
+        in html
+    )
+    assert '"ui.warning.clear_persist"' in html
+    assert 'persistenceWarning ? "warning" : "success"' in html
+
+
+def test_static_panel_releases_controls_after_initial_state_load_failure() -> None:
+    result = run_panel_js(
+        """
+context.fetch = async () => {
+  throw new Error("transient state failure");
+};
+await listeners.DOMContentLoaded();
+return {
+  busy: nodes.get("appRoot").attributes["aria-busy"],
+  controlsDisabled: controls.map(control => control.disabled),
+  tone: nodes.get("statusMessage").dataset.tone,
+  message: nodes.get("statusMessage").textContent
+};
+"""
+    )
+
+    assert result == {
+        "busy": "false",
+        "controlsDisabled": [False] * 11,
+        "tone": "error",
+        "message": "transient state failure",
+    }

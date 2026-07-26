@@ -53,6 +53,7 @@
   "ui.success.daily": "已取得今日一言。",
   "ui.success.test": "API 測試成功。",
   "ui.success.clear": "每日快取已清除。",
+  "ui.warning.clear_persist": "已清除目前執行階段中的每日快取，但無法永久儲存刪除結果；重新啟動後舊快取可能再次出現。",
   "ui.error.generic": "操作失敗",
   "ui.error.timeout": "外掛呼叫逾時。",
   "ui.error.run_id": "未取得任務 ID。",

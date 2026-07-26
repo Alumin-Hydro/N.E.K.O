@@ -53,6 +53,7 @@
   "ui.success.daily": "A frase de hoje está pronta.",
   "ui.success.test": "O teste da API foi concluído com sucesso.",
   "ui.success.clear": "O cache diário foi limpo.",
+  "ui.warning.clear_persist": "O cache diário em memória foi limpo, mas não foi possível persistir a exclusão. O cache anterior pode reaparecer após uma reinicialização.",
   "ui.error.generic": "A operação falhou",
   "ui.error.timeout": "A chamada do plugin excedeu o tempo limite.",
   "ui.error.run_id": "O ID de execução está ausente.",

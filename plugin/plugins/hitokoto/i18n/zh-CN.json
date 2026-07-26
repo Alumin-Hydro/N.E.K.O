@@ -53,6 +53,7 @@
   "ui.success.daily": "已取回今日一言。",
   "ui.success.test": "API 测试成功。",
   "ui.success.clear": "每日缓存已清除。",
+  "ui.warning.clear_persist": "已清除当前运行中的每日缓存，但无法持久保存删除结果；重启后旧缓存可能再次出现。",
   "ui.error.generic": "操作失败",
   "ui.error.timeout": "插件调用超时。",
   "ui.error.run_id": "未获取到任务 ID。",

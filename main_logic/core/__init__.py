@@ -85,6 +85,7 @@ from main_logic.agent_event_bus import (
     dispatch_text_user_message,
     dispatch_user_utterance,
     publish_analyze_request_reliably,
+    publish_user_utterance_observed,
     publish_voice_transcript_observed_best_effort,
 )
 from utils.preferences import load_global_conversation_settings, aload_global_conversation_settings

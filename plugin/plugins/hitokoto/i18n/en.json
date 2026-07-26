@@ -53,6 +53,7 @@
   "ui.success.daily": "Today's quote is ready.",
   "ui.success.test": "API test succeeded.",
   "ui.success.clear": "Daily cache cleared.",
+  "ui.warning.clear_persist": "The in-memory daily cache was cleared, but the deletion could not be persisted. The old cache may return after a restart.",
   "ui.error.generic": "The action failed",
   "ui.error.timeout": "The plugin call timed out.",
   "ui.error.run_id": "The run ID was missing.",

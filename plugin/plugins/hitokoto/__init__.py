@@ -9,9 +9,11 @@ message of the local calendar day.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import inspect
 import math
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
@@ -29,6 +31,7 @@ from plugin.sdk.plugin import (
     message,
     neko_plugin,
     plugin_entry,
+    timer_interval,
 )
 
 API_URL = "https://v1.hitokoto.cn/"
@@ -63,6 +66,17 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
 _STORE_KEY_SETTINGS = "settings_overrides"
 _STORE_KEY_DAILY = "daily_quote"
 _STORE_KEY_GREETING_DATE = "greeting_attempted_date"
+
+_USER_CONTEXT_BUCKET = "default"
+_USER_CONTEXT_LIMIT = 200
+_USER_CONTEXT_TIMEOUT_SECONDS = 1.0
+
+_QUOTE_AFFECTING_SETTINGS = (
+    "default_category",
+    "timeout_seconds",
+    "max_length",
+    "daily_cache",
+)
 
 _EMPTY_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -248,11 +262,7 @@ def _quote_from_cache(value: Any) -> dict[str, Any] | None:
     uuid = _clean_text(value.get("uuid"))
     if not uuid or not type_label:
         return None
-    trace_url = (
-        f"https://hitokoto.cn?uuid={url_quote(uuid, safe='')}"
-        if uuid
-        else "https://hitokoto.cn/"
-    )
+    trace_url = f"https://hitokoto.cn?uuid={url_quote(uuid, safe='')}"
 
     quote_id = value.get("id")
     if isinstance(quote_id, bool) or not isinstance(quote_id, (int, str)):
@@ -275,6 +285,96 @@ def _quote_from_cache(value: Any) -> dict[str, Any] | None:
     }
     normalized["formatted"] = _format_quote(normalized)
     return normalized
+
+
+def _memory_event_payload(value: Any, *, _depth: int = 0) -> dict[str, Any] | None:
+    """Unwrap one public SDK memory record without retaining its content."""
+
+    if _depth > 4:
+        return None
+
+    if isinstance(value, Mapping):
+        raw = value.get("raw")
+        if isinstance(raw, Mapping):
+            return _memory_event_payload(raw, _depth=_depth + 1)
+        if "value" in value:
+            nested = _memory_event_payload(
+                value.get("value"),
+                _depth=_depth + 1,
+            )
+            if nested is not None:
+                return nested
+        return {str(key): item for key, item in value.items()}
+
+    for attribute in ("payload", "raw"):
+        nested_value = getattr(value, attribute, None)
+        if nested_value is not None:
+            nested = _memory_event_payload(
+                nested_value,
+                _depth=_depth + 1,
+            )
+            if nested is not None:
+                return nested
+    return None
+
+
+def _memory_event_timestamp(value: Mapping[str, Any]) -> float | None:
+    timestamp = value.get("_ts")
+    if (
+        isinstance(timestamp, bool)
+        or not isinstance(timestamp, (int, float))
+        or not math.isfinite(float(timestamp))
+    ):
+        return None
+    return float(timestamp)
+
+
+def _memory_event_identity(value: Mapping[str, Any]) -> str:
+    """Return a bounded-cursor identity without keeping verbatim user text."""
+
+    digest = hashlib.sha256()
+    for key in (
+        "_ts",
+        "type",
+        "content",
+        "source",
+        "lanlan",
+        "is_voice",
+    ):
+        item = value.get(key)
+        if not isinstance(item, (str, int, float, bool, type(None))):
+            item = type(item).__name__
+        digest.update(type(item).__name__.encode("utf-8"))
+        digest.update(b":")
+        digest.update(repr(item).encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _is_user_message_event(value: Mapping[str, Any]) -> bool:
+    content = value.get("content")
+    return (
+        value.get("type") == "user_message"
+        and isinstance(content, str)
+        and bool(content.strip())
+        and value.get("source") == "main_logic.core"
+        and isinstance(value.get("is_voice"), bool)
+        and _memory_event_timestamp(value) is not None
+    )
+
+
+def _snapshot_overlap(
+    previous: tuple[str, ...],
+    current: tuple[str, ...],
+) -> int | None:
+    """Find the largest previous suffix reused as the current prefix."""
+
+    for size in range(min(len(previous), len(current)), 0, -1):
+        if previous[-size:] == current[:size]:
+            return size
+    if not previous or not current:
+        return 0
+    return None
 
 
 async def _fetch_hitokoto(
@@ -431,6 +531,7 @@ class HitokotoPlugin(NekoPluginBase):
         self._client_lock = threading.Lock()
         self._cache_store_lock = threading.Lock()
         self._greeting_store_lock = threading.Lock()
+        self._user_context_poll_lock = threading.Lock()
         self._manifest_settings = dict(_DEFAULT_SETTINGS)
         self._settings_overrides: dict[str, Any] = {}
         self._runtime_started = False
@@ -448,6 +549,9 @@ class HitokotoPlugin(NekoPluginBase):
         self._greeting_attempted_dates: set[str] = set()
         self._daily_flights: dict[str, _DailyFlight] = {}
         self._cache_generation = 0
+        self._user_context_baselined = False
+        self._user_context_snapshot: tuple[str, ...] = ()
+        self._user_context_latest_timestamp: float | None = None
         self._client: httpx.AsyncClient | None = None
         self._client_loop: asyncio.AbstractEventLoop | None = None
         self._retired_clients: list[httpx.AsyncClient] = []
@@ -523,6 +627,7 @@ class HitokotoPlugin(NekoPluginBase):
             settings["daily_greeting"],
             ui_registered,
         )
+        await self._poll_user_context_once(force_baseline=True)
         return Ok(
             {
                 "status": "running",
@@ -682,6 +787,140 @@ class HitokotoPlugin(NekoPluginBase):
             )
             return False
         return True
+
+    async def _read_user_context_snapshot(
+        self,
+    ) -> list[dict[str, Any]]:
+        bus = self.bus
+        memory = getattr(bus, "memory", None)
+        getter = getattr(memory, "get", None)
+        if not callable(getter):
+            raise RuntimeError("user-context memory bus is unavailable")
+
+        result = await asyncio.to_thread(
+            getter,
+            bucket_id=_USER_CONTEXT_BUCKET,
+            limit=_USER_CONTEXT_LIMIT,
+            timeout=_USER_CONTEXT_TIMEOUT_SECONDS,
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        if isinstance(result, Err):
+            raise SdkError("user-context memory read failed")
+        if isinstance(result, Ok):
+            result = result.value
+
+        if isinstance(result, Mapping):
+            history = result.get("history")
+            records: Any = history if isinstance(history, list) else []
+        else:
+            records = result
+        if (
+            not isinstance(records, Iterable)
+            or isinstance(records, (str, bytes, bytearray))
+        ):
+            raise SdkError("user-context memory returned invalid records")
+
+        payloads: list[dict[str, Any]] = []
+        for record in records:
+            payload = _memory_event_payload(record)
+            if payload is not None:
+                payloads.append(payload)
+        return payloads
+
+    async def _poll_user_context_once(
+        self,
+        *,
+        force_baseline: bool = False,
+    ):
+        await self._acquire_without_blocking_loop(
+            self._user_context_poll_lock
+        )
+        should_greet = False
+        try:
+            if force_baseline:
+                self._user_context_baselined = False
+                self._user_context_snapshot = ()
+                self._user_context_latest_timestamp = None
+
+            try:
+                payloads = await self._read_user_context_snapshot()
+            except Exception as exc:
+                self.logger.warning(
+                    "Hitokoto user-context poll failed: failure_class={}",
+                    type(exc).__name__,
+                )
+                return Ok(
+                    {
+                        "status": "read_failed",
+                        "observed": False,
+                        "failure_class": type(exc).__name__,
+                    }
+                )
+
+            identities = tuple(
+                _memory_event_identity(payload)
+                for payload in payloads
+            )
+            timestamps = [
+                timestamp
+                for payload in payloads
+                if (
+                    timestamp := _memory_event_timestamp(payload)
+                ) is not None
+            ]
+
+            if not self._user_context_baselined:
+                self._user_context_baselined = True
+                self._user_context_snapshot = identities
+                if timestamps:
+                    self._user_context_latest_timestamp = max(timestamps)
+                return Ok(
+                    {
+                        "status": "baseline",
+                        "observed": False,
+                    }
+                )
+
+            previous = self._user_context_snapshot
+            overlap = _snapshot_overlap(previous, identities)
+            if overlap is None:
+                cursor = self._user_context_latest_timestamp
+                candidates = [
+                    payload
+                    for payload in payloads
+                    if (
+                        (timestamp := _memory_event_timestamp(payload))
+                        is not None
+                        and cursor is not None
+                        and timestamp > cursor
+                    )
+                ]
+            else:
+                candidates = payloads[overlap:]
+
+            known_identities = set(previous)
+            should_greet = any(
+                _is_user_message_event(payload)
+                and _memory_event_identity(payload)
+                not in known_identities
+                for payload in candidates
+            )
+            self._user_context_snapshot = identities
+            if timestamps:
+                latest = max(timestamps)
+                previous_latest = self._user_context_latest_timestamp
+                self._user_context_latest_timestamp = (
+                    latest
+                    if previous_latest is None
+                    else max(previous_latest, latest)
+                )
+        finally:
+            self._user_context_poll_lock.release()
+
+        if not should_greet:
+            return Ok({"status": "unchanged", "observed": False})
+        return await self.on_chat_message()
 
     def _record_request(
         self,
@@ -852,7 +1091,8 @@ class HitokotoPlugin(NekoPluginBase):
                         "date": local_date,
                         "quote": dict(quote),
                     }
-                    self._ignore_persisted_daily = False
+                    if persisted:
+                        self._ignore_persisted_daily = False
 
             if persisted and not still_current:
                 current = await self._store_get(_STORE_KEY_DAILY, None)
@@ -885,7 +1125,9 @@ class HitokotoPlugin(NekoPluginBase):
         local_date: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         today = local_date or _local_date()
-        settings = self._settings_snapshot()
+        with self._state_lock:
+            settings = self._settings_snapshot_unlocked()
+            generation = self._cache_generation
         cache_enabled = bool(settings["daily_cache"])
 
         if cache_enabled:
@@ -893,35 +1135,45 @@ class HitokotoPlugin(NekoPluginBase):
             if cached is not None:
                 return cached, True
 
+        retry_with_current_settings = False
         with self._state_lock:
-            if cache_enabled:
-                memory = self._memory_daily
-                if (
-                    isinstance(memory, Mapping)
-                    and memory.get("date") == today
-                ):
-                    cached = _quote_from_cache(memory.get("quote"))
-                    if cached is not None:
-                        return cached, True
-
-            flight = self._daily_flights.get(today)
-            if (
-                flight is not None
-                and flight.generation != self._cache_generation
-            ):
-                # A cache clear or cache-setting change starts a new
-                # generation. Do not let a later call join a stale request;
-                # the older leader will still finish and wake its own
-                # followers, but cannot repopulate the cleared cache.
+            if generation != self._cache_generation:
+                retry_with_current_settings = True
                 flight = None
-            leader = flight is None
-            if flight is None:
-                flight = _DailyFlight(
-                    local_date=today,
-                    generation=self._cache_generation,
-                    cache_enabled=cache_enabled,
-                )
-                self._daily_flights[today] = flight
+                leader = False
+            else:
+                if cache_enabled:
+                    memory = self._memory_daily
+                    if (
+                        isinstance(memory, Mapping)
+                        and memory.get("date") == today
+                    ):
+                        cached = _quote_from_cache(memory.get("quote"))
+                        if cached is not None:
+                            return cached, True
+
+                flight = self._daily_flights.get(today)
+                if (
+                    flight is not None
+                    and flight.generation != generation
+                ):
+                    # A cache clear or quote-affecting setting change starts
+                    # a new generation. Later calls cannot join stale work.
+                    flight = None
+                leader = flight is None
+                if flight is None:
+                    flight = _DailyFlight(
+                        local_date=today,
+                        generation=generation,
+                        cache_enabled=cache_enabled,
+                    )
+                    self._daily_flights[today] = flight
+
+        if retry_with_current_settings:
+            return await self._daily_quote_data(local_date=today)
+
+        if flight is None:
+            raise SdkError("每日一句请求状态无效")
 
         if not leader:
             try:
@@ -1090,6 +1342,16 @@ class HitokotoPlugin(NekoPluginBase):
     # ------------------------------------------------------------------
     # Daily first-chat greeting
     # ------------------------------------------------------------------
+
+    @timer_interval(
+        id="hitokoto_user_context_poll",
+        seconds=2,
+        auto_start=True,
+        name="聊天消息观察器",
+        description="观察新的文本或语音用户消息并触发每日首次聊天一言。",
+    )
+    async def poll_user_context(self, **_: Any):
+        return await self._poll_user_context_once()
 
     async def _claim_daily_greeting(self, today: str) -> tuple[bool, bool]:
         with self._state_lock:
@@ -1283,14 +1545,34 @@ class HitokotoPlugin(NekoPluginBase):
 
     async def _panel_cache_snapshot(self) -> dict[str, Any]:
         with self._state_lock:
+            generation = self._cache_generation
             memory = (
                 dict(self._memory_daily)
                 if isinstance(self._memory_daily, Mapping)
                 else None
             )
+            ignore_persisted = self._ignore_persisted_daily
         record: Any = memory
-        if record is None:
-            record = await self._store_get(_STORE_KEY_DAILY, None)
+        if record is None and not ignore_persisted:
+            persisted_record = await self._store_get(
+                _STORE_KEY_DAILY,
+                None,
+            )
+            with self._state_lock:
+                current_memory = (
+                    dict(self._memory_daily)
+                    if isinstance(self._memory_daily, Mapping)
+                    else None
+                )
+                if current_memory is not None:
+                    record = current_memory
+                elif (
+                    generation != self._cache_generation
+                    or self._ignore_persisted_daily
+                ):
+                    record = None
+                else:
+                    record = persisted_record
         if not isinstance(record, Mapping):
             return {"date": None, "quote": None}
         cache_date = _valid_local_date(record.get("date"))
@@ -1385,13 +1667,15 @@ class HitokotoPlugin(NekoPluginBase):
             return Err(SdkError("保存设置失败（StoreError），请稍后再试"))
 
         with self._state_lock:
-            previous_cache = bool(
-                self._settings_snapshot_unlocked()["daily_cache"]
-            )
+            previous = self._settings_snapshot_unlocked()
             self._settings_overrides = dict(validated)
-            if previous_cache != bool(validated["daily_cache"]):
+            current = self._settings_snapshot_unlocked()
+            if any(
+                previous[key] != current[key]
+                for key in _QUOTE_AFFECTING_SETTINGS
+            ):
                 self._cache_generation += 1
-                if not bool(validated["daily_cache"]):
+                if not bool(current["daily_cache"]):
                     self._memory_daily = None
         self.logger.info(
             "Hitokoto settings saved: default_category={} timeout={} max_length={} daily_cache={} daily_greeting={}",
@@ -1420,14 +1704,15 @@ class HitokotoPlugin(NekoPluginBase):
                 return Err(SdkError("恢复默认设置失败（StoreError），请稍后再试"))
 
         with self._state_lock:
-            previous_cache = bool(
-                self._settings_snapshot_unlocked()["daily_cache"]
-            )
+            previous = self._settings_snapshot_unlocked()
             self._settings_overrides = {}
-            current_cache = bool(self._manifest_settings["daily_cache"])
-            if previous_cache != current_cache:
+            current = self._settings_snapshot_unlocked()
+            if any(
+                previous[key] != current[key]
+                for key in _QUOTE_AFFECTING_SETTINGS
+            ):
                 self._cache_generation += 1
-                if not current_cache:
+                if not bool(current["daily_cache"]):
                     self._memory_daily = None
         self.logger.info("Hitokoto settings reset")
         return Ok(
@@ -1501,10 +1786,10 @@ class HitokotoPlugin(NekoPluginBase):
             if bool(getattr(self.store, "enabled", False)):
                 persisted = await self._store_delete(_STORE_KEY_DAILY)
                 if not persisted:
-                    return Err(
-                        SdkError(
-                            "清除每日缓存失败（StoreError），请稍后再试"
-                        )
+                    self.logger.warning(
+                        "Hitokoto daily cache persistence clear failed: "
+                        "previous_date={} failure_class=StoreError",
+                        previous_date,
                     )
         finally:
             self._cache_store_lock.release()

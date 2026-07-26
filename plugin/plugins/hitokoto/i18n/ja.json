@@ -53,6 +53,7 @@
   "ui.success.daily": "今日の一言を取得しました。",
   "ui.success.test": "API テストに成功しました。",
   "ui.success.clear": "日次キャッシュを消去しました。",
+  "ui.warning.clear_persist": "実行中の日次キャッシュは消去されましたが、削除結果を永続化できませんでした。再起動後に以前のキャッシュが復元される可能性があります。",
   "ui.error.generic": "操作に失敗しました",
   "ui.error.timeout": "プラグインの呼び出しがタイムアウトしました。",
   "ui.error.run_id": "実行 ID がありません。",

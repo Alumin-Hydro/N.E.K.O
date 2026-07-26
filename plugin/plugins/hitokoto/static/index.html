@@ -607,7 +607,7 @@
           保存后立即生效，无需重启插件。
         </p>
 
-        <form id="settingsForm" novalidate>
+        <form id="settingsForm">
           <div class="field">
             <label for="defaultCategory" data-i18n="ui.settings.category">默认类型</label>
             <select id="defaultCategory" data-testid="default-category">
@@ -710,7 +710,16 @@
 
     const PLUGIN_ID = "hitokoto";
     const RUNS_URL = "/runs";
-    const SUPPORTED_LOCALES = ["zh-CN", "en"];
+    const SUPPORTED_LOCALES = [
+      "zh-CN",
+      "zh-TW",
+      "en",
+      "ja",
+      "ko",
+      "es",
+      "pt",
+      "ru"
+    ];
     const I18N_FALLBACK = {
       "ui.quote.empty": "还没有最近的一言。点击“随机一言”开始吧。",
       "ui.loading": "正在读取一言插件状态…",
@@ -727,6 +736,7 @@
       "ui.success.daily": "已取回今日一言。",
       "ui.success.test": "API 测试成功。",
       "ui.success.clear": "每日缓存已清除。",
+      "ui.warning.clear_persist": "已清除当前运行中的每日缓存，但无法持久保存删除结果；重启后旧缓存可能再次出现。",
       "ui.status.running_yes": "运行中",
       "ui.status.running_no": "未启动",
       "ui.status.api_idle": "尚未测试",
@@ -750,10 +760,22 @@
     }
 
     function normalizeLocale(value) {
-      const raw = String(value || "").trim().replace("_", "-").toLowerCase();
-      if (raw === "zh" || raw === "zh-cn" || raw.startsWith("zh-hans")) return "zh-CN";
-      if (raw === "en" || raw.startsWith("en-")) return "en";
-      return "";
+      const raw = String(value || "")
+        .trim()
+        .replace(/_/g, "-")
+        .toLowerCase();
+      const parts = raw.split("-").filter(Boolean);
+      const language = parts[0] || "";
+      if (language === "zh") {
+        if (parts.includes("hant")) return "zh-TW";
+        if (parts.includes("hans")) return "zh-CN";
+        return parts.some(part => ["tw", "hk", "mo"].includes(part))
+          ? "zh-TW"
+          : "zh-CN";
+      }
+      return ["en", "ja", "ko", "es", "pt", "ru"].includes(language)
+        ? language
+        : "";
     }
 
     async function loadI18n() {
@@ -763,22 +785,24 @@
       } catch (_error) {
         savedLocale = "";
       }
-      let requested = new URLSearchParams(location.search).get("locale") ||
-        savedLocale ||
-        navigator.language ||
-        "zh-CN";
-      try {
-        const response = await fetch(`/plugin/${PLUGIN_ID}/ui-api/locale`);
-        if (response.ok) {
-          const payload = await response.json();
-          requested = payload.locale || payload.language || requested;
+      let requested = normalizeLocale(
+        new URLSearchParams(location.search).get("locale")
+      ) || normalizeLocale(savedLocale);
+      if (!requested) {
+        try {
+          const response = await fetch(`/plugin/${PLUGIN_ID}/ui-api/locale`);
+          if (response.ok) {
+            const payload = await response.json();
+            requested = normalizeLocale(payload.locale || payload.language);
+          }
+        } catch (_error) {
+          // The panel remains fully usable with its built-in Chinese labels.
         }
-      } catch (_error) {
-        // The panel remains fully usable with its built-in Chinese labels.
       }
+      requested = requested || normalizeLocale(navigator.language) || "zh-CN";
 
       const candidates = [
-        normalizeLocale(requested),
+        requested,
         "zh-CN",
         "en"
       ].filter((value, index, values) =>
@@ -887,10 +911,6 @@
         control.disabled = busy;
       });
       if (text) setMessage(text, "info");
-    }
-
-    function clamp(value, minimum, maximum) {
-      return Math.min(maximum, Math.max(minimum, value));
     }
 
     function setQuote(quote) {
@@ -1021,6 +1041,18 @@
 
     element("settingsForm").addEventListener("submit", event => {
       event.preventDefault();
+      if (!event.currentTarget.checkValidity()) {
+        const invalidIds = Array.from(
+          event.currentTarget.querySelectorAll(":invalid"),
+          control => control.id
+        ).filter(Boolean);
+        console.warn(invalidIds);
+        if (typeof event.currentTarget.reportValidity === "function") {
+          event.currentTarget.reportValidity();
+        }
+        setMessage(translate("ui.error.invalid_number"), "error");
+        return;
+      }
       void runAction(async () => {
         const timeoutText = element("timeoutSeconds").value.trim();
         const maxLengthText = element("maxLength").value.trim();
@@ -1036,12 +1068,10 @@
         ) {
           throw new Error(translate("ui.error.invalid_number"));
         }
-        const timeout = clamp(timeoutRaw, 1, 30);
-        const maxLength = Math.trunc(clamp(maxLengthRaw, 1, 200));
         const result = await callPlugin("save_settings", {
           default_category: element("defaultCategory").value,
-          timeout_seconds: timeout,
-          max_length: maxLength,
+          timeout_seconds: timeoutRaw,
+          max_length: maxLengthRaw,
           daily_cache: element("dailyCache").checked,
           daily_greeting: element("dailyGreeting").checked
         });
@@ -1092,13 +1122,22 @@
     element("clearCacheButton").addEventListener("click", () => {
       void runAction(async () => {
         const result = await callPlugin("clear_daily_cache");
-        await refreshState(false);
+        const state = await refreshState(false);
+        const persistenceWarning =
+          result.persisted === false && state.store_enabled === true;
+        setMessage(
+          translate(
+            persistenceWarning
+              ? "ui.warning.clear_persist"
+              : "ui.success.clear"
+          ),
+          persistenceWarning ? "warning" : "success"
+        );
         return result;
-      }, "ui.success.clear");
+      });
     });
 
     setBusy(true, I18N_FALLBACK["ui.loading"] || "正在读取一言插件状态…");
-    let initialLoadSucceeded = false;
 
     document.addEventListener("DOMContentLoaded", async () => {
       setMessage(translate("ui.loading"), "info");
@@ -1107,7 +1146,6 @@
         applyI18n();
         setMessage(translate("ui.loading"), "info");
         await refreshState(false);
-        initialLoadSucceeded = true;
         setMessage(translate("ui.success.loaded"), "success");
       } catch (error) {
         setMessage(
@@ -1115,7 +1153,7 @@
           "error"
         );
       } finally {
-        setBusy(!initialLoadSucceeded);
+        setBusy(false);
       }
     });
   </script>

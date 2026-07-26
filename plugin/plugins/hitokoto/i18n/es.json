@@ -53,6 +53,7 @@
   "ui.success.daily": "La frase de hoy está lista.",
   "ui.success.test": "La prueba de la API se completó correctamente.",
   "ui.success.clear": "Se borró la caché diaria.",
+  "ui.warning.clear_persist": "Se borró la caché diaria en memoria, pero no se pudo guardar la eliminación. La caché anterior podría reaparecer después de reiniciar.",
   "ui.error.generic": "La operación falló",
   "ui.error.timeout": "La llamada al complemento agotó el tiempo de espera.",
   "ui.error.run_id": "Falta el ID de ejecución.",
