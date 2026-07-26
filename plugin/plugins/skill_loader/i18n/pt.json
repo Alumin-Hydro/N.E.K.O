@@ -1,0 +1,13 @@
+{
+  "title": "Biblioteca de habilidades",
+  "subtitle": "Carregue habilidades SKILL.md para a gatinha. Depois de registradas, ela as lê e segue sob demanda no chat (somente leitura, nada é executado).",
+  "add": "Adicionar habilidade",
+  "advanced": "Avançado (limites e notas)",
+  "empty": "Ainda não há habilidades. Clique em \"Adicionar habilidade\" para colar um SKILL.md ou registrar um diretório.",
+  "addTitle": "Adicionar habilidade",
+  "sid": "ID da habilidade (minúsculas/dígitos/-/_; inferido do conteúdo se vazio)",
+  "path": "Caminho do diretório da habilidade (opcional; cole o conteúdo se vazio)",
+  "content": "Conteúdo do SKILL.md",
+  "cancel": "Cancelar",
+  "save": "Salvar"
+}

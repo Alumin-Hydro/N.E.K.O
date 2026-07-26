@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>技能库</title>
+<style>
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; background: #f4f6f8; color: #23303a; }
+header { padding: 20px 24px 8px; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+.subtitle { font-size: 13px; color: #6b7a87; margin: 0; }
+.toolbar { display: flex; gap: 10px; padding: 14px 24px; align-items: center; }
+.btn { padding: 9px 18px; border: none; border-radius: 999px; font-size: 14px; cursor: pointer; background: #3b82f6; color: #fff; }
+.btn-ghost { background: transparent; color: #6b7a87; border: 1px solid #cbd5dd; }
+.stats { font-size: 12px; color: #6b7a87; }
+.list { display: flex; flex-direction: column; gap: 12px; padding: 6px 24px 40px; }
+.card { background: #fff; border-radius: 14px; padding: 14px 16px; box-shadow: 0 1px 4px rgba(20,40,60,.07); }
+.card.disabled { opacity: .5; }
+.card .head { display: flex; align-items: center; gap: 10px; }
+.card .name { font-size: 15px; font-weight: 600; }
+.card .sid { font-size: 11px; color: #6b7a87; font-family: ui-monospace, monospace; }
+.card .desc { font-size: 13px; color: #46565f; margin: 6px 0 10px; }
+.card .actions { display: flex; gap: 8px; }
+.card .actions button { padding: 5px 14px; font-size: 12px; border-radius: 8px; border: 1px solid #cbd5dd; background: #fff; cursor: pointer; }
+.badge { font-size: 11px; padding: 2px 10px; border-radius: 999px; background: #e2f3e6; color: #1e7a3c; }
+.badge.off { background: #f3e2e2; color: #a33; }
+.empty { padding: 60px 24px; text-align: center; color: #6b7a87; font-size: 14px; }
+dialog { border: none; border-radius: 16px; padding: 24px; width: min(520px, 94vw); }
+dialog h2 { margin: 0 0 14px; font-size: 17px; }
+dialog label { display: block; font-size: 13px; margin: 10px 0 4px; }
+dialog input[type="text"], dialog textarea { width: 100%; padding: 8px 12px; border: 1px solid #cbd5dd; border-radius: 10px; font-size: 14px; font-family: inherit; }
+dialog textarea { min-height: 140px; font-family: ui-monospace, monospace; font-size: 12px; }
+dialog .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+details { margin: 0 24px 16px; background: #fff; border-radius: 12px; padding: 12px 16px; font-size: 13px; }
+details summary { cursor: pointer; color: #6b7a87; }
+.toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #23303a; color: #fff; padding: 10px 20px; border-radius: 999px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.toast.show { opacity: .92; }
+@media (prefers-color-scheme: dark) {
+  body { background: #15191d; color: #e2e8ec; }
+  .card, details { background: #1e2429; }
+  dialog, .card .actions button { background: #1e2429; color: #e2e8ec; border-color: #39434b; }
+  dialog input[type="text"], dialog textarea { background: #15191d; color: #e2e8ec; border-color: #39434b; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1 data-i18n="title">技能库</h1>
+  <p class="subtitle" data-i18n="subtitle">给猫娘加载 SKILL.md 技能。注册后，聊天中她会按需读取并遵循技能说明（只读，不会执行任何命令）。</p>
+</header>
+<div class="toolbar">
+  <button id="addBtn" class="btn" data-i18n="add">添加技能</button>
+  <span id="stats" class="stats"></span>
+</div>
+<details>
+  <summary data-i18n="advanced">高级设置（上限与说明）</summary>
+  <p id="limits" style="margin:8px 0 2px"></p>
+</details>
+<div id="list" class="list"></div>
+<p id="empty" class="empty" data-i18n="empty" hidden>还没有技能。点击"添加技能"粘贴一份 SKILL.md，或注册一个技能目录。</p>
+
+<dialog id="addDialog">
+  <h2 data-i18n="addTitle">添加技能</h2>
+  <label for="sidInput" data-i18n="sid">技能 ID（小写字母/数字/-/_，留空则从内容推断）</label>
+  <input id="sidInput" type="text" maxlength="64" placeholder="my-skill">
+  <label for="pathInput" data-i18n="path">技能目录路径（可选，留空则粘贴内容）</label>
+  <input id="pathInput" type="text" maxlength="512" placeholder="/path/to/skill-dir">
+  <label for="contentInput" data-i18n="content">SKILL.md 内容</label>
+  <textarea id="contentInput" placeholder="---&#10;name: my-skill&#10;description: ...&#10;---&#10;&#10;# 技能说明…"></textarea>
+  <div class="dialog-actions">
+    <button id="cancelAdd" class="btn btn-ghost" data-i18n="cancel">取消</button>
+    <button id="confirmAdd" class="btn" data-i18n="save">保存</button>
+  </div>
+</dialog>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const RUNS_URL = "/runs";
+const pluginId = "skill_loader";
+const listEl = document.getElementById("list");
+const empty = document.getElementById("empty");
+const statsEl = document.getElementById("stats");
+const limitsEl = document.getElementById("limits");
+const addDialog = document.getElementById("addDialog");
+const sidInput = document.getElementById("sidInput");
+const pathInput = document.getElementById("pathInput");
+const contentInput = document.getElementById("contentInput");
+const toastEl = document.getElementById("toast");
+let toastTimer = null;
+
+function toast(text) {
+  toastEl.textContent = text;
+  toastEl.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove("show"), 2600);
+}
+
+async function callEntry(entryId, args = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(RUNS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plugin_id: pluginId, entry_id: entryId, args }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const run = await resp.json();
+    const runId = run.run_id || run.id;
+    if (!runId) throw new Error("missing run id");
+    for (let i = 0; i < 60; i += 1) {
+      await new Promise((r) => setTimeout(r, 500));
+      const poll = await fetch(`${RUNS_URL}/${encodeURIComponent(runId)}`);
+      const data = await poll.json();
+      if (data.status === "succeeded") {
+        const result = data.result;
+        if (result && result.ok === false) throw new Error((result.error && result.error.message) || "entry failed");
+        return result && result.value !== undefined ? result.value : result;
+      }
+      if (data.status === "failed") throw new Error(data.error || "run failed");
+    }
+    throw new Error("run timeout");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function refresh() {
+  try {
+    const state = await callEntry("get_panel_state", {});
+    renderList(state.skills || []);
+    statsEl.textContent = `${state.total}/${state.max_skills}`;
+    limitsEl.textContent = `单技能注入上限 ${state.max_inline_chars} 字符 · 存储 ${state.store_ready ? "正常" : "不可用"}`;
+    empty.hidden = (state.skills || []).length > 0;
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+function renderList(skills) {
+  listEl.replaceChildren();
+  skills.forEach((skill) => {
+    const card = document.createElement("div");
+    card.className = "card" + (skill.enabled ? "" : " disabled");
+    const head = document.createElement("div");
+    head.className = "head";
+    const badge = document.createElement("span");
+    badge.className = "badge" + (skill.enabled ? "" : " off");
+    badge.textContent = skill.enabled ? "启用" : "禁用";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = skill.name;
+    const sid = document.createElement("span");
+    sid.className = "sid";
+    sid.textContent = skill.id;
+    head.append(badge, name, sid);
+    const desc = document.createElement("div");
+    desc.className = "desc";
+    desc.textContent = skill.description || "(无简介)";
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const toggle = document.createElement("button");
+    toggle.textContent = skill.enabled ? "禁用" : "启用";
+    toggle.addEventListener("click", async () => {
+      await callEntry("update_skill", { skill_id: skill.id, action: skill.enabled ? "disable" : "enable" });
+      refresh();
+    });
+    const del = document.createElement("button");
+    del.textContent = "删除";
+    del.addEventListener("click", async () => {
+      if (!confirm(`删除技能「${skill.name}」？`)) return;
+      await callEntry("update_skill", { skill_id: skill.id, action: "delete" });
+      refresh();
+    });
+    actions.append(toggle, del);
+    if (skill.source !== "pasted") {
+      const rescan = document.createElement("button");
+      rescan.textContent = "重新扫描";
+      rescan.addEventListener("click", async () => {
+        try {
+          await callEntry("update_skill", { skill_id: skill.id, action: "rescan" });
+          toast("已重新扫描");
+        } catch (err) { toast(err.message); }
+        refresh();
+      });
+      actions.append(rescan);
+    }
+    card.append(head, desc, actions);
+    listEl.append(card);
+  });
+}
+
+document.getElementById("addBtn").addEventListener("click", () => {
+  sidInput.value = "";
+  pathInput.value = "";
+  contentInput.value = "";
+  addDialog.showModal();
+});
+document.getElementById("cancelAdd").addEventListener("click", () => addDialog.close());
+document.getElementById("confirmAdd").addEventListener("click", async () => {
+  try {
+    await callEntry("add_skill", {
+      skill_id: sidInput.value.trim(),
+      path: pathInput.value.trim(),
+      content: contentInput.value,
+    }, 20000);
+    addDialog.close();
+    toast("已添加");
+    refresh();
+  } catch (err) {
+    toast(err.message);
+  }
+});
+refresh();
+</script>
+</body>
+</html>

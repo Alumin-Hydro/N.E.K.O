@@ -1,0 +1,13 @@
+{
+  "title": "Skill Library",
+  "subtitle": "Load SKILL.md skills for the catgirl. Once registered she reads and follows them on demand in chat (read-only, nothing is executed).",
+  "add": "Add skill",
+  "advanced": "Advanced (limits and notes)",
+  "empty": "No skills yet. Click \"Add skill\" to paste a SKILL.md or register a skill directory.",
+  "addTitle": "Add skill",
+  "sid": "Skill ID (lowercase/digits/-/_; inferred from content if empty)",
+  "path": "Skill directory path (optional; paste content instead if empty)",
+  "content": "SKILL.md content",
+  "cancel": "Cancel",
+  "save": "Save"
+}
