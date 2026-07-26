@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import json
 import math
 import threading
 from collections.abc import Iterable, Mapping
@@ -77,6 +78,23 @@ _QUOTE_AFFECTING_SETTINGS = (
     "max_length",
     "daily_cache",
 )
+
+
+def _quote_affecting_settings_identity(
+    settings: Mapping[str, Any],
+) -> str:
+    snapshot = {
+        key: settings[key]
+        for key in _QUOTE_AFFECTING_SETTINGS
+    }
+    return json.dumps(
+        snapshot,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
 
 _EMPTY_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -993,10 +1011,13 @@ class HitokotoPlugin(NekoPluginBase):
     ) -> dict[str, Any] | None:
         with self._state_lock:
             generation = self._cache_generation
+            settings = self._settings_snapshot_unlocked()
+            settings_identity = _quote_affecting_settings_identity(settings)
             memory = self._memory_daily
             if (
                 isinstance(memory, Mapping)
                 and memory.get("date") == local_date
+                and memory.get("generation") == generation
             ):
                 cached_quote = _quote_from_cache(memory.get("quote"))
                 if cached_quote is not None:
@@ -1009,6 +1030,9 @@ class HitokotoPlugin(NekoPluginBase):
         stored = await self._store_get(_STORE_KEY_DAILY, None)
         if not isinstance(stored, Mapping) or stored.get("date") != local_date:
             return None
+        stored_identity = stored.get("settings_identity")
+        if stored_identity != settings_identity:
+            return None
         cached_quote = _quote_from_cache(stored.get("quote"))
         if cached_quote is None:
             return None
@@ -1018,6 +1042,8 @@ class HitokotoPlugin(NekoPluginBase):
                 generation != self._cache_generation
                 or self._ignore_persisted_daily
                 or not bool(settings["daily_cache"])
+                or stored_identity
+                != _quote_affecting_settings_identity(settings)
             ):
                 return None
             memory_date = (
@@ -1032,6 +1058,7 @@ class HitokotoPlugin(NekoPluginBase):
                 self._memory_daily = {
                     "date": local_date,
                     "quote": dict(cached_quote),
+                    "generation": generation,
                 }
         return cached_quote
 
@@ -1045,13 +1072,15 @@ class HitokotoPlugin(NekoPluginBase):
         await self._acquire_without_blocking_loop(self._cache_store_lock)
         try:
             with self._state_lock:
+                settings = self._settings_snapshot_unlocked()
                 if (
                     generation != self._cache_generation
-                    or not bool(
-                        self._settings_snapshot_unlocked()["daily_cache"]
-                    )
+                    or not bool(settings["daily_cache"])
                 ):
                     return
+                settings_identity = _quote_affecting_settings_identity(
+                    settings
+                )
                 memory_date = (
                     self._memory_daily.get("date")
                     if isinstance(self._memory_daily, Mapping)
@@ -1067,15 +1096,17 @@ class HitokotoPlugin(NekoPluginBase):
                 "date": local_date,
                 "quote": dict(quote),
                 "generation": generation,
+                "settings_identity": settings_identity,
             }
             persisted = await self._store_set(_STORE_KEY_DAILY, record)
 
             with self._state_lock:
+                settings = self._settings_snapshot_unlocked()
                 still_current = (
                     generation == self._cache_generation
-                    and bool(
-                        self._settings_snapshot_unlocked()["daily_cache"]
-                    )
+                    and bool(settings["daily_cache"])
+                    and settings_identity
+                    == _quote_affecting_settings_identity(settings)
                 )
                 memory_date = (
                     self._memory_daily.get("date")
@@ -1090,6 +1121,7 @@ class HitokotoPlugin(NekoPluginBase):
                     self._memory_daily = {
                         "date": local_date,
                         "quote": dict(quote),
+                        "generation": generation,
                     }
                     if persisted:
                         self._ignore_persisted_daily = False
@@ -1100,6 +1132,8 @@ class HitokotoPlugin(NekoPluginBase):
                     isinstance(current, Mapping)
                     and current.get("generation") == generation
                     and current.get("date") == local_date
+                    and current.get("settings_identity")
+                    == settings_identity
                 ):
                     await self._store_delete(_STORE_KEY_DAILY)
         finally:
@@ -1147,6 +1181,7 @@ class HitokotoPlugin(NekoPluginBase):
                     if (
                         isinstance(memory, Mapping)
                         and memory.get("date") == today
+                        and memory.get("generation") == generation
                     ):
                         cached = _quote_from_cache(memory.get("quote"))
                         if cached is not None:
@@ -1546,6 +1581,8 @@ class HitokotoPlugin(NekoPluginBase):
     async def _panel_cache_snapshot(self) -> dict[str, Any]:
         with self._state_lock:
             generation = self._cache_generation
+            settings = self._settings_snapshot_unlocked()
+            settings_identity = _quote_affecting_settings_identity(settings)
             memory = (
                 dict(self._memory_daily)
                 if isinstance(self._memory_daily, Mapping)
@@ -1558,7 +1595,13 @@ class HitokotoPlugin(NekoPluginBase):
                 _STORE_KEY_DAILY,
                 None,
             )
+            persisted_matches_settings = (
+                isinstance(persisted_record, Mapping)
+                and persisted_record.get("settings_identity")
+                == settings_identity
+            )
             with self._state_lock:
+                settings = self._settings_snapshot_unlocked()
                 current_memory = (
                     dict(self._memory_daily)
                     if isinstance(self._memory_daily, Mapping)
@@ -1569,6 +1612,10 @@ class HitokotoPlugin(NekoPluginBase):
                 elif (
                     generation != self._cache_generation
                     or self._ignore_persisted_daily
+                    or not bool(settings["daily_cache"])
+                    or not persisted_matches_settings
+                    or settings_identity
+                    != _quote_affecting_settings_identity(settings)
                 ):
                     record = None
                 else:
@@ -1663,20 +1710,36 @@ class HitokotoPlugin(NekoPluginBase):
 
         if not bool(getattr(self.store, "enabled", False)):
             return Err(SdkError("插件存储已禁用，无法保存设置"))
-        if not await self._store_set(_STORE_KEY_SETTINGS, validated):
-            return Err(SdkError("保存设置失败（StoreError），请稍后再试"))
+        await self._acquire_without_blocking_loop(self._cache_store_lock)
+        try:
+            if not await self._store_set(_STORE_KEY_SETTINGS, validated):
+                return Err(
+                    SdkError("保存设置失败（StoreError），请稍后再试")
+                )
 
-        with self._state_lock:
-            previous = self._settings_snapshot_unlocked()
-            self._settings_overrides = dict(validated)
-            current = self._settings_snapshot_unlocked()
-            if any(
-                previous[key] != current[key]
-                for key in _QUOTE_AFFECTING_SETTINGS
-            ):
-                self._cache_generation += 1
-                if not bool(current["daily_cache"]):
+            with self._state_lock:
+                previous = self._settings_snapshot_unlocked()
+                self._settings_overrides = dict(validated)
+                current = self._settings_snapshot_unlocked()
+                cache_invalidated = any(
+                    previous[key] != current[key]
+                    for key in _QUOTE_AFFECTING_SETTINGS
+                )
+                if cache_invalidated:
+                    self._cache_generation += 1
                     self._memory_daily = None
+                    self._ignore_persisted_daily = True
+
+            if (
+                cache_invalidated
+                and not await self._store_delete(_STORE_KEY_DAILY)
+            ):
+                self.logger.warning(
+                    "Hitokoto daily cache persistence invalidation failed "
+                    "after settings save: failure_class=StoreError"
+                )
+        finally:
+            self._cache_store_lock.release()
         self.logger.info(
             "Hitokoto settings saved: default_category={} timeout={} max_length={} daily_cache={} daily_greeting={}",
             validated["default_category"] or "all",
@@ -1699,26 +1762,46 @@ class HitokotoPlugin(NekoPluginBase):
         input_schema=_EMPTY_SCHEMA,
     )
     async def reset_settings(self, **_: Any):
-        if bool(getattr(self.store, "enabled", False)):
-            if not await self._store_delete(_STORE_KEY_SETTINGS):
-                return Err(SdkError("恢复默认设置失败（StoreError），请稍后再试"))
-
-        with self._state_lock:
-            previous = self._settings_snapshot_unlocked()
-            self._settings_overrides = {}
-            current = self._settings_snapshot_unlocked()
-            if any(
-                previous[key] != current[key]
-                for key in _QUOTE_AFFECTING_SETTINGS
+        store_enabled = bool(getattr(self.store, "enabled", False))
+        await self._acquire_without_blocking_loop(self._cache_store_lock)
+        try:
+            if (
+                store_enabled
+                and not await self._store_delete(_STORE_KEY_SETTINGS)
             ):
-                self._cache_generation += 1
-                if not bool(current["daily_cache"]):
+                return Err(
+                    SdkError("恢复默认设置失败（StoreError），请稍后再试")
+                )
+
+            with self._state_lock:
+                previous = self._settings_snapshot_unlocked()
+                self._settings_overrides = {}
+                current = self._settings_snapshot_unlocked()
+                cache_invalidated = any(
+                    previous[key] != current[key]
+                    for key in _QUOTE_AFFECTING_SETTINGS
+                )
+                if cache_invalidated:
+                    self._cache_generation += 1
                     self._memory_daily = None
+                    self._ignore_persisted_daily = True
+
+            if (
+                cache_invalidated
+                and store_enabled
+                and not await self._store_delete(_STORE_KEY_DAILY)
+            ):
+                self.logger.warning(
+                    "Hitokoto daily cache persistence invalidation failed "
+                    "after settings reset: failure_class=StoreError"
+                )
+        finally:
+            self._cache_store_lock.release()
         self.logger.info("Hitokoto settings reset")
         return Ok(
             {
                 "reset": True,
-                "persisted": bool(getattr(self.store, "enabled", False)),
+                "persisted": store_enabled,
                 "settings": self._settings_snapshot(),
             }
         )

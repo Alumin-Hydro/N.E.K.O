@@ -13,6 +13,7 @@ SimpleNamespace that carries only the attributes the helper touches
 from __future__ import annotations
 
 import asyncio
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -204,6 +205,49 @@ def test_publish_schedules_exactly_one_relay_without_running_it_inline(monkeypat
     assert published[0]["lanlan_name"] == "皖萱"
     assert published[0]["content"] == "relayed text"
     assert published[0]["is_voice"] is True
+
+
+@pytest.mark.unit
+def test_publish_constructor_failure_does_not_escape(monkeypatch):
+    scheduled = []
+
+    def fake_publish(**_kwargs):
+        raise RuntimeError("publisher construction failed")
+
+    fake = SimpleNamespace(lanlan_name="皖萱", _fire_task=scheduled.append)
+    monkeypatch.setattr(core_facade, "publish_user_utterance_observed", fake_publish)
+
+    LLMSessionManager._publish_user_utterance_to_plugin_bus(
+        fake, "real input", is_voice_source=False,
+    )
+
+    assert scheduled == []
+    assert _drain_bucket("皖萱")[0]["content"] == "real input"
+
+
+@pytest.mark.unit
+def test_publish_closes_coroutine_when_fire_task_raises(monkeypatch):
+    created = []
+
+    async def relay():
+        return True
+
+    def fake_publish(**_kwargs):
+        coroutine = relay()
+        created.append(coroutine)
+        return coroutine
+
+    def fail_schedule(_coroutine):
+        raise RuntimeError("scheduler failed")
+
+    fake = SimpleNamespace(lanlan_name="皖萱", _fire_task=fail_schedule)
+    monkeypatch.setattr(core_facade, "publish_user_utterance_observed", fake_publish)
+
+    LLMSessionManager._publish_user_utterance_to_plugin_bus(
+        fake, "real input", is_voice_source=False,
+    )
+
+    assert inspect.getcoroutinestate(created[0]) == inspect.CORO_CLOSED
 
 
 @pytest.mark.unit

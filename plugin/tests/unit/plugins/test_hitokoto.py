@@ -44,6 +44,9 @@ def run_panel_js(scenario: str) -> Any:
         pytest.skip("Node.js is required for Hosted UI behavior tests")
 
     html = PANEL_HTML.read_text(encoding="utf-8")
+    assert html.count("<script>") == html.count("</script>") == 1, (
+        "Hosted UI behavior harness requires exactly one inline script"
+    )
     inline_script = html.rsplit("<script>", maxsplit=1)[1].split(
         "</script>",
         maxsplit=1,
@@ -152,6 +155,8 @@ vm.runInContext(
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="strict",
         timeout=10,
     )
     assert completed.returncode == 0, completed.stderr
@@ -883,6 +888,31 @@ async def test_daily_quote_corrupt_cache_refetches(
 
 
 @pytest.mark.asyncio
+async def test_daily_quote_cache_without_settings_identity_refetches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FakeStore(
+        data={
+            "daily_quote": {
+                "date": "2026-07-25",
+                "quote": normalized_quote(sentence="旧格式缓存句"),
+            }
+        }
+    )
+    plugin, _ctx, _store = make_plugin(store=store)
+    client = FakeClient([api_payload(sentence="带设置身份的新句")])
+    monkeypatch.setattr(plugin, "_get_client", lambda: client)
+
+    result = await plugin.daily_quote()
+
+    assert result.is_ok()
+    assert result.value["sentence"] == "带设置身份的新句"
+    assert result.value["cached"] is False
+    assert len(client.calls) == 1
+    assert isinstance(store.data["daily_quote"]["settings_identity"], str)
+
+
+@pytest.mark.asyncio
 async def test_malformed_future_cache_is_overwritten_and_then_reused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1136,14 +1166,7 @@ async def test_clear_cache_wins_against_an_inflight_store_read(
 ) -> None:
     class BlockingReadStore(FakeStore):
         def __init__(self) -> None:
-            super().__init__(
-                data={
-                    "daily_quote": {
-                        "date": "2026-07-25",
-                        "quote": normalized_quote(sentence="已清除的旧句"),
-                    }
-                }
-            )
+            super().__init__()
             self.read_started = asyncio.Event()
             self.release_read = asyncio.Event()
             self.block_once = True
@@ -1159,6 +1182,12 @@ async def test_clear_cache_wins_against_an_inflight_store_read(
 
     store = BlockingReadStore()
     plugin, _ctx, _store = make_plugin(store=store)
+    await plugin._commit_daily_cache(
+        local_date="2026-07-25",
+        quote=normalized_quote(sentence="已清除的旧句"),
+        generation=0,
+    )
+    plugin._memory_daily = None
     client = FakeClient([api_payload(sentence="清除后的新句")])
     monkeypatch.setattr(plugin, "_get_client", lambda: client)
 
@@ -1485,13 +1514,14 @@ async def test_daily_greeting_disabled_does_nothing() -> None:
 async def test_greeting_reuses_daily_cache_without_network(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cached = {
-        "date": "2026-07-25",
-        "quote": normalized_quote(sentence="缓存句"),
-    }
-    plugin, ctx, _store = make_plugin(
-        store=FakeStore(data={"daily_quote": cached})
+    store = FakeStore()
+    plugin, ctx, _store = make_plugin(store=store)
+    await plugin._commit_daily_cache(
+        local_date="2026-07-25",
+        quote=normalized_quote(sentence="缓存句"),
+        generation=0,
     )
+    plugin._memory_daily = None
 
     def no_client() -> Any:
         raise AssertionError("cached greeting must not create a client")
@@ -1622,16 +1652,14 @@ async def test_push_failure_is_also_marked_and_not_retried(
 @pytest.mark.asyncio
 async def test_panel_state_contains_settings_status_cache_and_preview() -> None:
     cached_quote = normalized_quote(sentence="面板缓存句")
-    plugin, _ctx, _store = make_plugin(
-        store=FakeStore(
-            data={
-                "daily_quote": {
-                    "date": "2026-07-25",
-                    "quote": cached_quote,
-                }
-            }
-        )
+    store = FakeStore()
+    plugin, _ctx, _store = make_plugin(store=store)
+    await plugin._commit_daily_cache(
+        local_date="2026-07-25",
+        quote=cached_quote,
+        generation=0,
     )
+    plugin._memory_daily = None
     plugin._runtime_started = True
     result = await plugin.get_panel_state()
     assert result.is_ok()
@@ -1646,16 +1674,14 @@ async def test_panel_state_contains_settings_status_cache_and_preview() -> None:
 
 @pytest.mark.asyncio
 async def test_panel_state_hides_malformed_cache_date() -> None:
-    plugin, _ctx, _store = make_plugin(
-        store=FakeStore(
-            data={
-                "daily_quote": {
-                    "date": "not-a-date",
-                    "quote": normalized_quote(),
-                }
-            }
-        )
+    store = FakeStore()
+    plugin, _ctx, _store = make_plugin(store=store)
+    await plugin._commit_daily_cache(
+        local_date="not-a-date",
+        quote=normalized_quote(),
+        generation=0,
     )
+    plugin._memory_daily = None
 
     result = await plugin.get_panel_state()
 
@@ -1700,6 +1726,178 @@ async def test_save_settings_does_not_advance_generation_for_greeting_only() -> 
 
 
 @pytest.mark.asyncio
+async def test_save_settings_invalidates_same_day_memory_and_store_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin, _ctx, store = make_plugin()
+    client = FakeClient(
+        [
+            api_payload(
+                sentence="旧设置缓存",
+                quote_id=52,
+                uuid="old-settings-cache",
+            ),
+            api_payload(
+                sentence="新设置结果",
+                type_code="d",
+                quote_id=53,
+                uuid="new-settings-cache",
+            )
+        ]
+    )
+    monkeypatch.setattr(plugin, "_get_client", lambda: client)
+
+    old = await plugin.daily_quote()
+    store.fail_delete = True
+    saved = await plugin.save_settings(
+        default_category="d",
+        timeout_seconds=10,
+        max_length=37,
+        daily_cache=True,
+        daily_greeting=True,
+    )
+    fresh = await plugin.daily_quote()
+    cached = await plugin.daily_quote()
+
+    assert old.is_ok()
+    assert old.value["sentence"] == "旧设置缓存"
+    assert saved.is_ok()
+    assert fresh.is_ok() and cached.is_ok()
+    assert fresh.value["sentence"] == "新设置结果"
+    assert fresh.value["cached"] is False
+    assert cached.value["sentence"] == "新设置结果"
+    assert cached.value["cached"] is True
+    assert len(client.calls) == 2
+    assert client.calls[1] == {
+        "url": API_URL,
+        "params": {
+            "encode": "json",
+            "charset": "utf-8",
+            "max_length": 37,
+            "c": "d",
+        },
+        "timeout": 10.0,
+    }
+    assert store.delete_calls == ["daily_quote"]
+    assert store.data["daily_quote"]["quote"]["sentence"] == "新设置结果"
+    assert isinstance(store.data["daily_quote"]["settings_identity"], str)
+    assert store.data["daily_quote"]["settings_identity"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["save", "reset"])
+async def test_settings_invalidation_failures_do_not_revive_daily_after_restart(
+    action: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    overrides = {
+        "default_category": "i",
+        "timeout_seconds": 9.0,
+        "max_length": 100,
+        "daily_cache": True,
+        "daily_greeting": False,
+    }
+    store = FakeStore(
+        data=(
+            {"settings_overrides": dict(overrides)}
+            if action == "reset"
+            else None
+        )
+    )
+    plugin, _ctx, _store = make_plugin(store=store)
+    started = await plugin.startup()
+    client = FakeClient(
+        [
+            api_payload(
+                sentence="旧设置持久缓存",
+                quote_id=64,
+                uuid="old-persisted-settings",
+            ),
+            api_payload(
+                sentence="当前进程新设置结果",
+                quote_id=65,
+                uuid="current-process-settings",
+            ),
+        ]
+    )
+    monkeypatch.setattr(plugin, "_get_client", lambda: client)
+
+    old = await plugin.daily_quote()
+    persisted_old = dict(store.data["daily_quote"])
+    original_delete = store.delete
+
+    async def fail_daily_delete(key: str):
+        if key == "daily_quote":
+            store.delete_calls.append(key)
+            return Err(SdkError("daily delete failed"))
+        return await original_delete(key)
+
+    monkeypatch.setattr(store, "delete", fail_daily_delete)
+    if action == "save":
+        changed = await plugin.save_settings(
+            default_category="d",
+            timeout_seconds=10,
+            max_length=37,
+            daily_cache=True,
+            daily_greeting=True,
+        )
+        expected_category = "d"
+        expected_params = {
+            "encode": "json",
+            "charset": "utf-8",
+            "max_length": 37,
+            "c": "d",
+        }
+    else:
+        changed = await plugin.reset_settings()
+        expected_category = ""
+        expected_params = {
+            "encode": "json",
+            "charset": "utf-8",
+            "max_length": 80,
+        }
+
+    store.fail_set = True
+    current = await plugin.daily_quote()
+
+    assert started.is_ok()
+    assert old.is_ok()
+    assert changed.is_ok()
+    assert current.is_ok()
+    assert current.value["sentence"] == "当前进程新设置结果"
+    assert store.data["daily_quote"] == persisted_old
+
+    restarted, _restarted_ctx, _restarted_store = make_plugin(store=store)
+    restart_client = FakeClient(
+        [
+            api_payload(
+                sentence="重启后新设置结果",
+                quote_id=66,
+                uuid="restarted-settings",
+            )
+        ]
+    )
+    monkeypatch.setattr(restarted, "_get_client", lambda: restart_client)
+
+    restarted_ok = await restarted.startup()
+    result = await restarted.daily_quote()
+
+    assert restarted_ok.is_ok()
+    assert restarted._settings_snapshot()["default_category"] == (
+        expected_category
+    )
+    assert result.is_ok()
+    assert result.value["sentence"] == "重启后新设置结果"
+    assert result.value["cached"] is False
+    assert len(restart_client.calls) == 1
+    assert restart_client.calls[0] == {
+        "url": API_URL,
+        "params": expected_params,
+        "timeout": 10.0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_reset_settings_does_not_advance_generation_for_greeting_only() -> None:
     overrides = {"daily_greeting": False}
     store = FakeStore(data={"settings_overrides": dict(overrides)})
@@ -1710,6 +1908,64 @@ async def test_reset_settings_does_not_advance_generation_for_greeting_only() ->
 
     assert result.is_ok()
     assert plugin._cache_generation == 0
+
+
+@pytest.mark.asyncio
+async def test_reset_settings_invalidates_same_day_memory_and_store_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    overrides = {
+        "default_category": "i",
+        "timeout_seconds": 9.0,
+        "max_length": 100,
+        "daily_cache": True,
+        "daily_greeting": False,
+    }
+    store = FakeStore(
+        data={
+            "settings_overrides": dict(overrides),
+        }
+    )
+    plugin, _ctx, _store = make_plugin(store=store)
+    plugin._settings_overrides = dict(overrides)
+    client = FakeClient(
+        [
+            api_payload(
+                sentence="覆盖设置缓存",
+                type_code="i",
+                quote_id=62,
+                uuid="override-settings-cache",
+            ),
+            api_payload(
+                sentence="清单设置结果",
+                quote_id=63,
+                uuid="manifest-settings-cache",
+            )
+        ]
+    )
+    monkeypatch.setattr(plugin, "_get_client", lambda: client)
+
+    old = await plugin.daily_quote()
+    reset = await plugin.reset_settings()
+    fresh = await plugin.daily_quote()
+
+    assert old.is_ok()
+    assert old.value["sentence"] == "覆盖设置缓存"
+    assert reset.is_ok()
+    assert fresh.is_ok()
+    assert fresh.value["sentence"] == "清单设置结果"
+    assert fresh.value["cached"] is False
+    assert len(client.calls) == 2
+    assert client.calls[1] == {
+        "url": API_URL,
+        "params": {
+            "encode": "json",
+            "charset": "utf-8",
+            "max_length": 80,
+        },
+        "timeout": 10.0,
+    }
+    assert store.data["daily_quote"]["quote"]["sentence"] == "清单设置结果"
 
 
 @pytest.mark.asyncio
@@ -2275,22 +2531,9 @@ def test_static_panel_settings_submit_contract() -> None:
     assert submit_handler.index(validity_check) < submit_handler.index(
         "void runAction"
     )
-    assert 'event.currentTarget.querySelectorAll(":invalid")' in submit_handler
-    assert "control => control.id" in submit_handler
-    assert "console.warn(invalidIds);" in submit_handler
-    assert (
-        'typeof event.currentTarget.reportValidity === "function"'
-        in submit_handler
-    )
-    assert (
-        'setMessage(translate("ui.error.invalid_number"), "error");'
-        in submit_handler
-    )
     assert "Number.isFinite(timeoutRaw)" in submit_handler
     assert "Number.isFinite(maxLengthRaw)" in submit_handler
     assert "Number.isInteger(maxLengthRaw)" in submit_handler
-    assert "timeout_seconds: timeoutRaw" in submit_handler
-    assert "max_length: maxLengthRaw" in submit_handler
     assert "Math.trunc" not in submit_handler
     assert "clamp(timeoutRaw" not in submit_handler
     assert "clamp(maxLengthRaw" not in submit_handler

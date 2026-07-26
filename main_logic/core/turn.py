@@ -689,19 +689,21 @@ class TurnMixin:
         if not callable(fire_task):
             return
 
-        publish_coro = _core_facade.publish_user_utterance_observed(
-            event_id=event_id,
-            timestamp=timestamp,
-            lanlan_name=lanlan_name,
-            content=cleaned,
-            is_voice=bool(is_voice_source),
-        )
+        publish_coro = None
         try:
+            publish_coro = _core_facade.publish_user_utterance_observed(
+                event_id=event_id,
+                timestamp=timestamp,
+                lanlan_name=lanlan_name,
+                content=cleaned,
+                is_voice=bool(is_voice_source),
+            )
             fire_task(publish_coro)
-        except Exception as exc:  # pragma: no cover - defensive scheduler guard
-            close = getattr(publish_coro, "close", None)
-            if callable(close):
-                close()
+        except Exception as exc:
+            if publish_coro is not None:
+                close = getattr(publish_coro, "close", None)
+                if callable(close):
+                    close()
             logger.debug(
                 "[%s] failed to schedule user utterance relay: %s",
                 lanlan_name,
