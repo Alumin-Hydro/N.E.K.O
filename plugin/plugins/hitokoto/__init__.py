@@ -1147,11 +1147,18 @@ class HitokotoPlugin(NekoPluginBase):
     async def _wait_for_flight(self, flight: _DailyFlight) -> dict[str, Any]:
         while not flight.done.is_set():
             await asyncio.sleep(0.01)
-        if flight.error is not None:
-            raise flight.error
-        if flight.quote is None:
+        with self._state_lock:
+            if flight.generation != self._cache_generation:
+                raise _DailyFlightAborted()
+            flight_error = flight.error
+            flight_quote = (
+                dict(flight.quote) if flight.quote is not None else None
+            )
+        if flight_error is not None:
+            raise flight_error
+        if flight_quote is None:
             raise SdkError("每日一句请求未返回结果")
-        return dict(flight.quote)
+        return flight_quote
 
     async def _daily_quote_data(
         self,
@@ -1217,6 +1224,7 @@ class HitokotoPlugin(NekoPluginBase):
                 return await self._daily_quote_data(local_date=today)
             return joined_quote, bool(flight.cache_enabled)
 
+        retry_with_current_settings = False
         try:
             category = str(settings["default_category"])
             fetched = await self._fetch_remote(category)
@@ -1226,19 +1234,37 @@ class HitokotoPlugin(NekoPluginBase):
                     quote=fetched,
                     generation=flight.generation,
                 )
-            flight.quote = dict(fetched)
-            return dict(fetched), False
+            with self._state_lock:
+                if flight.generation != self._cache_generation:
+                    flight.error = _DailyFlightAborted()
+                    retry_with_current_settings = True
+                else:
+                    flight.quote = dict(fetched)
         except asyncio.CancelledError:
             flight.error = _DailyFlightAborted()
             raise
         except BaseException as exc:
-            flight.error = exc
-            raise
+            with self._state_lock:
+                retry_with_current_settings = (
+                    flight.generation != self._cache_generation
+                    and isinstance(exc, Exception)
+                )
+                flight.error = (
+                    _DailyFlightAborted()
+                    if retry_with_current_settings
+                    else exc
+                )
+            if not retry_with_current_settings:
+                raise
         finally:
             with self._state_lock:
                 if self._daily_flights.get(today) is flight:
                     self._daily_flights.pop(today, None)
             flight.done.set()
+
+        if retry_with_current_settings:
+            return await self._daily_quote_data(local_date=today)
+        return dict(fetched), False
 
     # ------------------------------------------------------------------
     # User-facing dual-registered quote capabilities

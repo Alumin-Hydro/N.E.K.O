@@ -1974,9 +1974,15 @@ async def test_save_settings_starts_new_daily_flight_after_update(
 ) -> None:
     plugin, _ctx, store = make_plugin()
     first_started = asyncio.Event()
+    old_waiter_joined = asyncio.Event()
     second_started = asyncio.Event()
     release_first = asyncio.Event()
     categories: list[str] = []
+    wait_for_flight = plugin._wait_for_flight
+
+    async def tracked_wait_for_flight(flight: Any) -> dict[str, Any]:
+        old_waiter_joined.set()
+        return await wait_for_flight(flight)
 
     async def controlled_fetch(category: str) -> dict[str, Any]:
         categories.append(category)
@@ -1995,11 +2001,17 @@ async def test_save_settings_starts_new_daily_flight_after_update(
             uuid="new-generation",
         )
 
+    monkeypatch.setattr(plugin, "_wait_for_flight", tracked_wait_for_flight)
     monkeypatch.setattr(plugin, "_fetch_remote", controlled_fetch)
-    old_task = asyncio.create_task(
+    old_leader_task = asyncio.create_task(
         plugin._daily_quote_data(local_date="2026-07-25")
     )
     await asyncio.wait_for(first_started.wait(), timeout=1)
+    old_waiter_task = asyncio.create_task(
+        plugin._daily_quote_data(local_date="2026-07-25")
+    )
+    await asyncio.wait_for(old_waiter_joined.wait(), timeout=1)
+    assert not old_waiter_task.done()
 
     saved = await plugin.save_settings(
         default_category="i",
@@ -2014,15 +2026,20 @@ async def test_save_settings_starts_new_daily_flight_after_update(
     await asyncio.wait_for(second_started.wait(), timeout=1)
     new_quote, new_cached = await new_task
     release_first.set()
-    old_quote, old_cached = await old_task
+    (old_leader_quote, old_leader_cached), (
+        old_waiter_quote,
+        old_waiter_cached,
+    ) = await asyncio.gather(old_leader_task, old_waiter_task)
     cached_quote, cache_hit = await plugin._daily_quote_data(
         local_date="2026-07-25"
     )
 
     assert saved.is_ok()
     assert categories == ["", "i"]
-    assert old_quote["uuid"] == "old-generation"
-    assert old_cached is False
+    assert old_leader_quote["uuid"] == "new-generation"
+    assert old_leader_cached is True
+    assert old_waiter_quote["uuid"] == "new-generation"
+    assert old_waiter_cached is True
     assert new_quote["uuid"] == "new-generation"
     assert new_cached is False
     assert cached_quote["uuid"] == "new-generation"
@@ -2086,7 +2103,7 @@ async def test_reset_settings_starts_new_daily_flight_after_update(
 
     assert reset.is_ok()
     assert categories == ["i", ""]
-    assert old_quote["uuid"] == "override-generation"
+    assert old_quote["uuid"] == "manifest-generation"
     assert new_quote["uuid"] == "manifest-generation"
     assert cached_quote["uuid"] == "manifest-generation"
     assert cache_hit is True
