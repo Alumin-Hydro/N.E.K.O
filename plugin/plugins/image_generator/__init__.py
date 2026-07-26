@@ -89,9 +89,71 @@ _SUPPORTED_IMAGE_FORMATS: dict[str, tuple[str, str]] = {
     "WEBP": ("image/webp", "webp"),
 }
 
+PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
+    "openai": {
+        "label": "OpenAI",
+        "base_url": "https://api.openai.com/v1",
+        "default_model": "gpt-image-1",
+        "allow_local_base_url": False,
+        "allow_custom_base_url": False,
+    },
+    "volcengine_ark": {
+        "label": "火山方舟",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "default_model": "doubao-seedream-4-0-250828",
+        "allow_local_base_url": False,
+        "allow_custom_base_url": False,
+    },
+    "aliyun_bailian": {
+        "label": "阿里云百炼",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "default_model": "wanx2.1-t2i-turbo",
+        "allow_local_base_url": False,
+        "allow_custom_base_url": False,
+    },
+    "siliconflow": {
+        "label": "SiliconFlow",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "default_model": "Kwai-Kolors/Kolors",
+        "allow_local_base_url": False,
+        "allow_custom_base_url": False,
+    },
+    "openrouter": {
+        "label": "OpenRouter",
+        "base_url": "https://openrouter.ai/api/v1",
+        "default_model": "openai/gpt-5-image-mini",
+        "allow_local_base_url": False,
+        "allow_custom_base_url": False,
+    },
+    "gemini_openai_compatible": {
+        "label": "Gemini（OpenAI 兼容）",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "default_model": "imagen-3.0-generate-002",
+        "allow_local_base_url": False,
+        "allow_custom_base_url": False,
+    },
+    "local_compatible": {
+        "label": "本地兼容服务",
+        "base_url": "http://127.0.0.1:1234/v1",
+        "default_model": "local-image-model",
+        "allow_local_base_url": True,
+        "allow_custom_base_url": True,
+    },
+    "custom": {
+        "label": "自定义兼容服务",
+        "base_url": "https://api.openai.com/v1",
+        "default_model": "gpt-image-1",
+        "allow_local_base_url": False,
+        "allow_custom_base_url": True,
+    },
+}
+
+_DEFAULT_PROVIDER = "openai"
+
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "api_base_url": "https://api.openai.com/v1",
-    "model": "gpt-image-1",
+    "provider": _DEFAULT_PROVIDER,
+    "api_base_url": PROVIDER_PRESETS[_DEFAULT_PROVIDER]["base_url"],
+    "model": PROVIDER_PRESETS[_DEFAULT_PROVIDER]["default_model"],
     "default_size": "1024x1024",
     "default_quality": "auto",
     "default_style": "",
@@ -372,6 +434,17 @@ def _is_loopback_hostname(value: Any) -> bool:
         return False
 
 
+def _is_private_or_loopback_hostname(value: Any) -> bool:
+    hostname = str(value or "").strip().lower().strip("[]")
+    if _is_loopback_hostname(hostname):
+        return True
+    try:
+        ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_link_local or ip.is_multicast or ip.is_reserved
+
+
 def _normalize_api_base_url(value: Any) -> str:
     if not isinstance(value, str):
         raise SdkError("API Base URL 必须是文本")
@@ -502,8 +575,22 @@ def _validate_settings(
         for key, value in base.items()
     }
 
+    if "provider" in raw:
+        provider = _clean_text(
+            raw["provider"],
+            label="供应商",
+            max_chars=64,
+        ).lower()
+        if provider not in PROVIDER_PRESETS:
+            raise SdkError("供应商不在支持列表中")
+        result["provider"] = provider
+    provider = str(result.get("provider") or _DEFAULT_PROVIDER)
+    preset = PROVIDER_PRESETS[provider]
+
     if "api_base_url" in raw:
         result["api_base_url"] = _normalize_api_base_url(raw["api_base_url"])
+    elif provider != str(base.get("provider") or _DEFAULT_PROVIDER):
+        result["api_base_url"] = str(preset["base_url"])
     if "model" in raw:
         model = _clean_text(
             raw["model"],
@@ -513,6 +600,23 @@ def _validate_settings(
         if not _MODEL_PATTERN.fullmatch(model):
             raise SdkError("模型名称包含不支持的字符")
         result["model"] = model
+    elif provider != str(base.get("provider") or _DEFAULT_PROVIDER):
+        result["model"] = str(preset["default_model"])
+
+    base_url = _normalize_api_base_url(result["api_base_url"])
+    parsed_base_url = _parse_http_url(base_url)
+    if parsed_base_url is None:
+        raise SdkError("API Base URL 无效")
+    if _is_private_or_loopback_hostname(parsed_base_url.hostname):
+        if not preset["allow_local_base_url"]:
+            raise SdkError("本地或内网 Base URL 仅允许在“本地兼容服务”供应商下使用")
+    elif parsed_base_url.scheme.lower() != "https":
+        raise SdkError("公开 API Base URL 必须使用 HTTPS")
+    if (
+        not preset["allow_custom_base_url"]
+        and base_url != str(preset["base_url"])
+    ):
+        raise SdkError("该供应商的 Base URL 不允许自定义；请选择自定义或本地兼容服务")
 
     if "allowed_sizes" in raw:
         result["allowed_sizes"] = _normalize_option_list(

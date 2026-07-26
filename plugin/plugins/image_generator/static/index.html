@@ -1085,17 +1085,9 @@
           <form id="settingsForm" class="card-body" autocomplete="off" novalidate>
             <div class="settings-grid">
               <div class="field field-wide">
-                <label for="apiBaseUrl" data-i18n="field.api_base_url">API 基础地址</label>
-                <input
-                  id="apiBaseUrl"
-                  name="api_base_url"
-                  type="url"
-                  inputmode="url"
-                  maxlength="4096"
-                  placeholder="https://api.openai.com/v1"
-                  required
-                >
-                <p class="field-help" data-i18n="help.api_base_url">将自动调用该地址下的 /images/generations；仅回环开发地址可使用 HTTP。</p>
+                <label for="provider" data-i18n="field.provider">供应商</label>
+                <select id="provider" name="provider" required></select>
+                <p class="field-help" data-i18n="help.provider">选择供应商后通常只需要填写 API Key；Base URL 和模型已为你填好。</p>
               </div>
 
               <div class="field field-wide">
@@ -1118,104 +1110,123 @@
                 <label for="model" data-i18n="field.model">模型</label>
                 <input id="model" name="model" type="text" maxlength="128" required>
               </div>
-
-              <div class="field">
-                <label for="outputFormat" data-i18n="field.output_format">图像文件格式</label>
-                <select id="outputFormat" name="output_format" required>
-                  <option value="auto">auto</option>
-                  <option value="png">png</option>
-                  <option value="jpeg">jpeg</option>
-                  <option value="webp">webp</option>
-                </select>
-              </div>
-
-              <div class="field">
-                <label for="responseFormat" data-i18n="field.response_format">提供商响应（仅 b64_json）</label>
-                <select id="responseFormat" name="response_format" required>
-                  <option value="b64_json">b64_json</option>
-                </select>
-              </div>
-
-              <div class="field field-wide">
-                <label for="allowedSizes" data-i18n="field.allowed_sizes">允许的尺寸</label>
-                <input id="allowedSizes" name="allowed_sizes" type="text" maxlength="800" required>
-                <p class="field-help" data-i18n="help.list">使用英文逗号分隔；第一项也可作为默认值。</p>
-              </div>
-
-              <div class="field">
-                <label for="defaultSize" data-i18n="field.default_size">默认尺寸</label>
-                <select id="defaultSize" name="default_size" required></select>
-              </div>
-
-              <div class="field">
-                <label for="allowedQualities" data-i18n="field.allowed_qualities">允许的质量</label>
-                <input id="allowedQualities" name="allowed_qualities" type="text" maxlength="800" required>
-              </div>
-
-              <div class="field">
-                <label for="defaultQuality" data-i18n="field.default_quality">默认质量</label>
-                <select id="defaultQuality" name="default_quality" required></select>
-              </div>
-
-              <div class="field">
-                <label for="allowedStyles" data-i18n="field.allowed_styles">允许的风格</label>
-                <input id="allowedStyles" name="allowed_styles" type="text" maxlength="800" required>
-                <p class="field-help" data-i18n="help.style_list">使用 "" 表示不向提供商发送风格参数。</p>
-              </div>
-
-              <div class="field">
-                <label for="defaultStyle" data-i18n="field.default_style">默认风格</label>
-                <select id="defaultStyle" name="default_style"></select>
-              </div>
-
-              <div class="field">
-                <label for="timeoutSeconds" data-i18n="field.timeout">请求超时</label>
-                <div class="input-unit">
-                  <input id="timeoutSeconds" name="timeout_seconds" type="number" min="5" max="240" step="1" required>
-                  <span data-i18n="unit.seconds">秒</span>
-                </div>
-              </div>
-
-              <div class="field">
-                <label for="maxDownloadMiB" data-i18n="field.max_download">单图 Base64 响应上限</label>
-                <div class="input-unit">
-                  <input id="maxDownloadMiB" name="max_download_mib" type="number" min="0.001" max="50" step="0.001" required>
-                  <span>MiB</span>
-                </div>
-              </div>
-
-              <div class="field">
-                <label for="cacheMaxCount" data-i18n="field.cache_count">缓存文件上限</label>
-                <input id="cacheMaxCount" name="cache_max_count" type="number" min="1" max="100" step="1" required>
-              </div>
-
-              <div class="field">
-                <label for="cacheMaxMiB" data-i18n="field.cache_bytes">缓存容量上限</label>
-                <div class="input-unit">
-                  <input id="cacheMaxMiB" name="cache_max_mib" type="number" min="0.001" max="1024" step="0.001" required>
-                  <span>MiB</span>
-                </div>
-              </div>
-
-              <div class="field">
-                <label for="historyLimit" data-i18n="field.history_limit">历史记录上限</label>
-                <input id="historyLimit" name="history_limit" type="number" min="1" max="100" step="1" required>
-              </div>
-
-              <div class="field">
-                <div class="switch-field">
-                  <div class="switch-copy">
-                    <span class="field-label" data-i18n="field.auto_show">生成后自动显示</span>
-                    <p data-i18n="help.auto_show">成功后将图片链接直接显示到当前聊天。</p>
-                  </div>
-                  <label class="switch" for="autoShow">
-                    <span class="sr-only" data-i18n="field.auto_show">生成后自动显示</span>
-                    <input id="autoShow" name="auto_show_in_chat" type="checkbox">
-                    <span class="switch-track" aria-hidden="true"></span>
-                  </label>
-                </div>
-              </div>
             </div>
+
+            <details id="advancedSettings" class="advanced-settings">
+              <summary data-i18n="settings.advanced">高级设置（通常不用修改）</summary>
+              <div class="settings-grid">
+                <div class="field field-wide">
+                  <label for="apiBaseUrl" data-i18n="field.api_base_url">API 基础地址</label>
+                  <input
+                    id="apiBaseUrl"
+                    name="api_base_url"
+                    type="url"
+                    inputmode="url"
+                    maxlength="4096"
+                    placeholder="https://api.openai.com/v1"
+                    required
+                  >
+                  <p class="field-help" data-i18n="help.api_base_url">将自动调用该地址下的 /images/generations；仅本地兼容服务可使用 HTTP。</p>
+                </div>
+
+                <div class="field">
+                  <label for="outputFormat" data-i18n="field.output_format">图像文件格式</label>
+                  <select id="outputFormat" name="output_format" required>
+                    <option value="auto">auto</option>
+                    <option value="png">png</option>
+                    <option value="jpeg">jpeg</option>
+                    <option value="webp">webp</option>
+                  </select>
+                </div>
+
+                <div class="field">
+                  <label for="responseFormat" data-i18n="field.response_format">提供商响应（仅 b64_json）</label>
+                  <select id="responseFormat" name="response_format" required>
+                    <option value="b64_json">b64_json</option>
+                  </select>
+                </div>
+
+                <div class="field field-wide">
+                  <label for="allowedSizes" data-i18n="field.allowed_sizes">允许的尺寸</label>
+                  <input id="allowedSizes" name="allowed_sizes" type="text" maxlength="800" required>
+                  <p class="field-help" data-i18n="help.list">使用英文逗号分隔；第一项也可作为默认值。</p>
+                </div>
+
+                <div class="field">
+                  <label for="defaultSize" data-i18n="field.default_size">默认尺寸</label>
+                  <select id="defaultSize" name="default_size" required></select>
+                </div>
+
+                <div class="field">
+                  <label for="allowedQualities" data-i18n="field.allowed_qualities">允许的质量</label>
+                  <input id="allowedQualities" name="allowed_qualities" type="text" maxlength="800" required>
+                </div>
+
+                <div class="field">
+                  <label for="defaultQuality" data-i18n="field.default_quality">默认质量</label>
+                  <select id="defaultQuality" name="default_quality" required></select>
+                </div>
+
+                <div class="field">
+                  <label for="allowedStyles" data-i18n="field.allowed_styles">允许的风格</label>
+                  <input id="allowedStyles" name="allowed_styles" type="text" maxlength="800" required>
+                  <p class="field-help" data-i18n="help.style_list">使用 "" 表示不向提供商发送风格参数。</p>
+                </div>
+
+                <div class="field">
+                  <label for="defaultStyle" data-i18n="field.default_style">默认风格</label>
+                  <select id="defaultStyle" name="default_style"></select>
+                </div>
+
+                <div class="field">
+                  <label for="timeoutSeconds" data-i18n="field.timeout">请求超时</label>
+                  <div class="input-unit">
+                    <input id="timeoutSeconds" name="timeout_seconds" type="number" min="5" max="240" step="1" required>
+                    <span data-i18n="unit.seconds">秒</span>
+                  </div>
+                </div>
+
+                <div class="field">
+                  <label for="maxDownloadMiB" data-i18n="field.max_download">单图 Base64 响应上限</label>
+                  <div class="input-unit">
+                    <input id="maxDownloadMiB" name="max_download_mib" type="number" min="0.001" max="50" step="0.001" required>
+                    <span>MiB</span>
+                  </div>
+                </div>
+
+                <div class="field">
+                  <label for="cacheMaxCount" data-i18n="field.cache_count">缓存文件上限</label>
+                  <input id="cacheMaxCount" name="cache_max_count" type="number" min="1" max="100" step="1" required>
+                </div>
+
+                <div class="field">
+                  <label for="cacheMaxMiB" data-i18n="field.cache_bytes">缓存容量上限</label>
+                  <div class="input-unit">
+                    <input id="cacheMaxMiB" name="cache_max_mib" type="number" min="0.001" max="1024" step="0.001" required>
+                    <span>MiB</span>
+                  </div>
+                </div>
+
+                <div class="field">
+                  <label for="historyLimit" data-i18n="field.history_limit">历史记录上限</label>
+                  <input id="historyLimit" name="history_limit" type="number" min="1" max="100" step="1" required>
+                </div>
+
+                <div class="field">
+                  <div class="switch-field">
+                    <div class="switch-copy">
+                      <span class="field-label" data-i18n="field.auto_show">生成后自动显示</span>
+                      <p data-i18n="help.auto_show">成功后将图片链接直接显示到当前聊天。</p>
+                    </div>
+                    <label class="switch" for="autoShow">
+                      <span class="sr-only" data-i18n="field.auto_show">生成后自动显示</span>
+                      <input id="autoShow" name="auto_show_in_chat" type="checkbox">
+                      <span class="switch-track" aria-hidden="true"></span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </details>
 
             <div class="form-actions">
               <button id="saveButton" class="button button-primary" type="submit">
@@ -1324,6 +1335,48 @@
       const SECRET_ENVELOPE_ALGORITHM = 'RSA-OAEP-256+A256GCM';
       const SECRET_ENVELOPE_BINDING_PREFIX = `${PLUGIN_ID}:`;
       const GENERATED_ASSET_PREFIX = `/plugin/${PLUGIN_ID}/ui/generated/`;
+      const PROVIDER_PRESETS = Object.freeze({
+        openai: {
+          label: 'OpenAI',
+          base_url: 'https://api.openai.com/v1',
+          model: 'gpt-image-1',
+        },
+        volcengine_ark: {
+          label: '火山方舟',
+          base_url: 'https://ark.cn-beijing.volces.com/api/v3',
+          model: 'doubao-seedream-4-0-250828',
+        },
+        aliyun_bailian: {
+          label: '阿里云百炼',
+          base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          model: 'wanx2.1-t2i-turbo',
+        },
+        siliconflow: {
+          label: 'SiliconFlow',
+          base_url: 'https://api.siliconflow.cn/v1',
+          model: 'Kwai-Kolors/Kolors',
+        },
+        openrouter: {
+          label: 'OpenRouter',
+          base_url: 'https://openrouter.ai/api/v1',
+          model: 'openai/gpt-5-image-mini',
+        },
+        gemini_openai_compatible: {
+          label: 'Gemini（OpenAI 兼容）',
+          base_url: 'https://generativelanguage.googleapis.com/v1beta/openai',
+          model: 'imagen-3.0-generate-002',
+        },
+        local_compatible: {
+          label: '本地兼容服务',
+          base_url: 'http://127.0.0.1:1234/v1',
+          model: 'local-image-model',
+        },
+        custom: {
+          label: '自定义兼容服务',
+          base_url: 'https://api.openai.com/v1',
+          model: 'gpt-image-1',
+        },
+      });
       const SUPPORTED_LOCALES = Object.freeze(['zh-CN', 'zh-TW', 'en', 'ja', 'ko', 'es', 'pt', 'ru']);
       const LOCALE_ALIASES = Object.freeze({
         zh: 'zh-CN',
@@ -1341,7 +1394,7 @@
         'connectionBadge', 'connectionText', 'refreshButton',
         'runtimeValue', 'runtimeDetail', 'credentialValue', 'credentialDetail',
         'cacheValue', 'cacheDetail', 'historyValue', 'historyDetail',
-        'apiStatusPill', 'apiStatusText', 'settingsForm', 'apiBaseUrl', 'apiKey',
+        'apiStatusPill', 'apiStatusText', 'settingsForm', 'provider', 'apiBaseUrl', 'apiKey',
         'apiKeyHelp', 'model', 'outputFormat', 'responseFormat', 'allowedSizes', 'defaultSize',
         'allowedQualities', 'defaultQuality', 'allowedStyles', 'defaultStyle',
         'timeoutSeconds', 'maxDownloadMiB', 'cacheMaxCount', 'cacheMaxMiB',
@@ -1870,17 +1923,36 @@
         return Boolean(match && match.slice(1).every((octet) => Number(octet) <= 255));
       }
 
-      function safeApiBaseUrl(value) {
+      function safeApiBaseUrl(value, provider = 'openai') {
         const raw = String(value || '').trim();
         if (!/^https?:\/\//i.test(raw)) return '';
         try {
           const parsed = new URL(raw);
           if (parsed.username || parsed.password || parsed.search || parsed.hash) return '';
           if (parsed.protocol === 'https:') return parsed.href;
-          if (parsed.protocol === 'http:' && isLoopbackHostname(parsed.hostname)) return parsed.href;
+          if (provider === 'local_compatible' && parsed.protocol === 'http:' && isLoopbackHostname(parsed.hostname)) return parsed.href;
           return '';
         } catch (_) {
           return '';
+        }
+      }
+
+      function populateProviderOptions(selected = 'openai') {
+        writeSelect(elements.provider, Object.keys(PROVIDER_PRESETS), selected);
+        Array.from(elements.provider.options).forEach((option) => {
+          const preset = PROVIDER_PRESETS[option.value];
+          option.textContent = preset ? preset.label : option.value;
+        });
+      }
+
+      function applyProviderPreset(provider, { overwriteCustom = true } = {}) {
+        const preset = PROVIDER_PRESETS[provider];
+        if (!preset) return;
+        if (overwriteCustom || !elements.apiBaseUrl.value.trim()) {
+          elements.apiBaseUrl.value = preset.base_url;
+        }
+        if (overwriteCustom || !elements.model.value.trim()) {
+          elements.model.value = preset.model;
         }
       }
 
@@ -2027,7 +2099,9 @@
         const defaults = state.defaults && typeof state.defaults === 'object' ? state.defaults : {};
         const get = (key, fallback = '') => valueFrom(settings, key, valueFrom(defaults, key, fallback));
 
-        elements.apiBaseUrl.value = String(get('api_base_url', 'https://api.openai.com/v1')).slice(0, 4096);
+        const provider = String(get('provider', 'openai')).slice(0, 64);
+        populateProviderOptions(PROVIDER_PRESETS[provider] ? provider : 'openai');
+        elements.apiBaseUrl.value = String(get('api_base_url', PROVIDER_PRESETS[elements.provider.value].base_url)).slice(0, 4096);
         elements.apiKey.value = '';
         elements.model.value = String(get('model', '')).slice(0, 128);
         const outputFormat = String(get('output_format', 'auto')).slice(0, 24);
@@ -2186,9 +2260,10 @@
           throw new Error(t('error.default_not_allowed', '默认值必须包含在对应的允许列表中'));
         }
 
+        const provider = elements.provider.value;
         const baseUrl = elements.apiBaseUrl.value.trim();
-        if (!safeApiBaseUrl(baseUrl)) {
-          throw new Error(t('error.invalid_api_url', 'API 基础地址必须使用 HTTPS；仅回环开发地址可使用 HTTP'));
+        if (!safeApiBaseUrl(baseUrl, provider)) {
+          throw new Error(t('error.invalid_api_url', 'API 基础地址必须使用 HTTPS；仅本地兼容服务可使用回环 HTTP'));
         }
         const model = elements.model.value.trim();
         const outputFormat = elements.outputFormat.value.trim();
@@ -2204,6 +2279,7 @@
         validateCacheCapacity(maxDownloadBytes, cacheMaxBytes);
 
         return {
+          provider,
           api_base_url: baseUrl,
           model,
           default_size: elements.defaultSize.value,
@@ -2408,6 +2484,9 @@
 
       function bindEvents() {
         elements.settingsForm.addEventListener('submit', saveSettings);
+        elements.provider.addEventListener('change', () => {
+          applyProviderPreset(elements.provider.value, { overwriteCustom: true });
+        });
         elements.refreshButton.addEventListener('click', () => refreshState({ announce: true }));
         elements.resetButton.addEventListener('click', resetSettings);
         elements.clearKeyButton.addEventListener('click', clearApiKey);

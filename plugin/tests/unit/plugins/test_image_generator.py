@@ -2118,6 +2118,50 @@ def test_all_locale_bundles_have_identical_nonempty_key_sets() -> None:
         ), locale
 
 
+def test_provider_presets_power_simple_onboarding_defaults() -> None:
+    """The basic panel must offer provider presets instead of asking for URLs."""
+
+    from plugin.plugins.image_generator import PROVIDER_PRESETS
+
+    expected = {
+        "openai",
+        "volcengine_ark",
+        "aliyun_bailian",
+        "siliconflow",
+        "openrouter",
+        "gemini_openai_compatible",
+        "local_compatible",
+        "custom",
+    }
+    assert expected <= set(PROVIDER_PRESETS)
+    assert DEFAULT_SETTINGS["provider"] == "openai"
+    assert DEFAULT_SETTINGS["api_base_url"] == PROVIDER_PRESETS["openai"]["base_url"]
+    assert DEFAULT_SETTINGS["model"] == PROVIDER_PRESETS["openai"]["default_model"]
+    assert PROVIDER_PRESETS["local_compatible"]["allow_local_base_url"] is True
+    assert PROVIDER_PRESETS["custom"]["allow_custom_base_url"] is True
+
+
+def _validate_for_onboarding(settings: dict[str, Any]) -> dict[str, Any]:
+    return _validate_settings(settings, base=DEFAULT_SETTINGS, require_all=False)
+
+
+def test_local_base_urls_are_restricted_to_local_provider() -> None:
+    settings = copy.deepcopy(DEFAULT_SETTINGS)
+    settings.update(
+        {
+            "provider": "local_compatible",
+            "api_base_url": "http://127.0.0.1:1234/v1",
+            "model": "local-image-model",
+        }
+    )
+    assert _validate_for_onboarding(settings)["api_base_url"] == "http://127.0.0.1:1234/v1"
+
+    unsafe = copy.deepcopy(settings)
+    unsafe["provider"] = "openai"
+    with pytest.raises(SdkError, match="本地|HTTPS|Base URL"):
+        _validate_for_onboarding(unsafe)
+
+
 def test_static_panel_is_self_contained_accessible_and_calls_real_entries() -> None:
     html = PANEL_HTML.read_text(encoding="utf-8")
     assert '<html lang="zh-CN">' in html
@@ -2177,6 +2221,22 @@ def test_static_panel_is_self_contained_accessible_and_calls_real_entries() -> N
     # Marking this select as required makes the browser reject the default form,
     # so settings cannot be saved from a freshly installed panel.
     assert not re.search(r'<select id="defaultStyle"[^>]*\brequired\b', html)
+
+    basic_section_end = html.find('<details id="advancedSettings"')
+    assert basic_section_end > 0, "advanced settings must be collapsed by default"
+    basic_html = html[:basic_section_end]
+    advanced_html = html[basic_section_end:]
+    assert '<select id="provider"' in basic_html
+    assert 'id="apiKey"' in basic_html
+    assert 'id="model"' in basic_html
+    assert 'id="apiBaseUrl"' not in basic_html
+    assert 'id="responseFormat"' not in basic_html
+    assert 'id="maxDownloadMiB"' not in basic_html
+    assert 'id="allowedSizes"' not in basic_html
+    assert 'id="apiBaseUrl"' in advanced_html
+    assert 'id="responseFormat"' in advanced_html
+    assert 'id="maxDownloadMiB"' in advanced_html
+    assert 'id="allowedSizes"' in advanced_html
 
 
 def test_static_panel_inline_javascript_passes_node_syntax_check() -> None:
