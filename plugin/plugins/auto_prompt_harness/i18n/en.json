@@ -83,6 +83,8 @@
   "error.code.analysis_failed": "The sample text could not be analyzed.",
   "error.code.clearance_failed": "The old queued hint could not be safely cleared. No requested state change was applied.",
   "error.code.confirmation_required": "The required confirmation was not provided.",
+  "error.code.reflect_failed": "Reflection failed; please try again later.",
+  "error.code.resolve_failed": "The proposal could not be resolved.",
   "error.code.delete_failed": "The manual preference could not be deleted.",
   "error.code.empty_text": "Enter text to analyze.",
   "error.code.export_failed": "The selected profile could not be exported.",

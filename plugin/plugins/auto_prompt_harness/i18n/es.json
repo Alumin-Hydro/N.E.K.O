@@ -83,6 +83,8 @@
   "error.code.analysis_failed": "No se pudo analizar el texto de ejemplo.",
   "error.code.clearance_failed": "No se pudo limpiar de forma segura la pista anterior. No se aplicó el cambio solicitado.",
   "error.code.confirmation_required": "No se proporcionó la confirmación requerida.",
+  "error.code.reflect_failed": "La reflexión falló; inténtalo de nuevo más tarde.",
+  "error.code.resolve_failed": "No se pudo resolver la propuesta.",
   "error.code.delete_failed": "No se pudo eliminar la preferencia manual.",
   "error.code.empty_text": "Introduce texto para analizar.",
   "error.code.export_failed": "No se pudo exportar el perfil seleccionado.",

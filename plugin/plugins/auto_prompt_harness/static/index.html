@@ -844,6 +844,18 @@
             <div id="changes-list" class="changes-list"></div>
             <p id="changes-empty" class="empty" data-i18n="changes.empty">还没有偏好变化。</p>
           </article>
+
+          <article class="subpanel">
+            <div class="subpanel-head">
+              <div>
+                <h3 data-i18n="proposals.title">LLM 反思提案</h3>
+                <span class="hint" data-i18n="proposals.help">让猫娘阅读最近的对话，反思并生成可批准的提示词提案；你可以批准、编辑或拒绝。</span>
+              </div>
+              <button type="button" id="reflect-btn" class="btn-primary" data-i18n="proposals.reflectNow">立即反思一次</button>
+            </div>
+            <div id="proposals-list" class="proposals-list"></div>
+            <p id="proposals-empty" class="empty" data-i18n="proposals.empty">还没有反思提案。点击"立即反思一次"试试。</p>
+          </article>
         </div>
 
         <article class="subpanel" style="margin-top:16px">
@@ -1719,6 +1731,83 @@
       });
     }
 
+    function renderProposals(proposals) {
+      const container = document.getElementById("proposalsList") || document.getElementById("proposals-list");
+      const empty = document.getElementById("proposalsEmpty") || document.getElementById("proposals-empty");
+      if (!container) return;
+      container.replaceChildren();
+      const items = safeArray(proposals).slice().reverse();
+      if (empty) empty.hidden = items.length > 0;
+      items.forEach((proposal) => {
+        const card = document.createElement("div");
+        card.className = "proposal-card";
+        const head = document.createElement("div");
+        head.className = "proposal-head";
+        const status = document.createElement("span");
+        status.className = `proposal-status proposal-status-${proposal.status || "pending"}`;
+        status.textContent = proposal.status || "pending";
+        const title = document.createElement("strong");
+        title.textContent = proposal.trigger || t("proposals.untitled", "反思提案");
+        head.append(status, title);
+        const summary = document.createElement("p");
+        summary.textContent = proposal.evidence_summary || "";
+        const promptBox = document.createElement("textarea");
+        promptBox.className = "proposal-prompt";
+        promptBox.value = proposal.applied_prompt || proposal.proposed_prompt || "";
+        promptBox.rows = 2;
+        promptBox.readOnly = proposal.status !== "pending";
+        const meta = document.createElement("div");
+        meta.className = "proposal-meta";
+        meta.textContent = `${Math.round(safeNumber(proposal.confidence) * 100)}% · ${proposal.risk || "?"} · ${formatDate(proposal.created_at)}`;
+        card.append(head, summary, promptBox, meta);
+        if (proposal.status === "pending") {
+          const actions = document.createElement("div");
+          actions.className = "proposal-actions";
+          const approve = document.createElement("button");
+          approve.type = "button";
+          approve.className = "btn-primary";
+          approve.textContent = t("proposals.approve", "批准");
+          approve.addEventListener("click", async () => {
+            await withBusy(approve, async () => {
+              try {
+                await callEntry("resolve_proposal", {
+                  proposal_id: proposal.id,
+                  action: "approve",
+                  edited_prompt: promptBox.value,
+                  ...selectedScopeArgs(),
+                });
+                showToast(t("proposals.approved", "提案已应用。"), "success");
+                await loadPanel(true);
+              } catch (error) {
+                showToast(error.message, "error");
+              }
+            });
+          });
+          const reject = document.createElement("button");
+          reject.type = "button";
+          reject.textContent = t("proposals.reject", "拒绝");
+          reject.addEventListener("click", async () => {
+            await withBusy(reject, async () => {
+              try {
+                await callEntry("resolve_proposal", {
+                  proposal_id: proposal.id,
+                  action: "reject",
+                  ...selectedScopeArgs(),
+                });
+                showToast(t("proposals.rejected", "提案已拒绝。"), "info");
+                await loadPanel(true);
+              } catch (error) {
+                showToast(error.message, "error");
+              }
+            });
+          });
+          actions.append(approve, reject);
+          card.append(actions);
+        }
+        container.append(card);
+      });
+    }
+
     function setText(id, value) {
       const element = document.getElementById(id);
       if (element) element.textContent = String(value);
@@ -1788,6 +1877,7 @@
       );
       renderPreferences(profile.preferences);
       renderChanges(payload.recent_changes);
+      renderProposals(payload.reflection_proposals);
     }
 
     function setFormValue(id, value) {
@@ -2300,6 +2390,24 @@
 
     function bindEvents() {
       ui.refreshButton.addEventListener("click", () => loadPanel(true));
+      const reflectBtn = document.getElementById("reflect-btn");
+      if (reflectBtn) {
+        reflectBtn.addEventListener("click", async () => {
+          await withBusy(reflectBtn, async () => {
+            try {
+              const result = await callEntry("reflect_now", selectedScopeArgs(), 60_000);
+              if (result && result.reflected === false) {
+                showToast(t("proposals.noPreference", "这次反思没有提炼出稳定偏好，再聊几轮试试。"), "info");
+              } else {
+                showToast(t("proposals.reflected", "反思完成，请审阅新的提案。"), "success");
+              }
+              await loadPanel(true);
+            } catch (error) {
+              showToast(error.message, "error");
+            }
+          });
+        });
+      }
       ui.retryButton.addEventListener("click", () => {
         ui.bootLoader.hidden = false;
         ui.bootTitle.textContent = t("boot.loading_title", "正在读取本地偏好档案");

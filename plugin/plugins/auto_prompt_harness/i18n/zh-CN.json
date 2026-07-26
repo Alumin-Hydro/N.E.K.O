@@ -83,6 +83,8 @@
   "error.code.analysis_failed": "无法分析示例文本。",
   "error.code.clearance_failed": "旧提示暂时无法安全清除；请求的状态更改未应用。",
   "error.code.confirmation_required": "未提供必需的确认内容。",
+  "error.code.reflect_failed": "反思暂时失败，请稍后重试。",
+  "error.code.resolve_failed": "提案处理失败。",
   "error.code.delete_failed": "无法删除手工偏好。",
   "error.code.empty_text": "请输入要分析的文本。",
   "error.code.export_failed": "无法导出所选档案。",

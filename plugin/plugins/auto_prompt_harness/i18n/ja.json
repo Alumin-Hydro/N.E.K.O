@@ -83,6 +83,8 @@
   "error.code.analysis_failed": "サンプルテキストを解析できませんでした。",
   "error.code.clearance_failed": "以前のキュー済みヒントを安全に消去できませんでした。要求された変更は適用されていません。",
   "error.code.confirmation_required": "必要な確認が入力されていません。",
+  "error.code.reflect_failed": "リフレクションに失敗しました。後でもう一度お試しください。",
+  "error.code.resolve_failed": "提案を処理できませんでした。",
   "error.code.delete_failed": "手動設定を削除できませんでした。",
   "error.code.empty_text": "解析するテキストを入力してください。",
   "error.code.export_failed": "選択したプロファイルをエクスポートできませんでした。",

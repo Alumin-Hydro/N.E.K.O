@@ -83,6 +83,8 @@
   "error.code.analysis_failed": "無法分析範例文字。",
   "error.code.clearance_failed": "舊提示暫時無法安全清除；要求的狀態變更未套用。",
   "error.code.confirmation_required": "未提供必要的確認內容。",
+  "error.code.reflect_failed": "反思暫時失敗，請稍後重試。",
+  "error.code.resolve_failed": "提案處理失敗。",
   "error.code.delete_failed": "無法刪除手動偏好。",
   "error.code.empty_text": "請輸入要分析的文字。",
   "error.code.export_failed": "無法匯出所選檔案。",

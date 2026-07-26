@@ -484,6 +484,8 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
         self._state: dict[str, Any] = fresh_state()
         self._recent_route_digests: deque[tuple[float, str]] = deque(maxlen=512)
         self._profile_targets: dict[str, str] = {}
+        self._reflection_buffers: dict[str, list[dict[str, Any]]] = {}
+        self._reflection_proposals: dict[str, list[dict[str, Any]]] = {}
         self._profile_target_seen_at: dict[str, float] = {}
 
     # ------------------------------------------------------------------
@@ -1246,6 +1248,11 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
         )
         observations = infer_observations(event.text)
         key = self._scope_key_for_event(event)
+        # v0.2: keep a bounded rolling evidence buffer for LLM reflection.
+        role = "assistant" if getattr(event, "is_assistant", False) else "user"
+        buffer = self._reflection_buffers.setdefault(key, [])
+        buffer.append({"role": role, "text": event.text[:600], "at": event_at})
+        del buffer[:-24]
         with self._state_lock:
             profiles_before = set(self._state["profiles"])
             self._prune_runtime_targets_locked(at=arrival)
@@ -1827,6 +1834,9 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
                     for dimension, values in ALLOWED_VALUES.items()
                 },
                 "recent_changes": copy.deepcopy(snapshot["recent_changes"]),
+                "reflection_proposals": copy.deepcopy(
+                    self._reflection_proposals.get(key, [])
+                ),
                 "aggregate_stats": copy.deepcopy(self._state["stats"]),
                 "profile_count": len(self._state["profiles"]),
                 "persistence_ready": self._store_ready,
@@ -2010,6 +2020,132 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
         return True, "", imported
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # LLM reflection (v0.2)
+    # ------------------------------------------------------------------
+
+    async def _call_reflection_model(self, messages: list[dict[str, str]]) -> str:
+        """Call the host-configured agent model, mirroring study_companion."""
+
+        try:
+            import utils.config_manager as config_manager_module
+            import utils.llm_client as llm_client_module
+        except Exception as exc:
+            raise SdkError("反思模型运行时不可用") from exc
+        get_config_manager = getattr(config_manager_module, "get_config_manager", None)
+        create_chat_llm_async = getattr(llm_client_module, "create_chat_llm_async", None)
+        if not callable(get_config_manager) or not callable(create_chat_llm_async):
+            raise SdkError("反思模型运行时不可用")
+        api_config = get_config_manager().get_model_api_config("correction")
+        if not str(api_config.get("base_url") or "").strip():
+            api_config = get_config_manager().get_model_api_config("agent")
+        base_url = str(api_config.get("base_url") or "").strip()
+        model = str(api_config.get("model") or "").strip()
+        api_key = str(api_config.get("api_key") or "").strip()
+        if not base_url or not model:
+            raise SdkError("未配置反思模型；请先在主设置里配置 agent/correction 模型")
+        llm = await create_chat_llm_async(
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            temperature=0.2,
+            timeout=30.0,
+        )
+        reply = await llm.ainvoke(messages)
+        content = getattr(reply, "content", reply)
+        if isinstance(content, list):
+            content = " ".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content)
+        return str(content or "")
+
+    @plugin_entry(
+        id="reflect_now",
+        name="立即反思一次",
+        description="用 LLM 对最近对话做一次结构化反思，生成可批准的 prompt 提案。",
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        timeout=60.0,
+    )
+    async def reflect_now(self, **kwargs: Any):
+        try:
+            key = self._current_key(kwargs)
+            with self._state_lock:
+                buffer = list(self._reflection_buffers.get(key, []))
+                profile = self._state["profiles"].get(key)
+                preferences = profile_snapshot(self._state, key)["preferences"] if profile else []
+                guidance = build_guidance(preferences)
+            from . import reflection
+
+            result = await reflection.reflect_once(
+                self._call_reflection_model,
+                buffer,
+                guidance,
+            )
+            if result is None:
+                return Ok({"reflected": False, "reason": "no_stable_preference_or_invalid_output"})
+            proposal = result.to_store()
+            proposal["id"] = f"ref-{int(result.created_at)}-{abs(hash(proposal['proposed_prompt'])) % 10_000:04d}"
+            proposal["status"] = "pending"
+            with self._state_lock:
+                pending = self._reflection_proposals.setdefault(key, [])
+                pending.append(proposal)
+                del pending[:-20]
+            await self._persist_state()
+            return Ok({"reflected": True, "proposal": proposal})
+        except SdkError as exc:
+            return Err(exc)
+        except Exception:
+            return _friendly_error("反思暂时失败，请稍后重试。", "reflect_failed")
+
+    @plugin_entry(
+        id="resolve_proposal",
+        name="处理反思提案",
+        description="批准、拒绝或回滚一条 LLM 反思生成的 prompt 提案。",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "proposal_id": {"type": "string", "minLength": 1, "maxLength": 64},
+                "action": {"type": "string", "enum": ["approve", "reject", "rollback"]},
+                "edited_prompt": {"type": "string", "maxLength": 400},
+            },
+            "required": ["proposal_id", "action"],
+            "additionalProperties": False,
+        },
+        timeout=15.0,
+    )
+    async def resolve_proposal(self, proposal_id: Any = None, action: Any = None, edited_prompt: Any = None, **kwargs: Any):
+        try:
+            key = self._current_key(kwargs)
+            proposal_id = self._identity_text(proposal_id)
+            action = self._identity_text(action)
+            if not proposal_id or action not in {"approve", "reject", "rollback"}:
+                raise SdkError("提案参数无效")
+            with self._state_lock:
+                pending = self._reflection_proposals.get(key, [])
+                target = next((item for item in pending if item.get("id") == proposal_id), None)
+                if target is None:
+                    raise SdkError("提案不存在或已处理")
+                if action == "reject":
+                    target["status"] = "rejected"
+                elif action == "rollback":
+                    target["status"] = "rolled_back"
+                    engine_delete_manual(self._state, key, dimension="note")
+                else:
+                    prompt = self._identity_text(edited_prompt)[:400] or target.get("proposed_prompt", "")
+                    if not prompt:
+                        raise SdkError("提案 prompt 为空")
+                    from . import reflection as _reflection_mod
+
+                    if any(pattern.search(prompt) for pattern in _reflection_mod._FORBIDDEN_PATTERNS):
+                        raise SdkError("提案 prompt 包含不允许的内容")
+                    engine_set_manual(self._state, key, dimension="note", value=prompt)
+                    target["status"] = "active"
+                    target["applied_prompt"] = prompt
+            await self._persist_state()
+            return Ok({"resolved": True, "proposal_id": proposal_id, "action": action})
+        except SdkError as exc:
+            return Err(exc)
+        except Exception:
+            return _friendly_error("提案处理失败。", "resolve_failed")
+
     # Scoped management entries and context-free model capability
     # ------------------------------------------------------------------
 

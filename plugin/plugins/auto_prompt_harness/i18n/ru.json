@@ -83,6 +83,8 @@
   "error.code.analysis_failed": "Не удалось проанализировать пример текста.",
   "error.code.clearance_failed": "Не удалось безопасно очистить прежнюю подсказку. Запрошенное изменение не применено.",
   "error.code.confirmation_required": "Не введено обязательное подтверждение.",
+  "error.code.reflect_failed": "Рефлексия не удалась; повторите попытку позже.",
+  "error.code.resolve_failed": "Не удалось обработать предложение.",
   "error.code.delete_failed": "Не удалось удалить ручное предпочтение.",
   "error.code.empty_text": "Введите текст для анализа.",
   "error.code.export_failed": "Не удалось экспортировать выбранный профиль.",

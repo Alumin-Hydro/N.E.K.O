@@ -83,6 +83,8 @@
   "error.code.analysis_failed": "Não foi possível analisar o texto de exemplo.",
   "error.code.clearance_failed": "A dica anterior não pôde ser limpa com segurança. A alteração solicitada não foi aplicada.",
   "error.code.confirmation_required": "A confirmação obrigatória não foi fornecida.",
+  "error.code.reflect_failed": "A reflexão falhou; tente novamente mais tarde.",
+  "error.code.resolve_failed": "Não foi possível resolver a proposta.",
   "error.code.delete_failed": "Não foi possível excluir a preferência manual.",
   "error.code.empty_text": "Insira um texto para analisar.",
   "error.code.export_failed": "Não foi possível exportar o perfil selecionado.",
