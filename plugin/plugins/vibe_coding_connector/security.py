@@ -14,7 +14,7 @@ import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path, PurePath
 from typing import Any, AsyncIterator, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
@@ -330,6 +330,8 @@ class ConnectorSettings:
     base_url: str = "http://127.0.0.1:3006"
     auth_mode: str = "access_token"
     allow_remote: bool = False
+    backend_mode: str = "local_cli"
+    cli_command_overrides: Mapping[str, str] = field(default_factory=dict)
     allowed_workspace_roots: tuple[str, ...] = ()
     allowed_providers: tuple[str, ...] = ("claude", "codex", "opencode")
     allow_create: bool = False
@@ -372,6 +374,27 @@ class ConnectorSettings:
             name="allow_remote",
             default=False,
         )
+        backend_mode = data.get("backend_mode", "local_cli")
+        if not isinstance(backend_mode, str) or backend_mode not in {"local_cli", "hapi_remote"}:
+            raise PolicyError("backend_mode 必须是 local_cli 或 hapi_remote", code="invalid_settings")
+
+        overrides_raw = data.get("cli_command_overrides", {})
+        if not isinstance(overrides_raw, Mapping):
+            raise PolicyError("cli_command_overrides 必须是对象", code="invalid_settings")
+        if len(overrides_raw) > 8:
+            raise PolicyError("cli_command_overrides 字段过多", code="invalid_settings")
+        cli_command_overrides: dict[str, str] = {}
+        for provider, command in overrides_raw.items():
+            if not isinstance(provider, str) or provider.lower() not in SUPPORTED_PROVIDERS:
+                raise PolicyError("CLI 命令覆盖只允许 claude、codex、opencode", code="provider_not_allowed")
+            if not isinstance(command, str):
+                raise PolicyError("CLI 命令覆盖必须是字符串", code="invalid_settings")
+            command_clean = command.strip()
+            if not 1 <= len(command_clean) <= 1024:
+                raise PolicyError("CLI 命令覆盖长度无效", code="invalid_settings")
+            if any(token in command_clean for token in (";", "&", "|", "`", "$", "(", ")", "<", ">", "\n", "\r")):
+                raise PolicyError("CLI 命令覆盖不允许 shell 元字符", code="invalid_settings")
+            cli_command_overrides[provider.lower()] = command_clean
         base_url = validate_base_url(
             data.get("base_url", DEFAULT_BASE_URL),
             allow_remote=allow_remote,
@@ -427,6 +450,8 @@ class ConnectorSettings:
             base_url=base_url,
             auth_mode=auth_mode,
             allow_remote=allow_remote,
+            backend_mode=backend_mode,
+            cli_command_overrides=cli_command_overrides,
             allowed_workspace_roots=_normalize_roots(data.get("allowed_workspace_roots")),
             allowed_providers=tuple(providers),
             allow_create=_strict_bool(data.get("allow_create"), name="allow_create", default=False),
@@ -516,6 +541,7 @@ class ConnectorSettings:
         data["allowed_workspace_roots"] = list(self.allowed_workspace_roots)
         data["allowed_providers"] = list(self.allowed_providers)
         data["notification_visibility"] = list(self.notification_visibility)
+        data["cli_command_overrides"] = dict(self.cli_command_overrides)
         return data
 
     def to_public(self) -> dict[str, Any]:

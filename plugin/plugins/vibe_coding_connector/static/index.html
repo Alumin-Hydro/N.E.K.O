@@ -1004,7 +1004,29 @@
                 </div>
 
                 <form id="settingsForm" novalidate>
-                    <h3 data-i18n="panel.settings.title">HAPI 设置</h3>
+                    <h3 data-i18n="panel.settings.title">运行模式</h3>
+                    <div class="form-grid">
+                        <div class="field full">
+                            <label for="backendMode" data-i18n="panel.field.backendMode">运行模式</label>
+                            <select id="backendMode" name="backend_mode">
+                                <option value="local_cli" data-i18n="panel.field.modeLocal">本机 CLI（推荐，无需安装 HAPI）</option>
+                                <option value="hapi_remote" data-i18n="panel.field.modeHapi">HAPI 远程 runner（高级）</option>
+                            </select>
+                            <p class="hint" data-i18n="panel.field.backendModeHint">本机模式直接使用你已安装的 claude / codex / opencode 命令；HAPI 模式用于管理其他机器上的 runner。</p>
+                        </div>
+                        <div class="field full" id="localCliStatus">
+                            <span class="label" data-i18n="panel.local.title">本机 CLI 检测</span>
+                            <div class="actions">
+                                <span class="token-state" id="cliClaude">claude: 检测中</span>
+                                <span class="token-state" id="cliCodex">codex: 检测中</span>
+                                <span class="token-state" id="cliOpencode">opencode: 检测中</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <details class="advanced" id="hapiAdvanced">
+                        <summary data-i18n="panel.hapi.title">HAPI 远程连接（高级设置）</summary>
+                        <div class="advanced-body">
                     <div class="form-grid">
                         <div class="field">
                             <label for="baseUrl"><span data-i18n="panel.field.baseUrl">HAPI 基础地址</span> <span class="required" aria-hidden="true">*</span></label>
@@ -1041,6 +1063,17 @@
                                 </span>
                             </label>
                         </div>
+                        <div class="field full">
+                            <label for="cliOverrides" data-i18n="panel.field.cliOverrides">CLI 路径覆盖（高级）</label>
+                            <textarea id="cliOverrides" name="cli_command_overrides"
+                                      spellcheck="false" placeholder="每行一条 provider=/绝对/路径，例如 codex=/usr/local/bin/codex"></textarea>
+                            <p class="hint" data-i18n="panel.field.cliOverridesHint">仅在 PATH 检测不到时填写；不允许任何 shell 符号。</p>
+                        </div>
+                    </div>
+                        </div>
+                    </details>
+
+                    <div class="form-grid">
                         <div class="field full">
                             <label for="workspaceRoots" data-i18n="panel.field.workspaceRoots">允许的工作区根目录</label>
                             <textarea id="workspaceRoots" name="allowed_workspace_roots"
@@ -1822,6 +1855,7 @@
         model.approvals = normalizeApprovals(source.approvals || source);
         model.events = normalizeEvents(source.events || source);
         model.disabledReasons = objectValue(source.disabled_reasons || source.disabledReasons);
+        model.localProviders = objectValue(source.local_providers || source.localProviders);
         model.loaded = true;
         if (!model.sessions.some(session => sessionId(session) === model.selectedSessionId)) {
             model.selectedSessionId = model.sessions.length ? sessionId(model.sessions[0]) : "";
@@ -1839,10 +1873,18 @@
 
     function applySettingsToForm() {
         const settings = model.settings;
+        setInputValue("backendMode", settings.backend_mode || "local_cli");
         setInputValue("baseUrl", settings.base_url);
         setInputValue("authMode", settings.auth_mode || "access_token");
         byId("tokenInput").value = "";
         setChecked("allowRemote", settings.allow_remote);
+
+        const overrides = settings.cli_command_overrides && typeof settings.cli_command_overrides === "object"
+            ? settings.cli_command_overrides
+            : {};
+        byId("cliOverrides").value = Object.entries(overrides)
+            .map(([provider, command]) => `${provider}=${command}`)
+            .join("\n");
 
         const roots = linesValue(settings.allowed_workspace_roots);
         byId("workspaceRoots").value = roots.join("\n");
@@ -1873,8 +1915,31 @@
         setInputValue("maxConcurrency", settings.max_concurrency);
         setInputValue("rateLimit", settings.rate_limit_per_minute);
         updateTokenState();
+        updateLocalCliStatus();
         updateWorkspaceChoices();
         updateInstructionLimit();
+    }
+
+    function updateLocalCliStatus() {
+        const providers = model.localProviders || {};
+        const mapping = [
+            ["cliClaude", "claude"],
+            ["cliCodex", "codex"],
+            ["cliOpencode", "opencode"],
+        ];
+        mapping.forEach(([id, provider]) => {
+            const element = byId(id);
+            if (!element) return;
+            const info = providers[provider];
+            const available = info && info.available === true;
+            element.classList.toggle("configured", available);
+            element.textContent = available
+                ? `${provider}: ${t("panel.status.cliAvailable", "可用")}`
+                : `${provider}: ${t("panel.status.cliMissing", "未检测到")}`;
+        });
+        const localMode = (model.settings.backend_mode || "local_cli") === "local_cli";
+        const statusBlock = byId("localCliStatus");
+        if (statusBlock) statusBlock.hidden = !localMode;
     }
 
     function updateTokenState() {
@@ -1929,8 +1994,19 @@
         byId("instructionLimitHint").textContent = `最多 ${max.toLocaleString()} 个字符；空指令不会发送。`;
     }
 
+    function parseCliOverrides(raw) {
+        const result = {};
+        linesValue(raw).forEach(line => {
+            const match = /^\s*(claude|codex|opencode)\s*=\s*(\S+)\s*$/.exec(line);
+            if (match) result[match[1]] = match[2];
+        });
+        return result;
+    }
+
     function readSettingsForm() {
         return {
+            backend_mode: byId("backendMode").value === "hapi_remote" ? "hapi_remote" : "local_cli",
+            cli_command_overrides: parseCliOverrides(byId("cliOverrides").value),
             base_url: byId("baseUrl").value.trim(),
             auth_mode: byId("authMode").value,
             allow_remote: byId("allowRemote").checked,
@@ -2749,6 +2825,10 @@
 
     function bindEvents() {
         byId("settingsForm").addEventListener("submit", asyncGuard(saveSettings));
+        byId("backendMode").addEventListener("change", () => {
+            model.settings.backend_mode = byId("backendMode").value;
+            updateLocalCliStatus();
+        });
         byId("resetSettingsBtn").addEventListener("click", asyncGuard(resetSettings));
         byId("clearTokenBtn").addEventListener("click", asyncGuard(clearToken));
         byId("testConnectionBtn").addEventListener("click", asyncGuard(testConnection));

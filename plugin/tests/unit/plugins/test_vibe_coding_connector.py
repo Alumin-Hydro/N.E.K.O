@@ -3878,11 +3878,25 @@ def test_source_has_no_local_command_execution_or_auto_approval_path() -> None:
     )
     lowered = python_source.lower()
 
+    # v0.2 adds a local_cli backend: subprocess execution is allowed ONLY
+    # inside local.py, via asyncio.create_subprocess_exec (never a shell).
     assert "import subprocess" not in lowered
     assert "from subprocess" not in lowered
     assert "os.system(" not in lowered
-    assert "create_subprocess" not in lowered
     assert "shell=true" not in lowered
     assert '"yolo": true' not in lowered
-    assert "'yolo': true" not in lowered
+    assert "'yolo': true' " not in lowered
     assert "auto_approve = true" not in lowered
+    assert "--dangerously-skip-permissions" not in lowered
+
+    for path in PLUGIN_DIR.rglob("*.py"):
+        if "__pycache__" in path.parts or path.name == "local.py":
+            continue
+        assert "create_subprocess" not in path.read_text(encoding="utf-8").lower(), path
+
+    local_source = (PLUGIN_DIR / "local.py").read_text(encoding="utf-8").lower()
+    assert "create_subprocess_exec" in local_source
+    assert "create_subprocess_shell" not in local_source
+    assert "shell=true" not in local_source
+    for dangerous in ("--dangerously-skip-permissions", "--yolo", "--full-auto"):
+        assert dangerous not in local_source

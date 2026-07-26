@@ -122,6 +122,30 @@ _SECRET_PATTERNS = (
 )
 
 
+ASK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "provider": {
+            "type": "string",
+            "enum": ["claude", "codex", "opencode"],
+            "description": "本机已安装的 coding CLI；省略时使用面板默认 provider",
+        },
+        "working_directory": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "必须位于面板白名单工作区内",
+        },
+        "instruction": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8000,
+            "description": "交给 CLI 的只读任务指令；写操作需要面板另行授权",
+        },
+    },
+    "required": ["working_directory", "instruction"],
+    "additionalProperties": False,
+}
 EMPTY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {},
@@ -1478,6 +1502,63 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
     # ------------------------------------------------------------------
 
     @plugin_entry(
+        id="vibe_coding_ask",
+        name="本机 Vibe Coding 助手",
+        description="在本机允许的 workspace 内用 claude、codex 或 opencode CLI 执行只读 coding 任务。",
+        input_schema=ASK_SCHEMA,
+        llm_result_fields=["summary"],
+        timeout=300.0,
+    )
+    @llm_tool(
+        name="vibe_coding_ask",
+        description=(
+            "在本机直接调用 claude、codex 或 opencode CLI 完成 coding 任务。"
+            "工作目录必须在面板白名单内；默认不授予写权限，不添加任何跳过权限的参数。"
+        ),
+        parameters=ASK_SCHEMA,
+        timeout=300.0,
+    )
+    async def ask_local(
+        self,
+        provider: Any = None,
+        working_directory: Any = None,
+        instruction: Any = None,
+        **_: Any,
+    ):
+        try:
+            _client, settings, operation_policy, _credential = (
+                await self._operation_snapshot()
+            )
+            if settings.backend_mode != "local_cli":
+                raise PolicyError(
+                    "当前为 HAPI 远程模式；vibe_coding_ask 仅在本机 CLI 模式可用",
+                    code="wrong_backend",
+                )
+            safe_provider = operation_policy.validate_provider(provider or settings.allowed_providers[0])
+            safe_instruction = operation_policy.validate_instruction(instruction)
+            safe_workspace = operation_policy.validate_workspace(working_directory)
+
+            from . import local
+
+            result = await local.run_local_prompt(
+                provider=safe_provider,
+                prompt=safe_instruction,
+                workspace=safe_workspace,
+                allowed_roots=settings.allowed_workspace_roots,
+                overrides=settings.cli_command_overrides,
+                timeout_seconds=settings.timeout_seconds,
+                max_output_chars=settings.max_output_chars,
+            )
+            result["output"] = self._redact_output(result.get("output", ""))[: settings.max_output_chars]
+            summary = (
+                f"{safe_provider} 已在 {safe_workspace} 完成（exit {result['exit_code']}）。\n"
+                + (result["output"][:2000] or "（无输出）")
+            )
+            return self._entry_result({"summary": summary, **result}, _)
+        except Exception as exc:
+            return _public_error(exc)
+
+    @plugin_entry(
         id="vibe_coding_status",
         name="检查 Vibe Coding 连接",
         description="检查 HAPI 健康、认证、协议、在线机器和本地允许的 providers。",
@@ -2830,9 +2911,21 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
         except PolicyError:
             secret_envelope = None
             reasons["settings"] = "浏览器设置加密组件不可用"
+        local_providers: dict[str, Any] = {}
+        if self._settings.backend_mode == "local_cli":
+            from . import local
+
+            local_providers = local.detect_local_providers(
+                self._settings.cli_command_overrides
+            )
+            for provider, info in local_providers.items():
+                if provider in self._settings.allowed_providers and not info.get("available"):
+                    reasons[f"cli_{provider}"] = f"未在 PATH 检测到 {provider} CLI"
         return {
             "summary": "已读取脱敏的 Vibe Coding 管理状态。",
             "settings": self._settings.to_public(),
+            "backend_mode": self._settings.backend_mode,
+            "local_providers": local_providers,
             "token": self._token_state(),
             "secret_envelope": secret_envelope,
             "health": dict(self._health),
