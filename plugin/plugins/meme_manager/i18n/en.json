@@ -1,0 +1,14 @@
+{
+  "title": "Meme Manager",
+  "subtitle": "Manage the memes the catgirl can send. Add, disable or delete; in chat she picks from enabled memes.",
+  "search": "Search name or tags…",
+  "add": "Add meme",
+  "advanced": "Advanced (limits and notes)",
+  "empty": "No memes yet. Click \"Add meme\" to upload the first one.",
+  "addTitle": "Add meme",
+  "pickImage": "Pick an image (PNG / JPEG / GIF / WebP / SVG, max 2MB)",
+  "name": "Name",
+  "tags": "Tags (comma separated, helps the catgirl match)",
+  "cancel": "Cancel",
+  "save": "Save"
+}

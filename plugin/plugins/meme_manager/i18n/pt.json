@@ -1,0 +1,14 @@
+{
+  "title": "Gerenciador de memes",
+  "subtitle": "Gerencie os memes que a gatinha pode enviar. Adicione, desative ou exclua; no chat ela escolhe entre os ativados.",
+  "search": "Buscar nome ou tags…",
+  "add": "Adicionar meme",
+  "advanced": "Avançado (limites e notas)",
+  "empty": "Ainda não há memes. Clique em \"Adicionar meme\" para enviar o primeiro.",
+  "addTitle": "Adicionar meme",
+  "pickImage": "Escolha uma imagem (PNG / JPEG / GIF / WebP / SVG, máx. 2MB)",
+  "name": "Nome",
+  "tags": "Tags (separadas por vírgula, ajudam a gatinha a combinar)",
+  "cancel": "Cancelar",
+  "save": "Salvar"
+}

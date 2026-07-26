@@ -1,0 +1,153 @@
+"""Unit tests for meme_manager."""
+
+from __future__ import annotations
+
+import base64
+from typing import Any
+
+import pytest
+
+from plugin.plugins.meme_manager import (
+    PLUGIN_ID,
+    MemeManagerPlugin,
+    _detect_extension,
+    _matches,
+    _validate_image_bytes,
+)
+from plugin.sdk.plugin import SdkError
+
+_PNG = base64.b64encode(
+    b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+).decode()
+
+
+class FakeStore:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.data: dict[str, Any] = {}
+
+    def _read_value(self, key: str, default: Any = None) -> Any:
+        return self.data.get(key, default)
+
+    def _write_value(self, key: str, value: Any) -> None:
+        self.data[key] = value
+
+
+class FakeCtx:
+    pass
+
+
+def _make_plugin(tmp_path, monkeypatch) -> MemeManagerPlugin:
+    plugin = MemeManagerPlugin(FakeCtx())
+    plugin.store = FakeStore()
+    monkeypatch.setattr(type(plugin), "config_dir", property(lambda self: tmp_path))
+    return plugin
+
+
+def test_detect_extension_png() -> None:
+    data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    assert _detect_extension("a.png", data) == ".png"
+
+
+def test_detect_extension_rejects_fake_svg() -> None:
+    with pytest.raises(SdkError):
+        _detect_extension("evil.svg", b"not svg at all")
+
+
+def test_validate_image_rejects_script_svg() -> None:
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+    with pytest.raises(SdkError, match="脚本"):
+        _validate_image_bytes("x.svg", svg)
+
+
+def test_validate_image_rejects_oversize() -> None:
+    with pytest.raises(SdkError, match="上限"):
+        _validate_image_bytes("x.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * (3 * 1024 * 1024))
+
+
+def test_validate_image_rejects_unknown_format() -> None:
+    with pytest.raises(SdkError):
+        _validate_image_bytes("x.bmp", b"BM" + b"\x00" * 32)
+
+
+def test_matches_query() -> None:
+    meme = {"name": "摸摸头", "tags": ["可爱", "安慰"]}
+    assert _matches(meme, "摸头")
+    assert _matches(meme, "安慰")
+    assert _matches(meme, "")
+    assert not _matches(meme, "生气")
+
+
+@pytest.mark.asyncio
+async def test_add_and_list_and_send(tmp_path, monkeypatch) -> None:
+    plugin = _make_plugin(tmp_path, monkeypatch)
+    meme_dir = tmp_path / "static" / "memes"
+    meme_dir.mkdir(parents=True)
+    plugin._meme_dir = meme_dir
+
+    result = await plugin.add_meme(
+        name="摸摸头",
+        filename="pat.png",
+        data_base64=_PNG,
+        tags=["安慰"],
+    )
+    assert result.is_ok(), result
+    value = result.value
+    assert value["saved"] is True
+    meme_id = value["meme"]["id"]
+    assert (meme_dir / value["meme"]["stored_name"]).is_file()
+
+    state = await plugin.get_panel_state()
+    assert state.is_ok()
+    assert state.value["total"] == 1
+    assert state.value["enabled_count"] == 1
+
+    sent = await plugin.meme_send(query="摸摸")
+    assert sent.is_ok()
+    assert sent.value["image_url"].startswith(f"/plugin/{PLUGIN_ID}/ui/memes/")
+    assert "摸摸头" in sent.value["display_markdown"]
+
+    disabled = await plugin.update_meme(meme_id=meme_id, action="disable")
+    assert disabled.is_ok()
+    state2 = await plugin.get_panel_state()
+    assert state2.value["enabled_count"] == 0
+
+    deleted = await plugin.update_meme(meme_id=meme_id, action="delete")
+    assert deleted.is_ok()
+    state3 = await plugin.get_panel_state()
+    assert state3.value["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_send_empty_library_is_friendly(tmp_path, monkeypatch) -> None:
+    plugin = _make_plugin(tmp_path, monkeypatch)
+    result = await plugin.meme_send(query="hi")
+    assert result.is_ok()
+    assert result.value["sent"] is False
+    assert "空" in result.value["message"]
+
+
+@pytest.mark.asyncio
+async def test_add_rejects_bad_base64(tmp_path, monkeypatch) -> None:
+    plugin = _make_plugin(tmp_path, monkeypatch)
+    meme_dir = tmp_path / "static" / "memes"
+    meme_dir.mkdir(parents=True)
+    plugin._meme_dir = meme_dir
+    result = await plugin.add_meme(name="x", filename="x.png", data_base64="!!!not-b64!!!")
+    assert result.is_err()
+
+
+@pytest.mark.asyncio
+async def test_update_missing_meme_fails(tmp_path, monkeypatch) -> None:
+    plugin = _make_plugin(tmp_path, monkeypatch)
+    result = await plugin.update_meme(meme_id="nope", action="delete")
+    assert result.is_err()
+
+
+def test_llm_tool_metadata() -> None:
+    from plugin.sdk.plugin.llm_tool import LLM_TOOL_META_ATTR
+
+    meta = getattr(MemeManagerPlugin.meme_send, LLM_TOOL_META_ATTR, None)
+    assert meta is not None
+    assert getattr(meta, "name", None) == "meme_send"

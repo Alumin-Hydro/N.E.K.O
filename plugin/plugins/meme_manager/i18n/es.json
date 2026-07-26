@@ -1,0 +1,14 @@
+{
+  "title": "Gestor de memes",
+  "subtitle": "Gestiona los memes que la chica gato puede enviar. Añade, desactiva o elimina; en el chat elegirá entre los activados.",
+  "search": "Buscar nombre o etiquetas…",
+  "add": "Añadir meme",
+  "advanced": "Ajustes avanzados (límites y notas)",
+  "empty": "Aún no hay memes. Pulsa \"Añadir meme\" para subir el primero.",
+  "addTitle": "Añadir meme",
+  "pickImage": "Elige una imagen (PNG / JPEG / GIF / WebP / SVG, máx. 2MB)",
+  "name": "Nombre",
+  "tags": "Etiquetas (separadas por comas, ayudan a la chica gato)",
+  "cancel": "Cancelar",
+  "save": "Guardar"
+}

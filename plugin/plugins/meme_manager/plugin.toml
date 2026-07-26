@@ -1,0 +1,30 @@
+[plugin]
+id = "meme_manager"
+name = "表情包管理器"
+description = "管理猫娘可用的表情包库：添加、禁用、搜索，聊天中可让猫娘发送表情包。"
+short_description = "Manage the catgirl's meme/sticker library: add, disable, search, and let her send memes in chat."
+keywords = ["表情包", "meme", "sticker", "表情", "贴纸", "ミーム", "スタンプ", "밈", "스티커", "мем", "стикер"]
+version = "0.1.0"
+entry = "plugin.plugins.meme_manager:MemeManagerPlugin"
+
+[plugin.author]
+name = "N.E.K.O community"
+
+[plugin.sdk]
+recommended = ">=0.1.0,<0.2.0"
+supported = ">=0.1.0,<0.3.0"
+
+[plugin.i18n]
+default_locale = "zh-CN"
+locales_dir = "i18n"
+
+[plugin_runtime]
+enabled = true
+auto_start = false
+
+[plugin.store]
+enabled = true
+
+[meme]
+max_memes = 500
+max_image_bytes = 2097152

@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>表情包管理器</title>
+<style>
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; background: #f6f4f0; color: #2b2622; }
+header { padding: 20px 24px 8px; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+.subtitle { font-size: 13px; color: #8a7f74; margin: 0; }
+.toolbar { display: flex; gap: 10px; padding: 14px 24px; align-items: center; flex-wrap: wrap; }
+.toolbar input[type="search"] { flex: 1; min-width: 180px; padding: 9px 14px; border: 1px solid #ddd3c8; border-radius: 999px; font-size: 14px; background: #fff; }
+.btn { padding: 9px 18px; border: none; border-radius: 999px; font-size: 14px; cursor: pointer; background: #ff9f43; color: #fff; }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn-ghost { background: transparent; color: #8a7f74; border: 1px solid #ddd3c8; }
+.stats { font-size: 12px; color: #8a7f74; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 14px; padding: 6px 24px 40px; }
+.card { background: #fff; border-radius: 14px; padding: 10px; box-shadow: 0 1px 4px rgba(60,40,20,.07); display: flex; flex-direction: column; gap: 8px; }
+.card.disabled { opacity: .45; }
+.card img { width: 100%; aspect-ratio: 1; object-fit: contain; background: #faf7f2; border-radius: 10px; }
+.card .name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card .tags { font-size: 11px; color: #8a7f74; min-height: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card .actions { display: flex; gap: 6px; }
+.card .actions button { flex: 1; padding: 5px 0; font-size: 12px; border-radius: 8px; border: 1px solid #ddd3c8; background: #fff; cursor: pointer; }
+.empty { padding: 60px 24px; text-align: center; color: #8a7f74; font-size: 14px; }
+dialog { border: none; border-radius: 16px; padding: 24px; width: min(420px, 92vw); }
+dialog h2 { margin: 0 0 14px; font-size: 17px; }
+dialog label { display: block; font-size: 13px; margin: 10px 0 4px; }
+dialog input[type="text"] { width: 100%; padding: 8px 12px; border: 1px solid #ddd3c8; border-radius: 10px; font-size: 14px; }
+dialog .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+details { margin: 0 24px 16px; background: #fff; border-radius: 12px; padding: 12px 16px; font-size: 13px; }
+details summary { cursor: pointer; color: #8a7f74; }
+.toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #2b2622; color: #fff; padding: 10px 20px; border-radius: 999px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.toast.show { opacity: .92; }
+@media (prefers-color-scheme: dark) {
+  body { background: #1c1917; color: #ece5dd; }
+  .card, details { background: #292524; }
+  .toolbar input[type="search"], dialog input[type="text"], .card .actions button { background: #1c1917; color: #ece5dd; border-color: #44403c; }
+  .card img { background: #1c1917; }
+  dialog { background: #292524; color: #ece5dd; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1 data-i18n="title">表情包管理器</h1>
+  <p class="subtitle" data-i18n="subtitle">管理猫娘可以发送的表情包。添加、禁用或删除，聊天中她就会从启用的表情包里挑。</p>
+</header>
+<div class="toolbar">
+  <input id="search" type="search" data-i18n-ph="search" placeholder="搜索名称或标签…">
+  <button id="addBtn" class="btn" data-i18n="add">添加表情包</button>
+  <span id="stats" class="stats"></span>
+</div>
+<details>
+  <summary data-i18n="advanced">高级设置（上限与说明）</summary>
+  <p id="limits" style="margin:8px 0 2px"></p>
+</details>
+<div id="grid" class="grid"></div>
+<p id="empty" class="empty" data-i18n="empty" hidden>还没有表情包，点击"添加表情包"上传第一张吧。</p>
+
+<dialog id="addDialog">
+  <h2 data-i18n="addTitle">添加表情包</h2>
+  <label data-i18n="pickImage">选择图片（PNG / JPEG / GIF / WebP / SVG，最大 2MB）</label>
+  <input id="fileInput" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml">
+  <label for="nameInput" data-i18n="name">名称</label>
+  <input id="nameInput" type="text" maxlength="48" placeholder="摸摸头">
+  <label for="tagsInput" data-i18n="tags">标签（逗号分隔，方便猫娘匹配）</label>
+  <input id="tagsInput" type="text" placeholder="可爱, 摸头, 安慰">
+  <div class="dialog-actions">
+    <button id="cancelAdd" class="btn btn-ghost" data-i18n="cancel">取消</button>
+    <button id="confirmAdd" class="btn" data-i18n="save">保存</button>
+  </div>
+</dialog>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const RUNS_URL = "/runs";
+const pluginId = "meme_manager";
+const grid = document.getElementById("grid");
+const empty = document.getElementById("empty");
+const statsEl = document.getElementById("stats");
+const limitsEl = document.getElementById("limits");
+const searchEl = document.getElementById("search");
+const addDialog = document.getElementById("addDialog");
+const fileInput = document.getElementById("fileInput");
+const nameInput = document.getElementById("nameInput");
+const tagsInput = document.getElementById("tagsInput");
+const toastEl = document.getElementById("toast");
+let toastTimer = null;
+
+function toast(text) {
+  toastEl.textContent = text;
+  toastEl.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove("show"), 2600);
+}
+
+async function callEntry(entryId, args = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(RUNS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plugin_id: pluginId, entry_id: entryId, args }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const run = await resp.json();
+    const runId = run.run_id || run.id;
+    if (!runId) throw new Error("missing run id");
+    for (let i = 0; i < 60; i += 1) {
+      await new Promise((r) => setTimeout(r, 500));
+      const poll = await fetch(`${RUNS_URL}/${encodeURIComponent(runId)}`);
+      const data = await poll.json();
+      if (data.status === "succeeded") {
+        const result = data.result;
+        if (result && result.ok === false) throw new Error((result.error && result.error.message) || "entry failed");
+        return result && result.value !== undefined ? result.value : result;
+      }
+      if (data.status === "failed") throw new Error(data.error || "run failed");
+    }
+    throw new Error("run timeout");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function refresh() {
+  try {
+    const state = await callEntry("get_panel_state", { query: searchEl.value.trim() });
+    renderGrid(state.memes || []);
+    statsEl.textContent = `${state.enabled_count}/${state.total} enabled`;
+    limitsEl.textContent = `上限 ${state.max_memes} 张 · 单张最大 ${Math.round(state.max_image_bytes/1024/1024)}MB`;
+    empty.hidden = (state.memes || []).length > 0;
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+function renderGrid(memes) {
+  grid.replaceChildren();
+  memes.forEach((meme) => {
+    const card = document.createElement("div");
+    card.className = "card" + (meme.enabled ? "" : " disabled");
+    const img = document.createElement("img");
+    img.src = meme.url;
+    img.alt = meme.name;
+    img.loading = "lazy";
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = meme.name;
+    const tags = document.createElement("div");
+    tags.className = "tags";
+    tags.textContent = (meme.tags || []).join(", ");
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const toggle = document.createElement("button");
+    toggle.textContent = meme.enabled ? "禁用" : "启用";
+    toggle.addEventListener("click", async () => {
+      await callEntry("update_meme", { meme_id: meme.id, action: meme.enabled ? "disable" : "enable" });
+      refresh();
+    });
+    const del = document.createElement("button");
+    del.textContent = "删除";
+    del.addEventListener("click", async () => {
+      if (!confirm(`删除「${meme.name}」？`)) return;
+      await callEntry("update_meme", { meme_id: meme.id, action: "delete" });
+      refresh();
+    });
+    actions.append(toggle, del);
+    card.append(img, name, tags, actions);
+    grid.append(card);
+  });
+}
+
+document.getElementById("addBtn").addEventListener("click", () => {
+  nameInput.value = "";
+  tagsInput.value = "";
+  fileInput.value = "";
+  addDialog.showModal();
+});
+document.getElementById("cancelAdd").addEventListener("click", () => addDialog.close());
+document.getElementById("confirmAdd").addEventListener("click", async () => {
+  const file = fileInput.files && fileInput.files[0];
+  if (!file) { toast("请选择图片"); return; }
+  if (file.size > 2 * 1024 * 1024) { toast("图片超过 2MB"); return; }
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+  const base64 = String(dataUrl).split(",")[1] || "";
+  const name = nameInput.value.trim() || file.name.replace(/\.[^.]+$/, "");
+  const tags = tagsInput.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+  try {
+    await callEntry("add_meme", { name, filename: file.name, data_base64: base64, tags }, 30000);
+    addDialog.close();
+    toast("已添加");
+    refresh();
+  } catch (err) {
+    toast(err.message);
+  }
+});
+let searchTimer = null;
+searchEl.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(refresh, 300);
+});
+refresh();
+</script>
+</body>
+</html>
