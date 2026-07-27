@@ -1,9 +1,11 @@
-"""VRM 五元音共振峰口型（formant lip-sync）的静态契约测试。
+"""Static-contract tests for the VRM formant (five-vowel) lip-sync.
 
-锁定结构约定，防止后续改动把关键接线弄断：
-  - vrm-lipsync-formant.js 必须先于 vrm-animation.js 加载（运行期实例化依赖）；
-  - _updateLipSync 优先走五元音共振峰路径，分析器缺失时回退旧单通道音量驱动；
-  - 五元音路径把全部五个元音每帧显式写入（含 0），覆盖待机 VRMA 口型轨道残留。
+Locks the structural wiring so later refactors cannot silently break it:
+  - vrm-lipsync-formant.js must load before vrm-animation.js (runtime dep);
+  - _updateLipSync prefers the formant path and falls back to the legacy
+    single-channel volume driver when the analyzer is unavailable;
+  - the formant path writes all five vowels every frame (including 0),
+    which overrides idle-VRMA mouth-track residue.
 """
 from pathlib import Path
 
@@ -16,7 +18,7 @@ def _read(rel):
 
 
 def test_formant_module_loaded_before_animation():
-    """vrm-init.js 的并行模块列表里，formant 模块须排在 vrm-animation.js 之前。"""
+    """In vrm-init.js the formant module is listed before vrm-animation.js."""
     init_source = _read("static/vrm/vrm-init.js")
     formant_idx = init_source.index("/static/vrm/vrm-lipsync-formant.js")
     animation_idx = init_source.index("/static/vrm/vrm-animation.js")
@@ -24,7 +26,7 @@ def test_formant_module_loaded_before_animation():
 
 
 def test_formant_module_exposes_global_and_no_esm():
-    """经典脚本架构：挂 window，不使用 ESM export（与 vrm-animation.js 一致）。"""
+    """Classic-script architecture: attach to window, no ESM import/export."""
     source = _read("static/vrm/vrm-lipsync-formant.js")
     assert "window.FormantLipSyncAnalyzer = FormantLipSyncAnalyzer;" in source
     assert "\nexport " not in source
@@ -32,16 +34,17 @@ def test_formant_module_exposes_global_and_no_esm():
 
 
 def test_animation_lazy_instantiates_analyzer_with_fallback():
-    """startLipSync 运行期惰性实例化；构造期不引用 window（并行加载顺序不保证）。"""
+    """startLipSync instantiates lazily; the constructor must not touch window."""
     source = _read("static/vrm/vrm-animation.js")
     assert "new window.FormantLipSyncAnalyzer(analyser)" in source
-    # 构造器里只声明字段，不在加载期触碰全局类
+    # Constructor only declares the field; it must not reference the global
+    # class at load time because parallel module load order is not guaranteed.
     constructor = source.split("constructor(", 1)[1].split("startLipSync(", 1)[0]
     assert "new window.FormantLipSyncAnalyzer" not in constructor
 
 
 def test_update_lipsync_prefers_formant_then_falls_back():
-    """_updateLipSync 先尝试五元音路径，分析器为 null 时回退单通道音量驱动。"""
+    """_updateLipSync tries the formant path first, then falls back to volume."""
     source = _read("static/vrm/vrm-animation.js")
     method = source.split("_updateLipSync(delta) {", 1)[1]
     formant_branch = method.index("this._updateLipSyncFormant(expressionManager, delta);")
@@ -50,7 +53,7 @@ def test_update_lipsync_prefers_formant_then_falls_back():
 
 
 def test_formant_path_writes_all_five_vowels():
-    """五元音路径遍历 mouthExpressions 全表逐帧写入（含 0），天然覆盖 VRMA 残留。"""
+    """Formant path iterates the whole mouthExpressions table, writing 0s too."""
     source = _read("static/vrm/vrm-animation.js")
     formant_method = source.split("_updateLipSyncFormant(expressionManager, delta) {", 1)[1]
     assert "Object.entries(this.mouthExpressions)" in formant_method
@@ -59,7 +62,7 @@ def test_formant_path_writes_all_five_vowels():
 
 
 def test_fallback_path_still_clears_other_vowels_before_aa():
-    """回退单通道路径保留原有"先清零其他元音再写 aa"的防 VRMA 残留机制。"""
+    """Fallback single-channel path keeps the clear-others-then-write-aa guard."""
     source = _read("static/vrm/vrm-animation.js")
     method = source.split("_updateLipSync(delta) {", 1)[1].split(
         "_updateLipSyncFormant(expressionManager, delta) {", 1
