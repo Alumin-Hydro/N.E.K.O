@@ -237,6 +237,38 @@ def _is_reparse_point(info: os.stat_result) -> bool:
     return bool(flag and attributes & flag)
 
 
+def _prepare_sandbox_entry(path: Path) -> Path:
+    """Return one canonical, ordinary launcher file or fail closed."""
+
+    lexical = Path(os.path.abspath(os.fspath(path)))
+    try:
+        initial_info = os.stat(lexical, follow_symlinks=False)
+        resolved = lexical.resolve(strict=True)
+        final_info = os.stat(resolved, follow_symlinks=False)
+    except (OSError, RuntimeError) as exc:
+        raise RunnerError(
+            "sandbox_unavailable",
+            f"the Python sandbox entrypoint cannot be verified: {exc}",
+        ) from exc
+    for info in (initial_info, final_info):
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or _is_reparse_point(info)
+            or not stat.S_ISREG(info.st_mode)
+            or getattr(info, "st_nlink", 0) != 1
+        ):
+            raise RunnerError(
+                "sandbox_unavailable",
+                "the Python sandbox entrypoint is not an ordinary unlinked file",
+            )
+    if resolved != lexical or initial_info.st_size != final_info.st_size:
+        raise RunnerError(
+            "sandbox_unavailable",
+            "the Python sandbox entrypoint did not remain canonical and stable",
+        )
+    return resolved
+
+
 def _normalize_script_rel(script_rel: str) -> PurePosixPath:
     if not isinstance(script_rel, str) or not script_rel:
         raise RunnerError("invalid_script", "script_rel must be a non-empty string")
@@ -882,13 +914,9 @@ def _run_python_script_sync(
         resolved_root=resolved_root,
     )
     output_dir = _create_run_output(prepared_output_root, resolved_root)
-    sandbox_entry = Path(__file__).with_name("_sandbox_runner.py").resolve(strict=True)
-    sandbox_info = sandbox_entry.stat()
-    if not stat.S_ISREG(sandbox_info.st_mode):
-        raise RunnerError(
-            "sandbox_unavailable",
-            "the Python sandbox entrypoint is not a regular file",
-        )
+    sandbox_entry = _prepare_sandbox_entry(
+        Path(__file__).resolve(strict=True).with_name("_sandbox_runner.py")
+    )
 
     command = [
         str(executable),

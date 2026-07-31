@@ -55,6 +55,12 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return True
 
 
+def _is_reparse_point(info: os.stat_result) -> bool:
+    flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    attributes = getattr(info, "st_file_attributes", 0)
+    return bool(flag and attributes & flag)
+
+
 def _resolve_path(path: Path, *, strict: bool) -> Path:
     _RESOLUTION_STATE.active = True
     try:
@@ -127,6 +133,29 @@ def _validate_output(skill_root: Path, raw_output: Path) -> Path:
     return resolved
 
 
+def _validate_trusted_launcher(raw_launcher: Path) -> Path:
+    """Validate the exact canonical launcher before installing audit guards."""
+
+    lexical = Path(os.path.abspath(os.fspath(raw_launcher)))
+    try:
+        initial_info = _ORIGINAL_LSTAT(lexical)
+        resolved = _resolve_path(lexical, strict=True)
+        final_info = _ORIGINAL_LSTAT(resolved)
+    except (OSError, RuntimeError) as exc:
+        raise SandboxViolation("sandbox launcher cannot be verified") from exc
+    for info in (initial_info, final_info):
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or _is_reparse_point(info)
+            or not stat.S_ISREG(info.st_mode)
+            or getattr(info, "st_nlink", 0) != 1
+        ):
+            raise SandboxViolation("sandbox launcher must be an ordinary unlinked file")
+    if resolved != lexical or initial_info.st_size != final_info.st_size:
+        raise SandboxViolation("sandbox launcher must remain canonical and stable")
+    return resolved
+
+
 def _collect_system_roots(skill_root: Path) -> tuple[Path, ...]:
     candidates: set[Path] = set()
     for key in ("stdlib", "platstdlib", "purelib", "platlib"):
@@ -176,10 +205,12 @@ class _AuditPolicy:
         skill_root: Path,
         output_dir: Path,
         system_roots: Iterable[Path],
+        trusted_stat_files: Iterable[Path] = (),
     ) -> None:
         self.skill_root = skill_root
         self.output_dir = output_dir
         self.system_roots = tuple(system_roots)
+        self.trusted_stat_files = frozenset(trusted_stat_files)
         self.first_violation: str | None = None
 
     def _deny(self, message: str) -> NoReturn:
@@ -240,10 +271,13 @@ class _AuditPolicy:
         if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
             self._deny(f"{operation} rejected a multiply-linked managed file")
 
-    def check_read(self, value: object, *, operation: str) -> Path:
-        if isinstance(value, int) and value in {0, 1, 2}:
-            return Path(os.devnull)
-        lexical, resolved = self._resolved(value, operation=operation)
+    def _check_resolved_read(
+        self,
+        lexical: Path,
+        resolved: Path,
+        *,
+        operation: str,
+    ) -> Path:
         if _is_relative_to(resolved, self.skill_root):
             self._check_skill_link_state(lexical, resolved, operation=operation)
             return resolved
@@ -251,6 +285,30 @@ class _AuditPolicy:
             if resolved == allowed or _is_relative_to(resolved, allowed):
                 return resolved
         self._deny(f"{operation} denied read access outside approved roots: {resolved}")
+
+    def check_read(self, value: object, *, operation: str) -> Path:
+        if isinstance(value, int) and value in {0, 1, 2}:
+            return Path(os.devnull)
+        lexical, resolved = self._resolved(value, operation=operation)
+        return self._check_resolved_read(
+            lexical,
+            resolved,
+            operation=operation,
+        )
+
+    def check_stat(self, value: object) -> Path:
+        """Allow metadata access to the exact verified launcher, nothing else."""
+
+        if isinstance(value, int) and value in {0, 1, 2}:
+            return Path(os.devnull)
+        lexical, resolved = self._resolved(value, operation="os.stat")
+        if lexical == resolved and resolved in self.trusted_stat_files:
+            return resolved
+        return self._check_resolved_read(
+            lexical,
+            resolved,
+            operation="os.stat",
+        )
 
     def check_write(self, value: object, *, operation: str) -> Path:
         if isinstance(value, int) and value in {1, 2}:
@@ -286,17 +344,11 @@ class _AuditPolicy:
                 self.check_read(args[0], operation="open")
             return
 
-        if (
-            event
-            in {
-                "os.listdir",
-                "os.scandir",
-                "os.stat",
-                "os.lstat",
-                "os.readlink",
-            }
-            and args
-        ):
+        if event == "os.stat" and args:
+            self.check_stat(args[0])
+            return
+
+        if event in {"os.listdir", "os.scandir", "os.lstat", "os.readlink"} and args:
             self.check_read(args[0], operation=event)
             return
 
@@ -384,7 +436,7 @@ def _install_stat_guards(policy: _AuditPolicy) -> None:
             return _ORIGINAL_STAT(path, *args, **kwargs)
         if kwargs.get("dir_fd") is not None:
             policy._deny("os.stat with dir_fd is disabled for skill scripts")
-        policy.check_read(path, operation="os.stat")
+        policy.check_stat(path)
         return _ORIGINAL_STAT(path, *args, **kwargs)
 
     def guarded_lstat(path: object, *args: object, **kwargs: object):
@@ -463,6 +515,7 @@ def _parse_args(raw_args: list[str]) -> argparse.Namespace:
 def _main(raw_args: list[str]) -> int:
     try:
         args = _parse_args(raw_args)
+        trusted_launcher = _validate_trusted_launcher(Path(__file__))
         skill_root = _validate_directory(Path(args.skill_root), label="skill root")
         script = _validate_script(skill_root, Path(args.script))
         output_dir = _validate_output(skill_root, Path(args.output_dir))
@@ -487,6 +540,7 @@ def _main(raw_args: list[str]) -> int:
         skill_root=skill_root,
         output_dir=output_dir,
         system_roots=system_roots,
+        trusted_stat_files=(trusted_launcher,),
     )
 
     sys.dont_write_bytecode = True

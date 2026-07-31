@@ -334,10 +334,12 @@ def normalize_relative_path(value: str | os.PathLike[str]) -> str:
         raise PackageError("path must be text", code="invalid_path")
     if not raw or raw in {".", "./"}:
         raise PackageError("path must name a package entry", code="invalid_path")
-    if "\x00" in raw or "\\" in raw:
+    if "\x00" in raw:
         raise PackageError("path contains a forbidden character", code="invalid_path")
-    if raw.startswith(("/", "//")) or _WINDOWS_DRIVE_RE.match(raw):
+    if raw.startswith(("/", "\\")) or _WINDOWS_DRIVE_RE.match(raw):
         raise PackageError("absolute paths are not allowed", code="absolute_path")
+    if "\\" in raw:
+        raise PackageError("path contains a forbidden character", code="invalid_path")
     if any(ord(char) < 32 or ord(char) == 127 for char in raw):
         raise PackageError("path contains control characters", code="invalid_path")
 
