@@ -231,6 +231,12 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return True
 
 
+def _is_reparse_point(info: os.stat_result) -> bool:
+    flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    attributes = getattr(info, "st_file_attributes", 0)
+    return bool(flag and attributes & flag)
+
+
 def _normalize_script_rel(script_rel: str) -> PurePosixPath:
     if not isinstance(script_rel, str) or not script_rel:
         raise RunnerError("invalid_script", "script_rel must be a non-empty string")
@@ -661,9 +667,46 @@ def _scan_artifacts(
     directory_count = 0
     total_size = 0
     stack = [output_dir]
+    try:
+        resolved_output_dir = output_dir.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise RunnerError(
+            "artifact_scan_failed",
+            f"run output cannot be resolved: {exc}",
+        ) from exc
 
     while stack:
         directory = stack.pop()
+        try:
+            directory_info = os.stat(directory, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise RunnerError(
+                "artifact_scan_failed",
+                f"run output directory cannot be inspected: {exc}",
+            ) from exc
+        if (
+            stat.S_ISLNK(directory_info.st_mode)
+            or _is_reparse_point(directory_info)
+            or not stat.S_ISDIR(directory_info.st_mode)
+        ):
+            raise RunnerError(
+                "unsafe_artifact",
+                "run output contains an unsafe directory",
+            )
+        try:
+            resolved_directory = directory.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise RunnerError(
+                "unsafe_artifact",
+                f"run output contains an unresolvable directory: {exc}",
+            ) from exc
+        if not _is_relative_to(resolved_directory, resolved_output_dir):
+            raise RunnerError(
+                "unsafe_artifact",
+                "run output contains a directory outside its root",
+            )
         try:
             iterator = os.scandir(directory)
         except FileNotFoundError:
@@ -676,7 +719,9 @@ def _scan_artifacts(
         with iterator:
             for entry in iterator:
                 try:
-                    info = entry.stat(follow_symlinks=False)
+                    # DirEntry.stat() returns cached, incomplete link metadata on
+                    # Windows, so artifact safety uses a fresh no-follow path stat.
+                    info = os.stat(entry.path, follow_symlinks=False)
                 except FileNotFoundError:
                     continue
                 except OSError as exc:
@@ -685,10 +730,10 @@ def _scan_artifacts(
                         f"run output entry cannot be inspected: {exc}",
                     ) from exc
                 mode = info.st_mode
-                if stat.S_ISLNK(mode):
+                if stat.S_ISLNK(mode) or _is_reparse_point(info):
                     raise RunnerError(
                         "unsafe_artifact",
-                        "run output contains a symbolic link",
+                        "run output contains a symbolic link or reparse point",
                     )
                 if stat.S_ISDIR(mode):
                     directory_count += 1
@@ -702,7 +747,10 @@ def _scan_artifacts(
                         )
                     stack.append(Path(entry.path))
                     continue
-                if not stat.S_ISREG(mode) or info.st_nlink != 1:
+                if (
+                    not stat.S_ISREG(mode)
+                    or getattr(info, "st_nlink", 0) != 1
+                ):
                     raise RunnerError(
                         "unsafe_artifact",
                         "run output contains a special or multiply-linked file",

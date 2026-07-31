@@ -368,7 +368,7 @@ def scan_skill_package(
             "skill source does not exist or cannot be inspected",
             code="source_unavailable",
         ) from exc
-    if stat.S_ISLNK(root_lstat.st_mode):
+    if stat.S_ISLNK(root_lstat.st_mode) or _is_reparse_point(root_lstat):
         raise PackageError(
             "skill source cannot be a symbolic link", code="symlink_rejected"
         )
@@ -380,6 +380,11 @@ def scan_skill_package(
             )
         root = root.parent
         root_lstat = root.lstat()
+        if stat.S_ISLNK(root_lstat.st_mode) or _is_reparse_point(root_lstat):
+            raise PackageError(
+                "skill source cannot be a symbolic link",
+                code="symlink_rejected",
+            )
     if not stat.S_ISDIR(root_lstat.st_mode):
         raise PackageError(
             "skill source must be a directory", code="invalid_source_type"
@@ -397,134 +402,170 @@ def scan_skill_package(
             code="source_unavailable",
         ) from exc
 
-    directories: list[str] = []
-    files: list[PackageFile] = []
-    total_bytes = 0
-    portable_names: dict[str, str] = {}
+    def discover() -> tuple[tuple[PackageFile, ...], tuple[str, ...]]:
+        directories: list[str] = []
+        files: list[PackageFile] = []
+        total_bytes = 0
+        portable_names: dict[str, str] = {}
 
-    def visit(directory: Path, relative_directory: str, depth: int) -> None:
-        nonlocal total_bytes
-        if depth > limits.max_depth:
-            raise PackageError(
-                "package directory nesting exceeds the configured limit",
-                code="too_deep",
-                path=relative_directory or None,
-            )
-        _assert_resolves_within(directory, resolved_root)
-        try:
-            with os.scandir(directory) as iterator:
-                entries = sorted(iterator, key=lambda item: item.name)
-        except OSError as exc:
-            raise PackageError(
-                "package directory cannot be read",
-                code="source_unavailable",
-                path=relative_directory or None,
-            ) from exc
-        for entry in entries:
-            _validate_source_name(entry.name)
-            relative = (
-                f"{relative_directory}/{entry.name}"
-                if relative_directory
-                else entry.name
-            )
-            normalized = normalize_relative_path(relative)
-            encoded_path = normalized.encode("utf-8")
-            if len(encoded_path) > limits.max_path_bytes:
+        def visit(directory: Path, relative_directory: str, depth: int) -> None:
+            nonlocal total_bytes
+            if depth > limits.max_depth:
                 raise PackageError(
-                    "package path exceeds the configured limit",
-                    code="path_too_long",
-                    path=normalized,
-                )
-            if len(PurePosixPath(normalized).parts) > limits.max_depth:
-                raise PackageError(
-                    "package path nesting exceeds the configured limit",
+                    "package directory nesting exceeds the configured limit",
                     code="too_deep",
-                    path=normalized,
+                    path=relative_directory or None,
                 )
-            _record_portable_name(normalized, portable_names)
             try:
-                entry_stat = entry.stat(follow_symlinks=False)
+                directory_stat = os.stat(directory, follow_symlinks=False)
             except OSError as exc:
                 raise PackageError(
-                    "package entry cannot be inspected",
+                    "package directory cannot be inspected",
                     code="source_unavailable",
-                    path=normalized,
+                    path=relative_directory or None,
                 ) from exc
-            if entry.is_symlink():
+            if (
+                stat.S_ISLNK(directory_stat.st_mode)
+                or _is_reparse_point(directory_stat)
+            ):
                 raise PackageError(
-                    "symbolic links are not allowed in skill packages",
+                    "filesystem links are not allowed in skill packages",
                     code="symlink_rejected",
-                    path=normalized,
+                    path=relative_directory or None,
                 )
-            if _is_reparse_point(entry_stat):
+            if not stat.S_ISDIR(directory_stat.st_mode):
                 raise PackageError(
-                    "filesystem reparse points are not allowed",
-                    code="symlink_rejected",
-                    path=normalized,
+                    "package entry changed type during discovery",
+                    code="source_changed",
+                    path=relative_directory or None,
                 )
-            entry_path = Path(entry.path)
-            if stat.S_ISDIR(entry_stat.st_mode):
-                directories.append(normalized)
-                if len(directories) > limits.max_directories:
+            _assert_resolves_within(directory, resolved_root)
+            try:
+                with os.scandir(directory) as iterator:
+                    entries = sorted(iterator, key=lambda item: item.name)
+            except OSError as exc:
+                raise PackageError(
+                    "package directory cannot be read",
+                    code="source_unavailable",
+                    path=relative_directory or None,
+                ) from exc
+            for entry in entries:
+                _validate_source_name(entry.name)
+                relative = (
+                    f"{relative_directory}/{entry.name}"
+                    if relative_directory
+                    else entry.name
+                )
+                normalized = normalize_relative_path(relative)
+                encoded_path = normalized.encode("utf-8")
+                if len(encoded_path) > limits.max_path_bytes:
                     raise PackageError(
-                        "package contains too many directories",
-                        code="too_many_directories",
+                        "package path exceeds the configured limit",
+                        code="path_too_long",
+                        path=normalized,
                     )
-                visit(entry_path, normalized, depth + 1)
-                continue
-            if not stat.S_ISREG(entry_stat.st_mode):
-                raise PackageError(
-                    "only ordinary files and directories are allowed",
-                    code="special_file_rejected",
-                    path=normalized,
+                if len(PurePosixPath(normalized).parts) > limits.max_depth:
+                    raise PackageError(
+                        "package path nesting exceeds the configured limit",
+                        code="too_deep",
+                        path=normalized,
+                    )
+                _record_portable_name(normalized, portable_names)
+                entry_path = Path(entry.path)
+                try:
+                    # DirEntry.stat() caches results and reports zero identity/link
+                    # fields on Windows; security checks require a fresh path stat.
+                    entry_stat = os.stat(entry_path, follow_symlinks=False)
+                except FileNotFoundError as exc:
+                    raise PackageError(
+                        "package entry changed during discovery",
+                        code="source_changed",
+                        path=normalized,
+                    ) from exc
+                except OSError as exc:
+                    raise PackageError(
+                        "package entry cannot be inspected",
+                        code="source_unavailable",
+                        path=normalized,
+                    ) from exc
+                if stat.S_ISLNK(entry_stat.st_mode) or _is_reparse_point(entry_stat):
+                    raise PackageError(
+                        "filesystem links are not allowed in skill packages",
+                        code="symlink_rejected",
+                        path=normalized,
+                    )
+                if stat.S_ISDIR(entry_stat.st_mode):
+                    directories.append(normalized)
+                    if len(directories) > limits.max_directories:
+                        raise PackageError(
+                            "package contains too many directories",
+                            code="too_many_directories",
+                        )
+                    visit(entry_path, normalized, depth + 1)
+                    continue
+                if not stat.S_ISREG(entry_stat.st_mode):
+                    raise PackageError(
+                        "only ordinary files and directories are allowed",
+                        code="special_file_rejected",
+                        path=normalized,
+                    )
+                if getattr(entry_stat, "st_nlink", 0) != 1:
+                    raise PackageError(
+                        "hard-linked files are not allowed",
+                        code="hardlink_rejected",
+                        path=normalized,
+                    )
+                if len(files) >= limits.max_files:
+                    raise PackageError(
+                        "package contains too many files",
+                        code="too_many_files",
+                    )
+                per_file_limit = (
+                    min(limits.max_file_bytes, limits.max_skill_md_bytes)
+                    if normalized == "SKILL.md"
+                    else limits.max_file_bytes
                 )
-            if getattr(entry_stat, "st_nlink", 1) > 1:
-                raise PackageError(
-                    "hard-linked files are not allowed",
-                    code="hardlink_rejected",
-                    path=normalized,
+                data = _read_source_file(
+                    entry_path,
+                    entry_stat,
+                    resolved_root,
+                    per_file_limit,
+                    normalized,
                 )
-            if len(files) >= limits.max_files:
-                raise PackageError(
-                    "package contains too many files",
-                    code="too_many_files",
+                total_bytes += len(data)
+                if total_bytes > limits.max_total_bytes:
+                    raise PackageError(
+                        "package exceeds the configured total-size limit",
+                        code="package_too_large",
+                    )
+                kind, readable, executable = _classify_file(
+                    normalized,
+                    data,
+                    entry_stat.st_mode,
                 )
-            per_file_limit = (
-                min(limits.max_file_bytes, limits.max_skill_md_bytes)
-                if normalized == "SKILL.md"
-                else limits.max_file_bytes
-            )
-            data = _read_source_file(
-                entry_path,
-                entry_stat,
-                resolved_root,
-                per_file_limit,
-                normalized,
-            )
-            total_bytes += len(data)
-            if total_bytes > limits.max_total_bytes:
-                raise PackageError(
-                    "package exceeds the configured total-size limit",
-                    code="package_too_large",
+                files.append(
+                    PackageFile(
+                        path=normalized,
+                        data=data,
+                        kind=kind,
+                        readable=readable,
+                        executable=executable,
+                        sha256=_sha256(data),
+                    )
                 )
-            kind, readable, executable = _classify_file(
-                normalized,
-                data,
-                entry_stat.st_mode,
-            )
-            files.append(
-                PackageFile(
-                    path=normalized,
-                    data=data,
-                    kind=kind,
-                    readable=readable,
-                    executable=executable,
-                    sha256=_sha256(data),
-                )
-            )
 
-    visit(root, "", 0)
-    return _build_package(tuple(files), tuple(directories), limits)
+        visit(root, "", 0)
+        return tuple(files), tuple(directories)
+
+    files, directories = discover()
+    verification_files, verification_directories = discover()
+    _require_stable_source_snapshot(
+        files,
+        directories,
+        verification_files,
+        verification_directories,
+    )
+    return _build_package(files, directories, limits)
 
 
 def build_inline_package(
@@ -687,7 +728,12 @@ def read_manifest_file(
             code="managed_file_missing",
             path=normalized,
         ) from exc
-    if not stat.S_ISREG(target_stat.st_mode) or stat.S_ISLNK(target_stat.st_mode):
+    if (
+        not stat.S_ISREG(target_stat.st_mode)
+        or stat.S_ISLNK(target_stat.st_mode)
+        or _is_reparse_point(target_stat)
+        or getattr(target_stat, "st_nlink", 0) != 1
+    ):
         raise PackageError(
             "managed package entry is not an ordinary file",
             code="managed_file_invalid",
@@ -1660,6 +1706,54 @@ def _record_portable_name(path: str, names: dict[str, str]) -> None:
     names[key] = path
 
 
+def _require_stable_source_snapshot(
+    files: tuple[PackageFile, ...],
+    directories: tuple[str, ...],
+    verification_files: tuple[PackageFile, ...],
+    verification_directories: tuple[str, ...],
+) -> None:
+    """Reject semantic source changes without comparing platform stat identity.
+
+    Directory mtimes, inode/device numbers, permission bits, and timestamp
+    precision are intentionally absent.  Canonical relative paths and entry
+    types identify the tree; regular-file size and content digest identify its
+    bounded contents.
+    """
+
+    def fingerprint(
+        snapshot_files: tuple[PackageFile, ...],
+        snapshot_directories: tuple[str, ...],
+    ) -> dict[str, tuple[str, int, str]]:
+        result = {
+            path: ("directory", 0, "") for path in snapshot_directories
+        }
+        result.update(
+            {
+                item.path: ("file", item.size, item.sha256)
+                for item in snapshot_files
+            }
+        )
+        return result
+
+    expected = fingerprint(files, directories)
+    observed = fingerprint(verification_files, verification_directories)
+    if expected == observed:
+        return
+    changed_path = next(
+        (
+            path
+            for path in sorted(expected.keys() | observed.keys())
+            if expected.get(path) != observed.get(path)
+        ),
+        None,
+    )
+    raise PackageError(
+        "package source changed during discovery",
+        code="source_changed",
+        path=changed_path,
+    )
+
+
 def _is_reparse_point(value: os.stat_result) -> bool:
     flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     attributes = getattr(value, "st_file_attributes", 0)
@@ -1676,6 +1770,37 @@ def _assert_resolves_within(path: Path, root: Path) -> None:
         ) from exc
 
 
+def _validate_source_file_stat(
+    value: os.stat_result,
+    limit: int,
+    relative_path: str,
+) -> None:
+    if stat.S_ISLNK(value.st_mode) or _is_reparse_point(value):
+        raise PackageError(
+            "package entry became a filesystem link",
+            code="symlink_rejected",
+            path=relative_path,
+        )
+    if not stat.S_ISREG(value.st_mode):
+        raise PackageError(
+            "package entry is not an ordinary file",
+            code="special_file_rejected",
+            path=relative_path,
+        )
+    if getattr(value, "st_nlink", 0) != 1:
+        raise PackageError(
+            "hard-linked files are not allowed",
+            code="hardlink_rejected",
+            path=relative_path,
+        )
+    if value.st_size > limit:
+        raise PackageError(
+            "package file exceeds the configured size limit",
+            code="file_too_large",
+            path=relative_path,
+        )
+
+
 def _read_source_file(
     path: Path,
     expected_stat: os.stat_result,
@@ -1683,13 +1808,29 @@ def _read_source_file(
     limit: int,
     relative_path: str,
 ) -> bytes:
-    _assert_resolves_within(path, resolved_root)
-    if expected_stat.st_size > limit:
+    _validate_source_file_stat(expected_stat, limit, relative_path)
+    try:
+        current_stat = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError as exc:
         raise PackageError(
-            "package file exceeds the configured size limit",
-            code="file_too_large",
+            "package file changed during discovery",
+            code="source_changed",
+            path=relative_path,
+        ) from exc
+    except OSError as exc:
+        raise PackageError(
+            "package file cannot be inspected safely",
+            code="source_unavailable",
+            path=relative_path,
+        ) from exc
+    _validate_source_file_stat(current_stat, limit, relative_path)
+    if current_stat.st_size != expected_stat.st_size:
+        raise PackageError(
+            "package file changed during discovery",
+            code="source_changed",
             path=relative_path,
         )
+    _assert_resolves_within(path, resolved_root)
     flags = os.O_RDONLY
     flags |= getattr(os, "O_BINARY", 0)
     flags |= getattr(os, "O_CLOEXEC", 0)
@@ -1697,23 +1838,58 @@ def _read_source_file(
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
+        try:
+            failed_open_stat = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError as changed_exc:
+            raise PackageError(
+                "package file changed during discovery",
+                code="source_changed",
+                path=relative_path,
+            ) from changed_exc
+        except OSError:
+            failed_open_stat = None
+        if failed_open_stat is not None:
+            _validate_source_file_stat(
+                failed_open_stat,
+                limit,
+                relative_path,
+            )
+            if failed_open_stat.st_size != expected_stat.st_size:
+                raise PackageError(
+                    "package file changed during discovery",
+                    code="source_changed",
+                    path=relative_path,
+                ) from exc
         raise PackageError(
             "package file cannot be opened safely",
             code="source_unavailable",
             path=relative_path,
         ) from exc
     try:
-        opened_stat = os.fstat(descriptor)
-        if not stat.S_ISREG(opened_stat.st_mode):
+        try:
+            opened_path_stat = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError as exc:
             raise PackageError(
-                "package entry is not an ordinary file",
-                code="special_file_rejected",
+                "package file changed during discovery",
+                code="source_changed",
+                path=relative_path,
+            ) from exc
+        except OSError as exc:
+            raise PackageError(
+                "package file cannot be inspected after opening",
+                code="source_unavailable",
+                path=relative_path,
+            ) from exc
+        _validate_source_file_stat(opened_path_stat, limit, relative_path)
+        if opened_path_stat.st_size != expected_stat.st_size:
+            raise PackageError(
+                "package file changed during discovery",
+                code="source_changed",
                 path=relative_path,
             )
-        if (
-            opened_stat.st_dev != expected_stat.st_dev
-            or opened_stat.st_ino != expected_stat.st_ino
-        ):
+        opened_stat = os.fstat(descriptor)
+        _validate_source_file_stat(opened_stat, limit, relative_path)
+        if opened_stat.st_size != expected_stat.st_size:
             raise PackageError(
                 "package file changed during discovery",
                 code="source_changed",
@@ -1735,10 +1911,32 @@ def _read_source_file(
                 path=relative_path,
             )
         final_stat = os.fstat(descriptor)
-        if final_stat.st_size != len(data) or (
-            final_stat.st_mtime_ns != opened_stat.st_mtime_ns
-            or final_stat.st_ctime_ns != opened_stat.st_ctime_ns
+        _validate_source_file_stat(final_stat, limit, relative_path)
+        if (
+            final_stat.st_size != opened_stat.st_size
+            or final_stat.st_size != len(data)
         ):
+            raise PackageError(
+                "package file changed during discovery",
+                code="source_changed",
+                path=relative_path,
+            )
+        try:
+            current_stat = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise PackageError(
+                "package file changed during discovery",
+                code="source_changed",
+                path=relative_path,
+            ) from exc
+        except OSError as exc:
+            raise PackageError(
+                "package file cannot be inspected after reading",
+                code="source_unavailable",
+                path=relative_path,
+            ) from exc
+        _validate_source_file_stat(current_stat, limit, relative_path)
+        if current_stat.st_size != final_stat.st_size:
             raise PackageError(
                 "package file changed during discovery",
                 code="source_changed",
@@ -1825,7 +2023,12 @@ def _read_managed_file(path: Path, limit: int, relative_path: str) -> bytes:
         ) from exc
     try:
         opened_stat = os.fstat(descriptor)
-        if not stat.S_ISREG(opened_stat.st_mode):
+        if (
+            not stat.S_ISREG(opened_stat.st_mode)
+            or stat.S_ISLNK(opened_stat.st_mode)
+            or _is_reparse_point(opened_stat)
+            or getattr(opened_stat, "st_nlink", 0) != 1
+        ):
             raise PackageError(
                 "managed package entry is not an ordinary file",
                 code="managed_file_invalid",
@@ -1847,9 +2050,20 @@ def _read_managed_file(path: Path, limit: int, relative_path: str) -> bytes:
                 path=relative_path,
             )
         final_stat = os.fstat(descriptor)
-        if final_stat.st_size != len(data) or (
-            final_stat.st_mtime_ns != opened_stat.st_mtime_ns
-            or final_stat.st_ctime_ns != opened_stat.st_ctime_ns
+        if (
+            not stat.S_ISREG(final_stat.st_mode)
+            or stat.S_ISLNK(final_stat.st_mode)
+            or _is_reparse_point(final_stat)
+            or getattr(final_stat, "st_nlink", 0) != 1
+        ):
+            raise PackageError(
+                "managed package entry is not an ordinary file",
+                code="managed_file_invalid",
+                path=relative_path,
+            )
+        if (
+            final_stat.st_size != opened_stat.st_size
+            or final_stat.st_size != len(data)
         ):
             raise PackageError(
                 "managed package file changed while being read",

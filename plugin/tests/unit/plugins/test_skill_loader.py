@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 import plugin.plugins.skill_loader as skill_loader_module
+import plugin.plugins.skill_loader._package as package_module
 import plugin.plugins.skill_loader._runner as runner_module
 from plugin.plugins.skill_loader import (
     EMPTY_SCHEMA,
@@ -30,6 +31,8 @@ from plugin.plugins.skill_loader._package import (
 )
 from plugin.plugins.skill_loader._runner import (
     DEFAULT_RUNNER_LIMITS,
+    RunnerError,
+    _scan_artifacts,
     run_python_script,
 )
 from plugin.sdk.plugin import SdkError
@@ -144,6 +147,60 @@ class FakeCtx:
             "config": self._returned_effective_config,
             "config_path": str(self.config_path),
         }
+
+
+class _StatProxy:
+    """Expose a real stat result with selected Windows-style field values."""
+
+    def __init__(self, value: os.stat_result, **overrides: int) -> None:
+        self._value = value
+        self._overrides = overrides
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._overrides:
+            return self._overrides[name]
+        return getattr(self._value, name)
+
+
+class _WindowsDirEntryProxy:
+    """Simulate the zero identity/link fields returned by DirEntry on Windows."""
+
+    def __init__(self, entry: Any, stat_calls: list[int]) -> None:
+        self._entry = entry
+        self._stat_calls = stat_calls
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._entry, name)
+
+    def stat(self, *, follow_symlinks: bool = True) -> _StatProxy:
+        self._stat_calls[0] += 1
+        return _StatProxy(
+            self._entry.stat(follow_symlinks=follow_symlinks),
+            st_dev=0,
+            st_ino=0,
+            st_nlink=0,
+        )
+
+
+class _WindowsScandirProxy:
+    """Wrap a scandir iterator with Windows-style entry stat results."""
+
+    def __init__(self, iterator: Any, stat_calls: list[int]) -> None:
+        self._iterator = iterator
+        self._stat_calls = stat_calls
+
+    def __enter__(self) -> _WindowsScandirProxy:
+        self._iterator.__enter__()
+        return self
+
+    def __exit__(self, *args: object) -> Any:
+        return self._iterator.__exit__(*args)
+
+    def __iter__(self) -> _WindowsScandirProxy:
+        return self
+
+    def __next__(self) -> _WindowsDirEntryProxy:
+        return _WindowsDirEntryProxy(next(self._iterator), self._stat_calls)
 
 
 def _store_config(enabled: Any = True) -> dict[str, Any]:
@@ -635,6 +692,222 @@ def test_package_rejects_special_file_and_non_utf8_skill(tmp_path: Path) -> None
     assert special_error.value.code == "special_file_rejected"
 
 
+def test_windows_stat_identity_noise_does_not_define_source_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skill_root = _write_complete_skill(tmp_path / "fixture")
+    real_stat = package_module.os.stat
+    real_fstat = package_module.os.fstat
+    calls = 0
+
+    def unstable_fields(value: os.stat_result) -> _StatProxy:
+        nonlocal calls
+        calls += 1
+        return _StatProxy(
+            value,
+            st_mode=(value.st_mode & ~0o777) | (0o600 if calls % 2 else 0o400),
+            st_dev=calls % 3,
+            st_ino=10_000 + calls,
+            st_mtime_ns=20_000 + calls,
+            st_ctime_ns=30_000 + calls,
+        )
+
+    def unstable_stat(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> _StatProxy:
+        return unstable_fields(
+            real_stat(
+                path,
+                dir_fd=dir_fd,
+                follow_symlinks=follow_symlinks,
+            )
+        )
+
+    def unstable_fstat(descriptor: int) -> _StatProxy:
+        return unstable_fields(real_fstat(descriptor))
+
+    monkeypatch.setattr(package_module.os, "stat", unstable_stat)
+    monkeypatch.setattr(package_module.os, "fstat", unstable_fstat)
+
+    package = scan_skill_package(skill_root)
+
+    assert package.manifest["totals"]["files"] == 9
+    assert package.manifest["skill"]["sha256"] == next(
+        item.sha256 for item in package.files if item.path == "SKILL.md"
+    )
+
+
+def test_windows_stat_identity_noise_preserves_source_error_priority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_fstat = package_module.os.fstat
+    calls = 0
+
+    def unstable_fstat(descriptor: int) -> _StatProxy:
+        nonlocal calls
+        calls += 1
+        return _StatProxy(
+            real_fstat(descriptor),
+            st_dev=calls,
+            st_ino=10_000 + calls,
+            st_mtime_ns=20_000 + calls,
+            st_ctime_ns=30_000 + calls,
+        )
+
+    monkeypatch.setattr(package_module.os, "fstat", unstable_fstat)
+
+    invalid = tmp_path / "invalid"
+    invalid.mkdir()
+    (invalid / "SKILL.md").write_bytes(b"\xff\xfe")
+    with pytest.raises(PackageError) as invalid_error:
+        scan_skill_package(invalid)
+    assert invalid_error.value.code == "invalid_utf8"
+
+    oversized = tmp_path / "oversized"
+    oversized.mkdir()
+    (oversized / "SKILL.md").write_bytes(b"x" * 17)
+    limits = replace(
+        DEFAULT_LIMITS,
+        max_file_bytes=16,
+        max_total_bytes=32,
+        max_skill_md_bytes=16,
+        max_read_bytes=16,
+    )
+    with pytest.raises(PackageError) as oversized_error:
+        scan_skill_package(oversized, limits)
+    assert oversized_error.value.code == "file_too_large"
+
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / "SKILL.md").write_text("# Linked\n", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    try:
+        (linked / "escape.txt").symlink_to(outside)
+    except OSError:
+        return
+    with pytest.raises(PackageError) as linked_error:
+        scan_skill_package(linked)
+    assert linked_error.value.code == "symlink_rejected"
+
+
+def test_source_snapshot_rejects_same_size_content_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skill_root = tmp_path / "changing"
+    skill_root.mkdir()
+    skill_file = skill_root / "SKILL.md"
+    skill_file.write_text("# Alpha\n", encoding="utf-8")
+    real_scandir = package_module.os.scandir
+    root_scans = 0
+
+    def changing_scandir(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+    ) -> Any:
+        nonlocal root_scans
+        if Path(path) == skill_root:
+            root_scans += 1
+            if root_scans == 2:
+                skill_file.write_text("# Bravo\n", encoding="utf-8")
+        return real_scandir(path)
+
+    monkeypatch.setattr(package_module.os, "scandir", changing_scandir)
+
+    with pytest.raises(PackageError) as error:
+        scan_skill_package(skill_root)
+
+    assert error.value.code == "source_changed"
+    assert error.value.path == "SKILL.md"
+
+
+def test_source_rejects_windows_reparse_attribute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skill_root = tmp_path / "reparse"
+    skill_root.mkdir()
+    skill_file = skill_root / "SKILL.md"
+    skill_file.write_text("# Reparse\n", encoding="utf-8")
+    real_stat = package_module.os.stat
+    reparse_flag = 0x400
+    monkeypatch.setattr(
+        package_module.stat,
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        reparse_flag,
+        raising=False,
+    )
+
+    def reparse_stat(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result | _StatProxy:
+        value = real_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+        if Path(path) == skill_file:
+            return _StatProxy(value, st_file_attributes=reparse_flag)
+        return value
+
+    monkeypatch.setattr(package_module.os, "stat", reparse_stat)
+
+    with pytest.raises(PackageError) as error:
+        scan_skill_package(skill_root)
+
+    assert error.value.code == "symlink_rejected"
+
+
+def test_source_swap_to_escaping_symlink_before_open_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skill_root = tmp_path / "swap"
+    skill_root.mkdir()
+    skill_file = skill_root / "SKILL.md"
+    skill_file.write_text("# Original\n", encoding="utf-8")
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Outside\n", encoding="utf-8")
+    probe = tmp_path / "symlink-probe"
+    try:
+        probe.symlink_to(outside)
+        probe.unlink()
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+    real_open = package_module.os.open
+    swapped = False
+
+    def swapping_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if not swapped and Path(path) == skill_file:
+            swapped = True
+            skill_file.unlink()
+            skill_file.symlink_to(outside)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(package_module.os, "open", swapping_open)
+
+    with pytest.raises(PackageError) as error:
+        scan_skill_package(skill_root)
+
+    assert error.value.code == "symlink_rejected"
+    assert error.value.path == "SKILL.md"
+
+
 @pytest.mark.asyncio
 async def test_llm_run_hard_rejects_unauthorized_skill_before_runner(
     tmp_path: Path,
@@ -836,7 +1109,10 @@ sys.stdout.write("x" * 200000)
 
 
 @pytest.mark.asyncio
-async def test_script_artifact_over_size_limit_is_rejected(tmp_path: Path) -> None:
+async def test_windows_direntry_stat_does_not_mask_artifact_size_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     artifact_script = """\
 import os
 from pathlib import Path
@@ -852,6 +1128,15 @@ Path(os.environ["NEKO_SKILL_OUTPUT_DIR"], "too-large.bin").write_bytes(b"x" * 20
         max_artifact_bytes=1024,
         max_total_artifact_bytes=2048,
     )
+    real_scandir = runner_module.os.scandir
+    direntry_stat_calls = [0]
+
+    def windows_scandir(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+    ) -> _WindowsScandirProxy:
+        return _WindowsScandirProxy(real_scandir(path), direntry_stat_calls)
+
+    monkeypatch.setattr(runner_module.os, "scandir", windows_scandir)
 
     result = await run_python_script(
         skill_root,
@@ -865,6 +1150,76 @@ Path(os.environ["NEKO_SKILL_OUTPUT_DIR"], "too-large.bin").write_bytes(b"x" * 20
     assert result["ok"] is False
     assert result["status"] == "output_rejected"
     assert result["diagnostic"]["code"] == "artifact_too_large"
+    assert direntry_stat_calls == [0]
+
+
+@pytest.mark.parametrize("entry_type", ["file", "directory"])
+def test_artifact_scan_rejects_windows_reparse_points(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_type: str,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    entry = output_dir / "reparse-entry"
+    if entry_type == "file":
+        entry.write_bytes(b"artifact")
+    else:
+        entry.mkdir()
+    real_stat = runner_module.os.stat
+    reparse_flag = 0x400
+    monkeypatch.setattr(
+        runner_module.stat,
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        reparse_flag,
+        raising=False,
+    )
+
+    def reparse_stat(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result | _StatProxy:
+        value = real_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+        if Path(path) == entry:
+            return _StatProxy(value, st_file_attributes=reparse_flag)
+        return value
+
+    monkeypatch.setattr(runner_module.os, "stat", reparse_stat)
+
+    with pytest.raises(RunnerError) as error:
+        _scan_artifacts(
+            output_dir,
+            limits=DEFAULT_RUNNER_LIMITS,
+            include_records=True,
+        )
+
+    assert error.value.code == "unsafe_artifact"
+
+
+def test_artifact_scan_still_rejects_hard_links(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    first = output_dir / "first.bin"
+    first.write_bytes(b"artifact")
+    try:
+        os.link(first, output_dir / "second.bin")
+    except OSError as exc:
+        pytest.skip(f"hard links are unavailable: {exc}")
+
+    with pytest.raises(RunnerError) as error:
+        _scan_artifacts(
+            output_dir,
+            limits=DEFAULT_RUNNER_LIMITS,
+            include_records=True,
+        )
+
+    assert error.value.code == "unsafe_artifact"
 
 
 @pytest.mark.asyncio
