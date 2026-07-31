@@ -1291,8 +1291,8 @@ def sanitize_text(text: object, *, limit: int = MAX_INPUT_TEXT) -> str:
     return cleaned.strip()[: max(0, int(limit))]
 
 
-def redact_excerpt(text: str) -> str:
-    cleaned = sanitize_text(text, limit=1000)
+def redact_excerpt(text: str, *, limit: int = MAX_DEBUG_EXCERPT) -> str:
+    cleaned = sanitize_text(text, limit=max(1000, int(limit) * 4))
     cleaned = _CODE_BLOCK_RE.sub("[code redacted]", cleaned)
     cleaned = _EMAIL_RE.sub("[email redacted]", cleaned)
     cleaned = _URL_RE.sub("[url redacted]", cleaned)
@@ -1309,7 +1309,7 @@ def redact_excerpt(text: str) -> str:
     cleaned = _PHONE_RE.sub("[phone redacted]", cleaned)
     cleaned = _LONG_NUMBER_RE.sub("[number redacted]", cleaned)
     cleaned = _SPACE_RE.sub(" ", cleaned).strip()
-    return cleaned[:MAX_DEBUG_EXCERPT]
+    return cleaned[: max(0, int(limit))]
 
 
 def _debug_evidence_summary(observations: Iterable[Observation]) -> str:
@@ -2077,7 +2077,7 @@ def set_manual_preference(
     profile["updated_at"] = ts
     enforce_bounds(state)
     if state.get("profiles", {}).get(key) is not profile:
-        return False, "偏好档案数量已达上限；未保存这条偏好。", None
+        return False, "偏好记录数量已达上限；未保存这条偏好。", None
     if dimension_str not in profile.get("manual", {}):
         state["profiles"][key] = profile_before
         enforce_bounds(state)
@@ -2121,7 +2121,7 @@ def delete_manual_preference(
         return False, "未知的偏好维度。"
     profile = state.get("profiles", {}).get(key)
     if not isinstance(profile, dict):
-        return False, "当前范围还没有偏好档案。"
+        return False, "当前范围还没有偏好记录。"
     manual = profile.get("manual")
     if not isinstance(manual, dict) or dimension not in manual:
         return False, "没有找到这条手动偏好。"

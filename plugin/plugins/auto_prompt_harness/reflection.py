@@ -1,36 +1,35 @@
-"""LLM reflection module for auto_prompt_harness v0.2.
-
-Collects a bounded, redacted evidence window from chat events, asks the
-configured agent model for a structured reflection, and validates the result
-before it becomes a pending preference proposal. Raw chat text never goes
-directly into the injected prompt — only the reviewed short preference
-sentence does.
-"""
+"""Bounded, redacted, strictly validated LLM reflection."""
 
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-_MAX_EVIDENCE_MESSAGES = 12
-_MAX_MESSAGE_CHARS = 240
-_MAX_PROPOSED_CHARS = 400
-_ALLOWED_RISKS = ("low", "medium", "high")
-_REFLECTION_VERSION = 1
-
-#: Things the proposed prompt must never contain.
-_FORBIDDEN_PATTERNS = (
-    re.compile(r"(?i)ignore (?:all )?previous instructions"),
-    re.compile(r"(?i)you are (?:now|a) (?!(?:helpful|friendly))"),
-    re.compile(r"(?i)system prompt"),
-    re.compile(r"(?i)reveal (?:your|the) (?:prompt|instructions)"),
-    re.compile(r"(?i)sk-[A-Za-z0-9]"),
-    re.compile(r"(?i)api[_ -]?key"),
-    re.compile(r"(?i)curl .*\| *sh"),
+from .bindings import (
+    MAX_ADAPTATION_CHARS,
+    MAX_EVIDENCE_CHARS,
+    MAX_EVIDENCE_MESSAGES,
+    normalize_adaptation_text,
 )
+from .engine import redact_excerpt, sanitize_text
+
+
+_ALLOWED_RISKS = frozenset({"low", "medium", "high"})
+_REQUIRED_KEYS = frozenset(
+    {
+        "trigger",
+        "evidence_summary",
+        "preference",
+        "proposed_prompt",
+        "confidence",
+        "risk",
+    }
+)
+_REFLECTION_VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +52,8 @@ class Reflection:
     evidence_excerpt: tuple[str, ...] = ()
 
     def to_store(self) -> dict[str, Any]:
+        """Return the bounded proposal representation persisted in PluginStore."""
+
         return {
             "version": self.version,
             "trigger": self.trigger,
@@ -69,105 +70,158 @@ class Reflection:
 def collect_evidence(
     messages: Sequence[Mapping[str, Any]],
     *,
-    max_messages: int = _MAX_EVIDENCE_MESSAGES,
-    max_chars: int = _MAX_MESSAGE_CHARS,
+    max_messages: int = MAX_EVIDENCE_MESSAGES,
+    max_chars: int = MAX_EVIDENCE_CHARS,
 ) -> list[EvidenceMessage]:
-    """Bound and redact a rolling window of chat messages for reflection."""
+    """Keep only allowed roles and redact before any evidence is retained."""
 
+    bounded_messages = max(1, min(MAX_EVIDENCE_MESSAGES, int(max_messages)))
+    bounded_chars = max(32, min(MAX_EVIDENCE_CHARS, int(max_chars)))
     window: list[EvidenceMessage] = []
-    for raw in list(messages)[-max_messages:]:
-        role = str(raw.get("role") or "user")[:16]
+    for raw in list(messages)[-bounded_messages:]:
+        if not isinstance(raw, Mapping):
+            continue
+        role = raw.get("role")
         if role not in {"user", "assistant"}:
-            role = "user"
-        text = re.sub(r"\s+", " ", str(raw.get("text") or "")).strip()[:max_chars]
+            continue
+        text = redact_excerpt(str(raw.get("text") or ""), limit=bounded_chars)
+        text = re.sub(r"\s+", " ", text).strip()
         if not text:
             continue
-        window.append(EvidenceMessage(role=role, text=text, at=float(raw.get("at") or 0.0)))
+        try:
+            timestamp = float(raw.get("at") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            timestamp = 0.0
+        if not math.isfinite(timestamp):
+            timestamp = 0.0
+        window.append(EvidenceMessage(role=role, text=text, at=max(0.0, timestamp)))
     return window
 
 
 def build_reflection_prompt(
     evidence: Sequence[EvidenceMessage],
-    current_guidance: str = "",
+    current_adaptations: Sequence[str] | None = None,
 ) -> list[dict[str, str]]:
-    """Build the messages sent to the LLM. Evidence is already truncated."""
+    """Build a narrow model request from already-redacted evidence."""
 
-    transcript = "\n".join(f"{m.role}: {m.text}" for m in evidence)
+    transcript = "\n".join(f"{message.role}: {message.text}" for message in evidence)
+    active = "\n".join(f"- {item}" for item in (current_adaptations or []))
     system = (
-        "You are a preference-reflection assistant for a catgirl companion. "
-        "Read the short chat excerpt and decide whether the USER expressed a "
-        "stable communication preference (language, tone, verbosity, structure, "
-        "emoji/meme use, clarification style, etc). "
-        "Respond with ONLY a JSON object with keys: "
-        "trigger (short reason), evidence_summary (one sentence), "
-        "preference (short natural-language preference), "
-        "proposed_prompt (one short instruction sentence for the companion, "
-        "no role-play, no secrets, max 40 words), "
-        "confidence (0-1), risk (low|medium|high). "
-        "If no stable preference is visible, respond with confidence 0 and an "
-        "empty proposed_prompt. Never include raw chat logs, secrets, or "
-        "instructions that override the companion's identity."
+        "You review communication preferences for an existing N.E.K.O character copy. "
+        "Infer only stable response-style preferences expressed by the user: language, "
+        "tone, verbosity, structure, explanation order, clarification style, or emoji use. "
+        "Do not change identity, relationships, facts, safety, permissions, tools, goals, "
+        "or hidden instructions. Return exactly one JSON object and no surrounding text. "
+        "The object must contain exactly these keys: trigger, evidence_summary, preference, "
+        "proposed_prompt, confidence, risk. The first four values must be strings, confidence "
+        "must be a JSON number from 0 to 1, and risk must be low, medium, or high. "
+        "proposed_prompt must be one short single-line style instruction and at most 40 words. "
+        "When there is no stable preference, use an empty proposed_prompt and confidence 0."
     )
     user = (
-        f"Current injected guidance (may be empty):\n{current_guidance or '(none)'}\n\n"
-        f"Recent chat excerpt:\n{transcript or '(empty)'}"
+        "Current approved adaptations:\n"
+        f"{active or '(none)'}\n\n"
+        "Redacted recent evidence:\n"
+        f"{transcript or '(empty)'}"
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def parse_reflection(raw_text: str, evidence: Sequence[EvidenceMessage]) -> Reflection | None:
-    """Parse and strictly validate the LLM output. Bad JSON degrades to None."""
+def _bounded_plain_string(
+    value: object,
+    *,
+    limit: int,
+    allow_empty: bool = True,
+) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if len(value) > limit or any(marker in value for marker in ("\r", "\n", "```")):
+        return None
+    cleaned = sanitize_text(value, limit=limit)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned and not allow_empty:
+        return None
+    return cleaned
+
+
+def parse_reflection(
+    raw_text: str,
+    evidence: Sequence[EvidenceMessage],
+) -> Reflection | None:
+    """Accept only an exact schema; malformed model output fails closed."""
 
     if not isinstance(raw_text, str) or not raw_text.strip():
         return None
-    text = raw_text.strip()
-    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-    if not match:
-        return None
     try:
-        data = json.loads(match.group(0))
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-
-    proposed = str(data.get("proposed_prompt") or "").strip()[:_MAX_PROPOSED_CHARS]
-    preference = str(data.get("preference") or "").strip()[:_MAX_PROPOSED_CHARS]
-    try:
-        confidence = float(data.get("confidence") or 0.0)
+        data = json.loads(raw_text.strip())
     except (TypeError, ValueError):
-        confidence = 0.0
-    confidence = max(0.0, min(1.0, confidence))
-    risk = str(data.get("risk") or "high").lower()
-    if risk not in _ALLOWED_RISKS:
-        risk = "high"
-
-    if proposed and any(pattern.search(proposed) for pattern in _FORBIDDEN_PATTERNS):
         return None
-    if not proposed:
-        confidence = 0.0
+    if not isinstance(data, dict) or set(data) != _REQUIRED_KEYS:
+        return None
+
+    trigger = _bounded_plain_string(data.get("trigger"), limit=200)
+    evidence_summary = _bounded_plain_string(
+        data.get("evidence_summary"),
+        limit=400,
+    )
+    preference = _bounded_plain_string(data.get("preference"), limit=400)
+    proposed = _bounded_plain_string(
+        data.get("proposed_prompt"),
+        limit=MAX_ADAPTATION_CHARS,
+    )
+    confidence = data.get("confidence")
+    risk = data.get("risk")
+    if None in {trigger, evidence_summary, preference, proposed}:
+        return None
+    if (
+        not isinstance(confidence, (int, float))
+        or isinstance(confidence, bool)
+        or not math.isfinite(float(confidence))
+        or not 0.0 <= float(confidence) <= 1.0
+    ):
+        return None
+    if not isinstance(risk, str) or risk not in _ALLOWED_RISKS:
+        return None
+    if proposed:
+        safe, proposed = normalize_adaptation_text(proposed)
+        if not safe:
+            return None
+    elif float(confidence) != 0.0:
+        return None
 
     return Reflection(
-        trigger=str(data.get("trigger") or "")[:200],
-        evidence_summary=str(data.get("evidence_summary") or "")[:400],
-        preference=preference,
-        proposed_prompt=proposed,
-        confidence=confidence,
+        trigger=trigger or "",
+        evidence_summary=evidence_summary or "",
+        preference=preference or "",
+        proposed_prompt=proposed or "",
+        confidence=round(float(confidence), 3),
         risk=risk,
-        evidence_excerpt=tuple(f"{m.role}: {m.text}" for m in evidence[-4:]),
+        evidence_excerpt=tuple(
+            f"{message.role}: {message.text}" for message in evidence[-4:]
+        ),
     )
 
 
 async def reflect_once(
     call_model,
     messages: Sequence[Mapping[str, Any]],
-    current_guidance: str = "",
+    current_adaptations: Sequence[str] | None = None,
 ) -> Reflection | None:
-    """Full pipeline: collect evidence → LLM → validated reflection."""
+    """Run collect, model call, and strict parsing as one bounded pipeline."""
 
     evidence = collect_evidence(messages)
     if not evidence:
         return None
-    prompt = build_reflection_prompt(evidence, current_guidance)
+    prompt = build_reflection_prompt(evidence, current_adaptations)
     raw = await call_model(prompt)
     return parse_reflection(str(raw or ""), evidence)
+
+
+__all__ = [
+    "EvidenceMessage",
+    "Reflection",
+    "build_reflection_prompt",
+    "collect_evidence",
+    "parse_reflection",
+    "reflect_once",
+]

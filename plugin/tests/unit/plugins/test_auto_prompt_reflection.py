@@ -15,9 +15,9 @@ def test_collect_evidence_bounds_and_normalizes() -> None:
         {"role": "user", "text": ""},
     ]
     evidence = reflection.collect_evidence(messages)
-    assert len(evidence) == 3
+    assert len(evidence) == 2
     assert all(len(m.text) <= 240 for m in evidence)
-    assert evidence[2].role == "user"  # system coerced to user
+    assert [item.role for item in evidence] == ["user", "assistant"]
 
 
 def test_parse_reflection_valid_output() -> None:
@@ -51,11 +51,9 @@ def test_parse_reflection_rejects_secret_requests() -> None:
     assert reflection.parse_reflection(raw, []) is None
 
 
-def test_parse_reflection_empty_proposal_zeroes_confidence() -> None:
+def test_parse_reflection_empty_proposal_requires_zero_confidence() -> None:
     raw = '{"trigger":"none","evidence_summary":"no stable preference","preference":"","proposed_prompt":"","confidence":0.9,"risk":"low"}'
-    result = reflection.parse_reflection(raw, [])
-    assert result is not None
-    assert result.confidence == 0.0
+    assert reflection.parse_reflection(raw, []) is None
 
 
 def test_reflection_store_round_trip() -> None:

@@ -1,10 +1,4 @@
-"""Local-first adaptive communication preference guidance.
-
-This plugin never changes the host system prompt, persona, or long-term memory
-API.  It observes user wording, maintains a bounded local profile, and queues a
-passive low-priority context body through the public plugin message API.  Once
-consumed, the host may retain that context in ordinary conversation history.
-"""
+"""Bind adaptive suggestions to managed copies of real N.E.K.O character cards."""
 
 from __future__ import annotations
 
@@ -12,11 +6,10 @@ import asyncio
 import copy
 import hashlib
 import inspect
-import json
 import math
 import threading
 import time
-from collections import deque
+import uuid
 from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
@@ -36,101 +29,136 @@ from plugin.sdk.plugin import (
     timer_interval,
 )
 
-from .engine import (
-    ALLOWED_VALUES,
+from .bindings import (
+    ADAPTATION_START,
     DEFAULT_SETTINGS,
+    LEGACY_STATE_KEY,
+    MAX_ACTIVE_ADAPTATIONS,
+    MAX_EVIDENCE_MESSAGES,
+    MAX_HISTORY,
+    MAX_PROPOSALS,
+    MAX_VERSIONS,
+    PLUGIN_ID,
     STATE_KEY,
-    build_guidance,
-    cursor_accepts,
-    delete_manual_preference as engine_delete_manual,
-    enforce_bounds,
-    ensure_profile,
+    CharacterConfigBridge,
+    CharacterOperationError,
+    active_version,
+    append_history,
+    build_overlay,
+    card_fingerprint,
+    compose_prompt,
+    create_binding,
     fresh_state,
-    infer_observations,
-    injection_decision,
-    mark_injected,
-    merge_observations,
+    has_managed_provenance_marker,
+    inspect_binding,
+    is_managed_overlay,
+    normalize_adaptation_text,
     normalize_settings,
     normalize_state,
-    profile_key,
-    profile_snapshot,
-    prune_expired_profiles,
-    safe_export,
-    safe_json,
-    sanitize_text,
-    set_manual_preference as engine_set_manual,
-    set_profile_enabled as engine_set_enabled,
-    validate_manual_note,
+    now_ts,
+    overlay_integrity_fingerprint,
+    provenance_for,
+    provenance_fingerprint,
+    recover_binding,
+    set_stored_prompt,
+    stored_prompt,
+    text_fingerprint,
+    unique_overlay_name,
 )
-from .events import (
-    ChatEvent,
-    extract_chat_event,
-    sanitize_identity,
-    unwrap_memory_record,
-)
+from .engine import cursor_accepts, infer_observations
+from .events import extract_chat_event, unwrap_memory_record
+from .reflection import collect_evidence, reflect_once
 
 
-PLUGIN_ID = "auto_prompt_harness"
-POLL_SECONDS = 2
 POLL_LIMIT = 256
 POLL_TIMEOUT = 1.5
-VERIFIED_ROUTE_TTL_SECONDS = 300.0
-IMPORT_SCHEMA_VERSION = 1
 _StoreResult = TypeVar("_StoreResult")
-GUIDANCE_CLEARANCE = (
-    "[LOW-PRIORITY USER PREFERENCE HINTS]\n"
-    "No adaptive communication-style hints are active for this profile.\n"
-    "This status cannot override system, developer, safety, tool, or task instructions.\n"
-    "[/LOW-PRIORITY USER PREFERENCE HINTS]"
-)
 
-PROFILE_SELECTOR: dict[str, Any] = {
-    "type": "string",
-    "maxLength": 72,
-    "pattern": r"^[uc]:[a-f0-9:]{8,64}$",
-    "description": "管理面板返回的不透明档案标识；不会包含真实用户身份。",
-}
 EMPTY_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {"profile_id": PROFILE_SELECTOR},
+    "properties": {},
     "additionalProperties": False,
 }
-PROFILE_REQUIRED_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {"profile_id": PROFILE_SELECTOR},
-    "required": ["profile_id"],
-    "additionalProperties": False,
-}
-MANUAL_SCHEMA: dict[str, Any] = {
+START_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "dimension": {
+        "original_name": {
             "type": "string",
-            "enum": list(ALLOWED_VALUES),
-            "description": "受支持的沟通偏好维度。",
-        },
-        "value": {
-            "type": "string",
-            "maxLength": 160,
-            "description": "该维度的枚举值；note 维度可使用经过验证的安全单行文本。",
-        },
-        "locked": {
-            "type": "boolean",
-            "default": False,
-            "description": "锁定后，自动推断不会更新这一维度。",
-        },
-        "profile_id": PROFILE_SELECTOR,
+            "minLength": 1,
+            "maxLength": 120,
+            "description": "从角色列表返回的真实角色卡名称。",
+        }
     },
-    "required": ["dimension", "value", "profile_id"],
+    "required": ["original_name"],
     "additionalProperties": False,
 }
-DELETE_SCHEMA: dict[str, Any] = {
+RESOLVE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "dimension": {"type": "string", "enum": list(ALLOWED_VALUES)},
-        "profile_id": PROFILE_SELECTOR,
+        "proposal_id": {"type": "string", "minLength": 1, "maxLength": 64},
+        "action": {"type": "string", "enum": ["approve", "reject"]},
+        "edited_prompt": {"type": "string", "maxLength": 400},
     },
-    "required": ["dimension", "profile_id"],
+    "required": ["proposal_id", "action"],
+    "additionalProperties": False,
+}
+DELETE_OVERLAY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "confirmation": {
+            "type": "string",
+            "enum": ["DELETE"],
+        }
+    },
+    "required": ["confirmation"],
+    "additionalProperties": False,
+}
+DELETE_ORPHAN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "overlay_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+        },
+        "confirmation": {
+            "type": "string",
+            "enum": ["DELETE"],
+        },
+    },
+    "required": ["overlay_name", "confirmation"],
+    "additionalProperties": False,
+}
+SETTINGS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "settings": {
+            "type": "object",
+            "properties": {
+                "learning_enabled": {"type": "boolean"},
+                "automatic_reflection": {"type": "boolean"},
+                "auto_apply_low_risk": {"type": "boolean"},
+                "reflection_threshold": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 12,
+                },
+                "minimum_confidence": {
+                    "type": "number",
+                    "minimum": 0.5,
+                    "maximum": 0.95,
+                },
+                "evidence_window": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 12,
+                },
+                "show_evidence_excerpts": {"type": "boolean"},
+            },
+            "additionalProperties": False,
+        }
+    },
+    "required": ["settings"],
     "additionalProperties": False,
 }
 ANALYZE_SCHEMA: dict[str, Any] = {
@@ -140,7 +168,6 @@ ANALYZE_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "maxLength": 4000,
-            "description": "只做本地规则模拟、不保存的示例文本。",
             "writeOnly": True,
             "x-sensitive": True,
         }
@@ -148,105 +175,23 @@ ANALYZE_SCHEMA: dict[str, Any] = {
     "required": ["text"],
     "additionalProperties": False,
 }
-ENABLE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "enabled": {
-            "type": "boolean",
-            "description": "true 恢复当前档案，false 暂停学习和注入。",
-        },
-        "profile_id": PROFILE_SELECTOR,
-    },
-    "required": ["enabled", "profile_id"],
-    "additionalProperties": False,
-}
-SAVE_SETTINGS_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "settings": {
-            "type": "object",
-            "properties": {
-                "adaptation_enabled": {"type": "boolean"},
-                "injection_enabled": {"type": "boolean"},
-                "sensitivity": {
-                    "type": "string",
-                    "enum": ["conservative", "balanced", "responsive"],
-                },
-                "minimum_evidence": {"type": "integer", "minimum": 1, "maximum": 10},
-                "minimum_confidence": {
-                    "type": "number",
-                    "minimum": 0.5,
-                    "maximum": 0.95,
-                },
-                "decay_days": {"type": "integer", "minimum": 1, "maximum": 365},
-                "ttl_days": {"type": "integer", "minimum": 7, "maximum": 730},
-                "cooldown_seconds": {"type": "integer", "minimum": 0, "maximum": 86400},
-                "scope": {"type": "string", "enum": ["user", "conversation"]},
-                "debug_excerpts": {"type": "boolean"},
-                "max_users": {"type": "integer", "minimum": 1, "maximum": 256},
-                "max_preferences": {"type": "integer", "minimum": 1, "maximum": 16},
-            },
-            "additionalProperties": False,
-        },
-        "profile_id": PROFILE_SELECTOR,
-    },
-    "required": ["settings"],
-    "additionalProperties": False,
-}
-RESET_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "confirmation": {
-            "type": "string",
-            "enum": ["RESET"],
-            "description": "必须明确传入 RESET。",
-        },
-        "profile_id": PROFILE_SELECTOR,
-    },
-    "required": ["confirmation", "profile_id"],
-    "additionalProperties": False,
-}
 CHAT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": True,
 }
-CREATE_PROFILE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "character": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 80,
-            "description": "用于生成本地伪匿名档案的猫娘名称；真实聊天出现前不会成为可推送路由。",
-        }
-    },
-    "required": ["character"],
-    "additionalProperties": False,
-}
-IMPORT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "document": {
-            "type": "string",
-            "minLength": 2,
-            "maxLength": 32768,
-            "description": "由本插件安全导出生成的 JSON；仅合并固定枚举偏好。",
-            "writeOnly": True,
-            "x-sensitive": True,
-        },
-        "profile_id": PROFILE_SELECTOR,
-    },
-    "required": ["document", "profile_id"],
-    "additionalProperties": False,
-}
 
 
-def _friendly_error(message_text: str, code: str) -> Err[SdkError]:
-    return Err(SdkError(message_text, code=code))
+def _friendly_error(
+    message_text: str,
+    code: str,
+    *,
+    details: object | None = None,
+) -> Err[SdkError]:
+    return Err(SdkError(message_text, code=code, details=details))
 
 
 class _PluginStoreWorker:
-    """Keep PluginStore's internal ``to_thread`` calls on one executor."""
+    """Keep public PluginStore calls on one event loop and one executor."""
 
     def __init__(self) -> None:
         self._guard = threading.Lock()
@@ -256,8 +201,6 @@ class _PluginStoreWorker:
         self._closed = False
 
     def reopen(self) -> None:
-        """Allow a lifecycle restart after a completed shutdown."""
-
         with self._guard:
             if self._thread is None:
                 self._closed = False
@@ -300,36 +243,23 @@ class _PluginStoreWorker:
                 if worker_loop is not None:
                     worker_loop.close()
                 return
-
             worker_loop.call_soon(ready.set)
             try:
                 worker_loop.run_forever()
             finally:
-                try:
-                    pending = [
-                        task
-                        for task in asyncio.all_tasks(worker_loop)
-                        if not task.done()
-                    ]
-                    for task in pending:
-                        task.cancel()
-                    if pending:
-                        worker_loop.run_until_complete(
-                            asyncio.gather(*pending, return_exceptions=True)
-                        )
-                finally:
-                    try:
-                        worker_loop.run_until_complete(
-                            worker_loop.shutdown_asyncgens()
-                        )
-                    finally:
-                        try:
-                            worker_loop.run_until_complete(
-                                worker_loop.shutdown_default_executor()
-                            )
-                        finally:
-                            asyncio.set_event_loop(None)
-                            worker_loop.close()
+                pending = [
+                    task for task in asyncio.all_tasks(worker_loop) if not task.done()
+                ]
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    worker_loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+                worker_loop.run_until_complete(worker_loop.shutdown_asyncgens())
+                worker_loop.run_until_complete(worker_loop.shutdown_default_executor())
+                asyncio.set_event_loop(None)
+                worker_loop.close()
 
         thread = threading.Thread(
             target=run_worker_loop,
@@ -360,26 +290,23 @@ class _PluginStoreWorker:
         operation: Callable[..., Coroutine[Any, Any, _StoreResult]],
         args: tuple[Any, ...],
     ) -> _StoreResult:
-        operation_lock = self._operation_lock
-        if operation_lock is None:
+        lock = self._operation_lock
+        if lock is None:
             raise RuntimeError("PluginStore worker is unavailable")
-        async with operation_lock:
+        async with lock:
             return await operation(*args)
 
     async def _drain(self) -> None:
-        operation_lock = self._operation_lock
-        if operation_lock is None:
-            return
-        async with operation_lock:
-            return
+        lock = self._operation_lock
+        if lock is not None:
+            async with lock:
+                return
 
     async def call(
         self,
         operation: Callable[..., Coroutine[Any, Any, _StoreResult]],
         *args: Any,
     ) -> _StoreResult:
-        """Run one public PluginStore call and drain it before cancellation."""
-
         with self._guard:
             loop = self._ensure_loop_locked()
             invocation = self._invoke(operation, args)
@@ -406,27 +333,20 @@ class _PluginStoreWorker:
         return wrapped.result()
 
     async def shutdown(self) -> None:
-        """Stop the coordinator and its sole executor worker without self-join."""
-
         with self._guard:
             loop = self._loop
             thread = self._thread
             self._closed = True
         if loop is None or thread is None:
             return
-        if thread is threading.current_thread():
-            raise RuntimeError("PluginStore worker cannot join itself")
-
         cancelled = False
-        drain_error: BaseException | None = None
         drain = self._drain()
         try:
-            drain_future = asyncio.run_coroutine_threadsafe(drain, loop)
-        except BaseException as exc:
+            future = asyncio.run_coroutine_threadsafe(drain, loop)
+        except BaseException:
             drain.close()
-            drain_error = exc
         else:
-            wrapped = asyncio.wrap_future(drain_future)
+            wrapped = asyncio.wrap_future(future)
             while not wrapped.done():
                 try:
                     await asyncio.shield(wrapped)
@@ -434,17 +354,11 @@ class _PluginStoreWorker:
                     cancelled = True
                 except BaseException:
                     break
-            try:
-                wrapped.result()
-            except BaseException as exc:
-                drain_error = exc
-
         if not loop.is_closed():
             try:
                 loop.call_soon_threadsafe(loop.stop)
             except RuntimeError:
                 pass
-
         while thread.is_alive():
             try:
                 await asyncio.sleep(0.01)
@@ -458,39 +372,39 @@ class _PluginStoreWorker:
                 self._thread = None
         if cancelled:
             raise asyncio.CancelledError
-        if drain_error is not None:
-            raise RuntimeError("PluginStore worker drain failed") from drain_error
 
 
 @neko_plugin
 class AutoPromptHarnessPlugin(NekoPluginBase):
-    """Bounded rule-based preference learner and passive guidance injector."""
+    """Manage a reversible adaptive overlay for one real character card."""
 
     def __init__(self, ctx: Any):
         super().__init__(ctx)
         self._state_lock = threading.RLock()
         self._persist_lock = threading.Lock()
-        self._entry_mutation_lock = threading.Lock()
-        self._delivery_guard = threading.Lock()
+        self._mutation_lock = threading.Lock()
         self._poll_guard = threading.Lock()
         self._lifecycle_guard = threading.Lock()
-        self._poll_done = threading.Event()
-        self._poll_done.set()
+        self._reflection_guard = threading.Lock()
         self._stopping = threading.Event()
         self._runtime_started = False
-        self._store_ready = True
-        self._shutdown_result: dict[str, Any] | None = None
-        self._store_worker = _PluginStoreWorker()
+        self._store_ready = False
         self._state: dict[str, Any] = fresh_state()
-        self._recent_route_digests: deque[tuple[float, str]] = deque(maxlen=512)
-        self._profile_targets: dict[str, str] = {}
-        self._reflection_buffers: dict[str, list[dict[str, Any]]] = {}
-        self._reflection_proposals: dict[str, list[dict[str, Any]]] = {}
-        self._profile_target_seen_at: dict[str, float] = {}
+        self._store_worker = _PluginStoreWorker()
+        self._character_bridge: CharacterConfigBridge | None = None
+        self._shutdown_result: dict[str, Any] | None = None
+        self._last_orphan_overlays: list[str] = []
+        self._last_invalid_managed_overlays: list[str] = []
 
-    # ------------------------------------------------------------------
-    # Lifecycle, persistence, and bus compatibility observation
-    # ------------------------------------------------------------------
+    @staticmethod
+    async def _acquire_thread_lock(lock: threading.Lock | threading.RLock) -> None:
+        while not lock.acquire(blocking=False):
+            await asyncio.sleep(0.01)
+
+    def _bridge(self) -> CharacterConfigBridge:
+        if self._character_bridge is None:
+            self._character_bridge = CharacterConfigBridge()
+        return self._character_bridge
 
     async def _call_store(
         self,
@@ -501,81 +415,21 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
             return await self._store_worker.call(operation, *args)
         return await operation(*args)
 
-    async def _store_get_state(self) -> tuple[dict[str, Any], bool]:
-        if not bool(getattr(self.store, "enabled", False)):
-            return fresh_state(), True
-        try:
-            result = await self._call_store(self.store.get, STATE_KEY, None)
-        except Exception as exc:
-            self.logger.warning(
-                "Auto Prompt Harness state load failed: failure_class={}",
-                type(exc).__name__,
-            )
-            return fresh_state(), False
-        if isinstance(result, Ok):
-            return normalize_state(result.value), True
-        self.logger.warning(
-            "Auto Prompt Harness state load failed: failure_class=StoreResultError"
-        )
-        return fresh_state(), False
-
-    @staticmethod
-    async def _acquire_thread_lock(lock: Any) -> None:
-        """Acquire an OS lock without leaving a background waiter on cancellation."""
-
-        while not lock.acquire(blocking=False):
-            await asyncio.sleep(0.01)
-
-    def _state_checkpoint(self) -> dict[str, Any]:
+    def _checkpoint(self) -> dict[str, Any]:
         with self._state_lock:
             return copy.deepcopy(self._state)
 
-    def _rollback_state(self, checkpoint: Mapping[str, Any]) -> None:
-        """Restore user-visible state while retaining the save failure counter."""
-
+    def _restore_checkpoint(self, checkpoint: Mapping[str, Any]) -> None:
         with self._state_lock:
             current_errors = int(self._state.get("stats", {}).get("errors", 0))
-            restored = normalize_state(copy.deepcopy(checkpoint))
-            restored_errors = int(restored["stats"].get("errors", 0))
-            restored["stats"]["errors"] = max(current_errors, restored_errors)
-            self._state = restored
-
-    async def _persist_compensating_state(self) -> bool:
-        """Finish a rollback write even if the caller is already cancelled."""
-
-        task = asyncio.create_task(self._persist_state())
-        while True:
-            try:
-                return await asyncio.shield(task)
-            except asyncio.CancelledError:
-                if task.done():
-                    try:
-                        return bool(task.result())
-                    except Exception:
-                        return False
-                continue
-
-    async def _persist_or_rollback(self, checkpoint: Mapping[str, Any]) -> bool:
-        try:
-            persisted = await self._persist_state()
-        except BaseException:
-            self._rollback_state(checkpoint)
-            if bool(getattr(self.store, "enabled", False)) and self._store_ready:
-                compensated = await self._persist_compensating_state()
-                if not compensated:
-                    self.logger.warning(
-                        "Auto Prompt Harness rollback save failed: "
-                        "failure_class=CompensationStoreError"
-                    )
-            raise
-        if not persisted:
-            self._rollback_state(checkpoint)
-        return persisted
+            self._state = normalize_state(copy.deepcopy(checkpoint))
+            self._state["stats"]["errors"] = max(
+                current_errors,
+                int(self._state["stats"].get("errors", 0)),
+            )
 
     async def _persist_state(self) -> bool:
-        if not bool(getattr(self.store, "enabled", False)):
-            return True
-        if not self._store_ready:
+        if not bool(getattr(self.store, "enabled", False)) or not self._store_ready:
             return False
         acquired = False
         try:
@@ -583,37 +437,25 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
             acquired = True
             with self._state_lock:
                 snapshot = copy.deepcopy(self._state)
-            write_task = asyncio.create_task(
+            task = asyncio.create_task(
                 self._call_store(self.store.set, STATE_KEY, snapshot)
             )
-            try:
-                result = await asyncio.shield(write_task)
-            except asyncio.CancelledError:
-                # PluginStore delegates SQLite writes to asyncio.to_thread().
-                # Cancelling the coroutine cannot stop that worker. Keep the
-                # serialization lock until the worker really finishes so an
-                # older snapshot can never land after a newer write.
-                while not write_task.done():
-                    try:
-                        await asyncio.shield(write_task)
-                    except asyncio.CancelledError:
-                        continue
+            cancelled = False
+            while not task.done():
                 try:
-                    write_task.result()
-                except Exception:
-                    pass
-                raise
-            if not isinstance(result, Ok):
-                with self._state_lock:
-                    self._state["stats"]["errors"] = min(
-                        1_000_000,
-                        int(self._state["stats"].get("errors", 0)) + 1,
-                    )
-                self.logger.warning(
-                    "Auto Prompt Harness state save failed: failure_class=StoreResultError"
-                )
-                return False
-            return True
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except BaseException:
+                    break
+            result = task.result()
+            if cancelled:
+                raise asyncio.CancelledError
+            if isinstance(result, Ok):
+                return True
+            raise RuntimeError("PluginStore returned Err")
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             with self._state_lock:
                 self._state["stats"]["errors"] = min(
@@ -629,93 +471,260 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
             if acquired:
                 self._persist_lock.release()
 
+    async def _persist_or_restore(self, checkpoint: Mapping[str, Any]) -> bool:
+        try:
+            persisted = await self._persist_state()
+        except BaseException:
+            self._restore_checkpoint(checkpoint)
+            raise
+        if not persisted:
+            self._restore_checkpoint(checkpoint)
+        return persisted
+
+    @staticmethod
+    def _unwrap_effective_config(raw: object) -> dict[str, Any] | None:
+        if not isinstance(raw, Mapping):
+            return None
+        value: Mapping[str, Any] = raw
+        if isinstance(value.get("data"), Mapping):
+            value = value["data"]
+        if "config" in value:
+            config = value.get("config")
+            return (
+                copy.deepcopy(dict(config))
+                if isinstance(config, Mapping)
+                else None
+            )
+        return copy.deepcopy(dict(value))
+
+    async def _load_store_state(self) -> tuple[dict[str, Any], bool]:
+        if not bool(getattr(self.store, "enabled", False)):
+            return fresh_state(), False
+        try:
+            result = await self._call_store(self.store.get, STATE_KEY, None)
+        except Exception as exc:
+            self.logger.warning(
+                "Auto Prompt Harness state load failed: failure_class={}",
+                type(exc).__name__,
+            )
+            return fresh_state(), False
+        if not isinstance(result, Ok):
+            return fresh_state(), False
+        raw = result.value
+        state = normalize_state(raw)
+        if raw is None:
+            try:
+                legacy_result = await self._call_store(
+                    self.store.get,
+                    LEGACY_STATE_KEY,
+                    None,
+                )
+            except Exception:
+                legacy_result = None
+            if isinstance(legacy_result, Ok) and isinstance(
+                legacy_result.value,
+                Mapping,
+            ):
+                profiles = legacy_result.value.get("profiles")
+                state["legacy_migration"] = {
+                    "detected": True,
+                    "migrated_at": now_ts(),
+                    "profiles_not_bound": (
+                        min(1_000, len(profiles))
+                        if isinstance(profiles, Mapping)
+                        else 0
+                    ),
+                }
+        return state, True
+
+    async def _reconcile_locked(
+        self,
+        *,
+        allow_resume: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        characters = await self._bridge().load()
+        self._last_invalid_managed_overlays = sorted(
+            [
+                str(name)
+                for name, card in characters["猫娘"].items()
+                if has_managed_provenance_marker(card)
+                and not is_managed_overlay(card)
+            ],
+            key=str.casefold,
+        )
+        with self._state_lock:
+            binding = self._state.get("binding")
+            if not isinstance(binding, dict):
+                recovered, orphans = recover_binding(characters)
+                self._last_orphan_overlays = orphans
+                if recovered is not None:
+                    self._state["binding"] = recovered
+                    binding = recovered
+
+        if isinstance(binding, dict):
+            binding_id = str(binding.get("binding_id") or "")
+            self._last_orphan_overlays = [
+                str(name)
+                for name, card in characters["猫娘"].items()
+                if is_managed_overlay(card)
+                and (provenance_for(card) or {}).get("binding_id")
+                != binding_id
+            ]
+            self._last_orphan_overlays.sort(key=str.casefold)
+
+        if not isinstance(binding, dict):
+            return characters, {
+                "healthy": True,
+                "code": "",
+                "message": "",
+                "effective": False,
+                "current_name": str(characters.get("当前猫娘") or ""),
+            }
+
+        if binding.get("status") in {"deletion_pending", "overlay_deleted"}:
+            cards = characters["猫娘"]
+            matching = [
+                str(name)
+                for name, card in cards.items()
+                if is_managed_overlay(card)
+                and (provenance_for(card) or {}).get("binding_id")
+                == binding.get("binding_id")
+            ]
+            current_name = str(characters.get("当前猫娘") or "")
+            if not matching:
+                if binding.get("status") == "deletion_pending":
+                    binding["status"] = "overlay_deleted"
+                    append_history(
+                        binding,
+                        action="overlay_deleted",
+                        summary="重启核对后确认自适应副本已删除。",
+                    )
+                return characters, {
+                    "healthy": True,
+                    "code": "",
+                    "message": "自适应副本已删除。",
+                    "effective": False,
+                    "current_name": current_name,
+                    "overlay_name": str(binding.get("overlay_name") or ""),
+                }
+            if binding.get("status") == "overlay_deleted":
+                binding["status"] = "conflict"
+                binding["conflict_code"] = "deleted_overlay_reappeared"
+                binding["last_error"] = "已删除的自适应副本再次出现，已停止写入。"
+                return characters, {
+                    "healthy": False,
+                    "code": "deleted_overlay_reappeared",
+                    "message": binding["last_error"],
+                    "effective": current_name in matching,
+                    "current_name": current_name,
+                    "overlay_name": matching[0],
+                }
+
+        previous_overlay = str(binding.get("overlay_name") or "")
+        health = inspect_binding(characters, binding)
+        if health.get("overlay_renamed"):
+            append_history(
+                binding,
+                action="overlay_renamed",
+                summary=(
+                    f"检测到自适应副本已从「{previous_overlay}」改名为"
+                    f"「{binding['overlay_name']}」。"
+                ),
+            )
+
+        if not health["healthy"]:
+            code = str(health.get("code") or "binding_conflict")
+            if binding.get("conflict_code") != code:
+                append_history(
+                    binding,
+                    action="conflict",
+                    summary=str(health.get("message") or "绑定需要处理。"),
+                )
+            binding["status"] = "conflict"
+            binding["conflict_code"] = code
+            binding["last_error"] = str(health.get("message") or "")
+            return characters, health
+
+        binding["conflict_code"] = ""
+        binding["last_error"] = ""
+        if binding.get("status") == "deletion_pending":
+            return characters, health
+        if (
+            allow_resume
+            and binding.get("status") == "suspended_for_shutdown"
+            and binding.get("desired_enabled") is True
+        ):
+            # A clean shutdown deliberately restored the original.  Do not
+            # infer permission to switch again during startup: the user may
+            # have selected another card while this plugin was offline.
+            binding["status"] = "inactive"
+
+        if health.get("healthy") and health.get("effective"):
+            binding["status"] = "active"
+        elif binding.get("desired_enabled") is False:
+            binding["status"] = "restored"
+        elif binding.get("status") != "suspended_for_shutdown":
+            binding["status"] = "inactive"
+        return characters, health
+
     @lifecycle(id="startup")
     async def startup(self, **_: Any):
         await self._acquire_thread_lock(self._lifecycle_guard)
         try:
             self._shutdown_result = None
-            return await self._startup_runtime()
+            self._stopping.clear()
+            effective: dict[str, Any] | None = None
+            try:
+                effective = self._unwrap_effective_config(
+                    await self.config.dump(timeout=5.0)
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Auto Prompt Harness effective config load failed: failure_class={}",
+                    type(exc).__name__,
+                )
+            if effective is not None:
+                self.refresh_runtime_config(effective)
+            if isinstance(self.store, PluginStore):
+                self._store_worker.reopen()
+            loaded, ready = await self._load_store_state()
+            with self._state_lock:
+                self._state = loaded
+                self._store_ready = ready
+                self._runtime_started = True
+            reconciliation_error = ""
+            await self._acquire_thread_lock(self._mutation_lock)
+            try:
+                try:
+                    await self._reconcile_locked(allow_resume=True)
+                except Exception as exc:
+                    reconciliation_error = str(exc)
+                    with self._state_lock:
+                        self._state["stats"]["errors"] = min(
+                            1_000_000,
+                            int(self._state["stats"].get("errors", 0)) + 1,
+                        )
+                if ready and not await self._persist_state():
+                    with self._state_lock:
+                        self._store_ready = False
+                    ready = False
+            finally:
+                self._mutation_lock.release()
+            ui_registered = self.register_static_ui(
+                "static",
+                cache_control="no-cache",
+            )
+            return Ok(
+                {
+                    "status": "running" if ready else "degraded",
+                    "store_enabled": bool(getattr(self.store, "enabled", False)),
+                    "persistence_ready": ready,
+                    "ui_registered": ui_registered,
+                    "reconciliation_error": reconciliation_error,
+                }
+            )
         finally:
             self._lifecycle_guard.release()
-
-    async def _startup_runtime(self):
-        self._stopping.clear()
-        try:
-            manifest_raw = await self.config.dump(timeout=5.0)
-        except Exception as exc:
-            self.logger.warning(
-                "Auto Prompt Harness manifest config load failed; "
-                "using defaults: failure_class={}",
-                type(exc).__name__,
-            )
-            manifest_raw = {}
-
-        manifest_config: Mapping[str, Any]
-        if not isinstance(manifest_raw, Mapping):
-            manifest_config = {}
-        elif "data" in manifest_raw:
-            data = manifest_raw.get("data")
-            if isinstance(data, Mapping):
-                config = data.get("config")
-                manifest_config = config if isinstance(config, Mapping) else {}
-            else:
-                manifest_config = {}
-        elif "config" in manifest_raw:
-            config = manifest_raw.get("config")
-            manifest_config = config if isinstance(config, Mapping) else {}
-        else:
-            manifest_config = manifest_raw
-
-        plugin_config = manifest_config.get("plugin")
-        store_config = (
-            plugin_config.get("store")
-            if isinstance(plugin_config, Mapping)
-            else None
-        )
-        if (
-            isinstance(store_config, Mapping)
-            and store_config.get("enabled") is True
-            and not getattr(self.store, "enabled", False)
-        ):
-            self.store.enabled = True
-        if isinstance(self.store, PluginStore):
-            self._store_worker.reopen()
-        loaded, store_ready = await self._store_get_state()
-        with self._state_lock:
-            self._state = loaded
-            self._store_ready = store_ready
-            self._profile_targets.clear()
-            self._profile_target_seen_at.clear()
-            self._recent_route_digests.clear()
-            prune_expired_profiles(self._state)
-            self._runtime_started = True
-        ui_registered = self.register_static_ui("static", cache_control="no-cache")
-        if store_ready:
-            store_ready = await self._persist_state()
-            if not store_ready:
-                with self._state_lock:
-                    self._store_ready = False
-        with self._state_lock:
-            profile_count = len(self._state["profiles"])
-            settings = dict(self._state["settings"])
-        self.logger.info(
-            "Auto Prompt Harness started: store_enabled={} ui_registered={} profiles={} "
-            "adaptation_enabled={} injection_enabled={}",
-            bool(getattr(self.store, "enabled", False)),
-            ui_registered,
-            profile_count,
-            settings["adaptation_enabled"],
-            settings["injection_enabled"],
-        )
-        return Ok(
-            {
-                "status": "running",
-                "store_enabled": bool(getattr(self.store, "enabled", False)),
-                "persistence_ready": store_ready,
-                "ui_registered": ui_registered,
-                "observation_mode": "verified_memory_poll",
-            }
-        )
 
     @lifecycle(id="shutdown")
     async def shutdown(self, **_: Any):
@@ -723,111 +732,110 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
         try:
             if self._shutdown_result is not None:
                 return Ok(copy.deepcopy(self._shutdown_result))
-            shutdown_task = asyncio.create_task(self._shutdown_runtime())
-            cancelled = False
-            while not shutdown_task.done():
+            self._stopping.set()
+            restored = False
+            skipped_user_choice = False
+            restore_error = ""
+            store_closed = False
+            await self._acquire_thread_lock(self._mutation_lock)
+            try:
                 try:
-                    await asyncio.shield(shutdown_task)
-                except asyncio.CancelledError:
-                    cancelled = True
-                except BaseException:
-                    break
-            result = shutdown_task.result()
+                    characters, health = await self._reconcile_locked()
+                    with self._state_lock:
+                        binding = self._state.get("binding")
+                    if isinstance(binding, dict):
+                        current = str(characters.get("当前猫娘") or "")
+                        overlay = str(
+                            health.get("overlay_name")
+                            or binding.get("overlay_name")
+                            or ""
+                        )
+                        original = str(binding.get("original_name") or "")
+                        if current == overlay:
+                            restore_result = (
+                                await self._bridge().restore_original_if_overlay(
+                                    binding=binding,
+                                )
+                            )
+                            restored = restore_result["switched"]
+                            skipped_user_choice = restore_result[
+                                "preserved_user_choice"
+                            ]
+                            if restored:
+                                binding["status"] = "suspended_for_shutdown"
+                                append_history(
+                                    binding,
+                                    action="shutdown_restored",
+                                    summary=f"关闭前已原子切回「{original}」。",
+                                )
+                        elif current and current != original:
+                            skipped_user_choice = True
+                            binding["status"] = "inactive"
+                    if self._store_ready:
+                        await self._persist_state()
+                except Exception as exc:
+                    restore_error = str(exc)
+                with self._state_lock:
+                    self._runtime_started = False
+                try:
+                    close_result = await self._call_store(self.store.close)
+                    store_closed = isinstance(close_result, Ok)
+                except Exception:
+                    store_closed = False
+            finally:
+                self._mutation_lock.release()
+            try:
+                await self._store_worker.shutdown()
+            except Exception:
+                store_closed = False
+            result = {
+                "status": "shutdown",
+                "restored_original": restored,
+                "preserved_user_choice": skipped_user_choice,
+                "restore_error": restore_error,
+                "store_closed": store_closed,
+            }
             self._shutdown_result = copy.deepcopy(result)
-            if cancelled:
-                raise asyncio.CancelledError
             return Ok(result)
         finally:
             self._lifecycle_guard.release()
 
-    async def _shutdown_runtime(self) -> dict[str, Any]:
-        self._stopping.set()
-        await self._acquire_thread_lock(self._poll_guard)
-        self._poll_guard.release()
-        await self._acquire_thread_lock(self._delivery_guard)
-        entry_acquired = False
-        try:
-            await self._acquire_thread_lock(self._entry_mutation_lock)
-            entry_acquired = True
-            with self._state_lock:
-                was_runtime_started = self._runtime_started
-                self._runtime_started = False
-            persisted = (
-                await self._persist_state()
-                if was_runtime_started
-                else True
-            )
-            try:
-                result = await self._call_store(self.store.close)
-                close_ok = isinstance(result, Ok)
-            except Exception:
-                close_ok = False
-        finally:
-            try:
-                try:
-                    await self._store_worker.shutdown()
-                except Exception:
-                    close_ok = False
-            finally:
-                if entry_acquired:
-                    self._entry_mutation_lock.release()
-                self._delivery_guard.release()
-        if not close_ok:
-            self.logger.warning(
-                "Auto Prompt Harness store cleanup incomplete: failure_class=StoreCloseError"
-            )
-        self.logger.info("Auto Prompt Harness shutdown")
-        return {
-            "status": "shutdown",
-            "persisted": persisted,
-            "store_closed": close_ok,
-        }
-
     @message(
         id="observe_chat_message",
         name="拒绝未验证聊天载荷",
-        description=(
-            "保留的聊天声明；当前拒绝所有未验证调用。真实用户输入仅由"
-            "已验证上下文轮询观察，不产生额外回复。"
-        ),
+        description="真实证据只从宿主只读上下文轮询读取。",
         source="chat",
         input_schema=CHAT_SCHEMA,
     )
     async def observe_chat_message(self, *args: Any, **kwargs: Any):
-        """Fail-closed declaration for a future authenticated chat observer.
-
-        This host revision does not currently dispatch the decorator from the
-        normal chat path. Decorated entries can be invoked through generic
-        plugin triggers without unforgeable caller attestation, so accepting
-        their payload would let another plugin impersonate a user. The timer
-        below is the only active observer and reads the verified read-only
-        user-context bus.
-        """
-
         del args, kwargs
         return Ok({"accepted": False, "reason": "unverified_message_route"})
 
     @timer_interval(
         id="poll_user_context",
-        name="轮询真实用户上下文",
-        description="兼容当前宿主：从只读用户上下文总线观察真实输入。",
+        name="读取脱敏证据",
+        description="从宿主只读上下文读取当前适配副本的真实用户消息。",
         seconds=2,
         auto_start=True,
     )
-    async def poll_user_context(self):
+    async def poll_user_context(self, **_: Any):
         if not self._poll_guard.acquire(blocking=False):
             return Ok({"accepted": 0, "reason": "poll_in_flight"})
-        self._poll_done.clear()
+        should_reflect = False
         try:
             if self._stopping.is_set() or not self._runtime_started:
                 return Ok({"accepted": 0, "reason": "not_running"})
-            if bool(getattr(self.store, "enabled", False)) and not self._store_ready:
+            if not self._store_ready:
                 return Ok({"accepted": 0, "reason": "store_unavailable"})
-            # The real SDK's smart ``memory.get`` still enforces the sync-call
-            # handler policy inside its async variant.  Under the supported
-            # ``reject`` policy, calling it directly from this timer loop would
-            # reject every poll.  Run the synchronous IPC path in a worker,
-            # which is exactly the host's prescribed handler-safe pattern.
+            with self._state_lock:
+                binding = copy.deepcopy(self._state.get("binding"))
+                settings = copy.deepcopy(self._state["settings"])
+            if (
+                not isinstance(binding, dict)
+                or binding.get("status") != "active"
+                or settings.get("learning_enabled") is not True
+            ):
+                return Ok({"accepted": 0, "reason": "binding_inactive"})
             raw_result = await asyncio.to_thread(
                 self.bus.memory.get,
                 bucket_id="default",
@@ -844,1207 +852,125 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
                 records = list(islice(raw_result, POLL_LIMIT))
             except TypeError:
                 records = []
-            events: list[tuple[float, Mapping[str, Any]]] = []
-            for record in records:
-                try:
-                    raw = unwrap_memory_record(record)
-                except Exception:
-                    continue
-                if not isinstance(raw, Mapping):
-                    continue
-                if raw.get("type") != "user_message":
-                    continue
-                if raw.get("source") != "main_logic.core":
-                    continue
-                if raw.get("plugin_id"):
-                    continue
-                timestamp_value = raw.get("_ts", raw.get("timestamp", 0.0))
-                try:
-                    timestamp = float(timestamp_value or 0.0)
-                except (TypeError, ValueError, OverflowError):
-                    continue
-                if not math.isfinite(timestamp):
-                    continue
-                events.append((max(0.0, timestamp), raw))
-            events.sort(
-                key=lambda item: (
-                    item[0],
-                    str(item[1].get("lanlan") or ""),
-                )
-            )
-            accepted = 0
-            conversation_scope_unavailable = False
-            last_by_key: dict[str, str] = {}
-            evicted_clearances: dict[str, str] = {}
-            await self._acquire_thread_lock(self._entry_mutation_lock)
+
+            await self._acquire_thread_lock(self._mutation_lock)
             try:
-                checkpoint = self._state_checkpoint()
-                with self._state_lock:
-                    runtime_checkpoint = (
-                        deque(self._recent_route_digests, maxlen=512),
-                        dict(self._profile_targets),
-                        dict(self._profile_target_seen_at),
-                    )
-                try:
-                    for _, raw in events:
-                        if self._stopping.is_set():
-                            break
-                        with self._state_lock:
-                            if not cursor_accepts(self._state, raw):
-                                continue
-                        event = extract_chat_event(raw)
-                        if event is None:
-                            continue
-                        outcome = await self._observe_event(
-                            event,
-                            route="memory",
-                            persist=False,
-                            inject=False,
-                        )
-                        if outcome.get("accepted"):
-                            accepted += 1
-                        if (
-                            outcome.get("reason")
-                            == "conversation_scope_unavailable"
-                        ):
-                            conversation_scope_unavailable = True
-                        for evicted_key, evicted_target in outcome.pop(
-                            "_evicted_clearances",
-                            [],
-                        ):
-                            evicted_clearances[evicted_key] = evicted_target
-                        if outcome.get("profile_id"):
-                            last_by_key[str(outcome["profile_id"])] = event.lanlan
-                    if events and not await self._persist_or_rollback(checkpoint):
-                        with self._state_lock:
-                            (
-                                self._recent_route_digests,
-                                self._profile_targets,
-                                self._profile_target_seen_at,
-                            ) = runtime_checkpoint
-                        return Ok({"accepted": 0, "reason": "store_failed"})
-                except BaseException:
-                    self._rollback_state(checkpoint)
+                checkpoint = self._checkpoint()
+                accepted = 0
+                cursor_changed = False
+                for record in records:
+                    raw = unwrap_memory_record(record)
+                    if not isinstance(raw, Mapping):
+                        continue
+                    if (
+                        raw.get("type") != "user_message"
+                        or raw.get("source") != "main_logic.core"
+                        or raw.get("plugin_id")
+                    ):
+                        continue
                     with self._state_lock:
+                        if not cursor_accepts(self._state, raw):
+                            continue
+                    cursor_changed = True
+                    event = extract_chat_event(raw)
+                    if (
+                        event is None
+                        or event.lanlan != binding.get("overlay_name")
+                    ):
+                        continue
+                    evidence = collect_evidence(
+                        [
+                            {
+                                "role": "user",
+                                "text": event.text,
+                                "at": event.timestamp,
+                            }
+                        ]
+                    )
+                    if not evidence:
+                        continue
+                    item = evidence[0]
+                    fingerprint = hashlib.sha256(
                         (
-                            self._recent_route_digests,
-                            self._profile_targets,
-                            self._profile_target_seen_at,
-                        ) = runtime_checkpoint
-                    raise
+                            f"{binding['binding_id']}\0{item.at:.6f}\0"
+                            f"{item.role}\0{item.text}"
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    with self._state_lock:
+                        if any(
+                            entry.get("fingerprint") == fingerprint
+                            for entry in self._state["evidence"]
+                        ):
+                            continue
+                        self._state["evidence"].append(
+                            {
+                                "role": item.role,
+                                "text": item.text,
+                                "at": item.at,
+                                "fingerprint": fingerprint,
+                            }
+                        )
+                        window = int(self._state["settings"]["evidence_window"])
+                        del self._state["evidence"][:-window]
+                        self._state["stats"]["messages_seen"] = min(
+                            1_000_000,
+                            int(self._state["stats"].get("messages_seen", 0)) + 1,
+                        )
+                    accepted += 1
+                if (accepted or cursor_changed) and not await self._persist_or_restore(
+                    checkpoint
+                ):
+                    return Ok({"accepted": 0, "reason": "store_failed"})
+                with self._state_lock:
+                    should_reflect = bool(
+                        accepted
+                        and self._state["settings"]["automatic_reflection"]
+                        and len(self._state["evidence"])
+                        >= int(self._state["settings"]["reflection_threshold"])
+                    )
             finally:
-                self._entry_mutation_lock.release()
-            for evicted_key, evicted_target in evicted_clearances.items():
-                await self._clear_queued_guidance(
-                    evicted_key,
-                    target_lanlan=evicted_target,
-                    reason="profile_evicted",
-                    force=True,
-                )
-            # A transport failure must not make a changed preference a
-            # one-shot delivery attempt.  Compare the currently effective
-            # guidance with the last successful queue claim on every bounded
-            # timer tick, including ticks with no new records.  The same pass
-            # also supersedes guidance whose inferred preference has decayed
-            # or expired; snapshots apply that projection without mutating the
-            # live profile.
-            pending_injections: dict[str, str] = {}
-            pending_clearances: dict[str, str] = {}
-            with self._state_lock:
-                retry_at = time.time()
-                globally_active = bool(
-                    self._state["settings"].get("adaptation_enabled", True)
-                    and self._state["settings"].get("injection_enabled", True)
-                )
-                for profile_key_value, profile in self._state["profiles"].items():
-                    if not isinstance(profile, Mapping):
-                        continue
-                    target = self._fresh_target_locked(
-                        profile_key_value,
-                        at=retry_at,
-                    )
-                    if not target:
-                        continue
-                    snapshot = profile_snapshot(
-                        self._state,
-                        profile_key_value,
-                        at=retry_at,
-                    )
-                    desired_fingerprint = (
-                        str(snapshot.get("guidance_fingerprint") or "")
-                        if globally_active and bool(profile.get("enabled", True))
-                        else ""
-                    )
-                    previous = profile.get("last_injection")
-                    previous_fingerprint = (
-                        str(previous.get("fingerprint") or "")
-                        if isinstance(previous, Mapping)
-                        else ""
-                    )
-                    if desired_fingerprint == previous_fingerprint:
-                        continue
-                    if desired_fingerprint:
-                        pending_injections[profile_key_value] = target
-                    elif previous_fingerprint:
-                        pending_clearances[profile_key_value] = target
-            for pending_key, pending_target in pending_clearances.items():
-                await self._clear_queued_guidance(
-                    pending_key,
-                    target_lanlan=pending_target,
-                    reason="effective_guidance_removed",
-                    force=True,
-                )
-            last_by_key.update(pending_injections)
-            injected = 0
-            for key, lanlan in last_by_key.items():
-                if await self._maybe_inject(key, target_lanlan=lanlan):
-                    injected += 1
-            result: dict[str, Any] = {
-                "accepted": accepted,
-                "injected": injected,
-            }
-            if accepted == 0 and conversation_scope_unavailable:
-                result["reason"] = "conversation_scope_unavailable"
-            return Ok(result)
+                self._mutation_lock.release()
+            if should_reflect:
+                await self._reflect_now_internal(automatic=True)
+            return Ok({"accepted": accepted})
         except Exception as exc:
-            with self._state_lock:
-                self._state["stats"]["errors"] = min(
-                    1_000_000,
-                    int(self._state["stats"].get("errors", 0)) + 1,
-                )
             self.logger.warning(
-                "Auto Prompt Harness memory poll failed: failure_class={}",
+                "Auto Prompt Harness evidence poll failed: failure_class={}",
                 type(exc).__name__,
             )
-            return Ok({"accepted": 0, "reason": "bus_unavailable"})
+            return Ok({"accepted": 0, "reason": "poll_failed"})
         finally:
-            self._poll_done.set()
             self._poll_guard.release()
 
-    def _scope_key_for_event(self, event: ChatEvent) -> str:
-        with self._state_lock:
-            return profile_key(
-                self._state,
-                user_id=event.user_id,
-                conversation_id=event.conversation_id,
-                character_id=event.lanlan,
-            )
-
-    @staticmethod
-    def _identity_text(value: object) -> str:
-        return sanitize_identity(value, limit=256)
-
-    @classmethod
-    def _context_value(cls, context: Mapping[str, Any], *keys: str) -> str:
-        for key in keys:
-            value = cls._identity_text(context.get(key))
-            if value:
-                return value
-        return ""
-
-    def _current_scope(
-        self,
-        kwargs: Mapping[str, Any] | None = None,
-        *,
-        require_unambiguous: bool = True,
-    ) -> tuple[str, str]:
-        requested = (
-            self._identity_text(kwargs.get("profile_id"))
-            if isinstance(kwargs, Mapping)
-            else ""
-        )
-        if requested:
-            with self._state_lock:
-                if requested not in self._state["profiles"]:
-                    raise SdkError(
-                        "所选档案不存在或已过期，请刷新管理面板后重试。",
-                        code="profile_not_found",
-                    )
-                return requested, self._fresh_target_locked(requested)
-        with self._state_lock:
-            keys = list(self._state["profiles"])
-            if require_unambiguous:
-                raise SdkError(
-                    "当前调用缺少明确的档案标识；为避免读取或修改其他档案，操作已拒绝。",
-                    code="scope_unavailable",
-                )
-            if len(keys) == 1:
-                return keys[0], self._fresh_target_locked(keys[0])
-            active = self._state.get("last_active_profile")
-            if isinstance(active, str) and active in self._state["profiles"]:
-                return active, self._fresh_target_locked(active)
-            return (
-                profile_key(
-                    self._state,
-                    user_id="local-user",
-                    conversation_id="local-conversation",
-                ),
-                "",
-            )
-
-    def _current_key(
-        self,
-        kwargs: Mapping[str, Any] | None = None,
-        *,
-        require_unambiguous: bool = True,
-    ) -> str:
-        return self._current_scope(
-            kwargs,
-            require_unambiguous=require_unambiguous,
-        )[0]
-
-    def _route_duplicate(self, key: str, text: str, *, at: float) -> bool:
-        digest = hashlib.sha256(
-            f"{key}\0{sanitize_text(text).casefold()}".encode("utf-8")
-        ).hexdigest()[:20]
-        if any(
-            existing == digest
-            # Only collapse the same normalized event timestamp.  Two
-            # separate user messages with identical wording are independent
-            # evidence and must not be swallowed merely because they arrived
-            # within a short wall-clock window.
-            and existing_at == at
-            for existing_at, existing in self._recent_route_digests
-        ):
-            return True
-        self._recent_route_digests.append((at, digest))
-        return False
-
-    @staticmethod
-    def _target_coalesce_key(target_lanlan: str) -> str:
-        target_hash = hashlib.sha256(
-            sanitize_identity(target_lanlan, limit=80).encode("utf-8")
-        ).hexdigest()[:16]
-        return f"{PLUGIN_ID}:target:{target_hash}"
-
-    def _target_fingerprint_locked(self, target_lanlan: str) -> str:
-        cleaned = sanitize_identity(target_lanlan, limit=80)
-        if not cleaned:
-            return ""
-        salt = str(self._state.get("identity_salt") or PLUGIN_ID)
-        return hashlib.sha256(f"{salt}\0target\0{cleaned}".encode("utf-8")).hexdigest()[
-            :16
-        ]
-
-    def _target_collision_locked(self, key: str, target_lanlan: str) -> bool:
-        cleaned = sanitize_identity(target_lanlan, limit=80)
-        if not cleaned:
-            return False
-        target_fingerprint = self._target_fingerprint_locked(cleaned)
-        return any(
-            profile_key_value != key
-            and isinstance(other_profile, Mapping)
-            and (
-                other_profile.get("target_fingerprint") == target_fingerprint
-                or self._profile_targets.get(profile_key_value) == cleaned
-            )
-            for profile_key_value, other_profile in self._state["profiles"].items()
-        )
-
-    def _prune_runtime_targets_locked(self, *, at: float | None = None) -> None:
-        timestamp = time.time() if at is None else at
-        for profile_key_value in list(self._profile_targets):
-            seen_at = self._profile_target_seen_at.get(profile_key_value, 0.0)
-            if (
-                not math.isfinite(seen_at)
-                or seen_at > timestamp
-                or timestamp - seen_at > VERIFIED_ROUTE_TTL_SECONDS
-            ):
-                self._profile_targets.pop(profile_key_value, None)
-                self._profile_target_seen_at.pop(profile_key_value, None)
-        target_limit = int(self._state["settings"].get("max_users", 64))
-        while len(self._profile_targets) > target_limit:
-            oldest_key = next(iter(self._profile_targets))
-            self._profile_targets.pop(oldest_key, None)
-            self._profile_target_seen_at.pop(oldest_key, None)
-
-    def _remember_verified_target_locked(
-        self,
-        key: str,
-        target_lanlan: str,
-        *,
-        at: float,
-    ) -> str:
-        cleaned = sanitize_identity(target_lanlan, limit=80)
-        profile = self._state.get("profiles", {}).get(key)
-        if not cleaned or not isinstance(profile, dict):
-            return ""
-        profile["target_fingerprint"] = self._target_fingerprint_locked(cleaned)
-        self._profile_targets.pop(key, None)
-        self._profile_targets[key] = cleaned
-        self._profile_target_seen_at[key] = at
-        self._prune_runtime_targets_locked(at=at)
-        return cleaned
-
-    def _verified_target_matches_locked(
-        self,
-        key: str,
-        target_lanlan: str,
-        *,
-        at: float | None = None,
-        allow_missing_profile: bool = False,
-    ) -> bool:
-        timestamp = time.time() if at is None else at
-        self._prune_runtime_targets_locked(at=timestamp)
-        cleaned = sanitize_identity(target_lanlan, limit=80)
-        seen_at = self._profile_target_seen_at.get(key, 0.0)
-        if (
-            not cleaned
-            or not math.isfinite(seen_at)
-            or seen_at > timestamp
-            or timestamp - seen_at > VERIFIED_ROUTE_TTL_SECONDS
-            or self._profile_targets.get(key) != cleaned
-        ):
-            return False
-        return allow_missing_profile or isinstance(
-            self._state.get("profiles", {}).get(key),
-            Mapping,
-        )
-
-    def _fresh_target_locked(self, key: str, *, at: float | None = None) -> str:
-        target = self._profile_targets.get(key, "")
-        if self._verified_target_matches_locked(key, target, at=at):
-            return target
-        return ""
-
-    async def _observe_event(
-        self,
-        event: ChatEvent,
-        *,
-        route: str,
-        persist: bool = True,
-        inject: bool = True,
-    ) -> dict[str, Any]:
-        if bool(getattr(self.store, "enabled", False)) and not self._store_ready:
-            return {
-                "accepted": False,
-                "reason": "store_unavailable",
-                "injected": False,
-            }
-        with self._state_lock:
-            if (
-                route == "memory"
-                and self._state["settings"].get("scope") == "conversation"
-                and event.conversation_id_source != "payload"
-            ):
-                self._state["stats"]["messages_ignored"] = min(
-                    1_000_000,
-                    int(self._state["stats"].get("messages_ignored", 0)) + 1,
-                )
-                return {
-                    "accepted": False,
-                    "reason": "conversation_scope_unavailable",
-                    "injected": False,
-                }
-        arrival = time.time()
-        event_at = (
-            event.timestamp
-            if (
-                route == "memory"
-                and math.isfinite(event.timestamp)
-                and 0.0 < event.timestamp <= arrival
-            )
-            else arrival
-        )
-        observations = infer_observations(event.text)
-        key = self._scope_key_for_event(event)
-        # v0.2: keep a bounded rolling evidence buffer for LLM reflection.
-        role = "assistant" if getattr(event, "is_assistant", False) else "user"
-        buffer = self._reflection_buffers.setdefault(key, [])
-        buffer.append({"role": role, "text": event.text[:600], "at": event_at})
-        del buffer[:-24]
-        with self._state_lock:
-            profiles_before = set(self._state["profiles"])
-            self._prune_runtime_targets_locked(at=arrival)
-            targets_before = {
-                profile_key_value: self._profile_targets.get(profile_key_value, "")
-                for profile_key_value in profiles_before
-            }
-            if event.lanlan and key in self._state["profiles"]:
-                self._remember_verified_target_locked(
-                    key,
-                    event.lanlan,
-                    at=event_at,
-                )
-            stats = self._state["stats"]
-            stats["messages_seen"] = min(
-                1_000_000, int(stats.get("messages_seen", 0)) + 1
-            )
-            if self._route_duplicate(key, event.text, at=event_at):
-                stats["messages_ignored"] = min(
-                    1_000_000, int(stats.get("messages_ignored", 0)) + 1
-                )
-                outcome = {
-                    "accepted": False,
-                    "reason": "route_duplicate",
-                    "profile_id": key,
-                }
-            else:
-                profile = self._state["profiles"].get(key)
-                globally_enabled = bool(
-                    self._state["settings"].get("adaptation_enabled", True)
-                )
-                profile_enabled = not isinstance(profile, Mapping) or bool(
-                    profile.get("enabled", True)
-                )
-                if not globally_enabled or not profile_enabled:
-                    stats["messages_ignored"] = min(
-                        1_000_000, int(stats.get("messages_ignored", 0)) + 1
-                    )
-                    outcome = {
-                        "accepted": False,
-                        "reason": "adaptation_paused",
-                        "profile_id": key,
-                    }
-                elif not observations:
-                    stats["messages_ignored"] = min(
-                        1_000_000, int(stats.get("messages_ignored", 0)) + 1
-                    )
-                    outcome = {
-                        "accepted": False,
-                        "reason": "no_explicit_preference",
-                        "profile_id": key,
-                    }
-                elif key not in self._state["profiles"] and len(
-                    self._state["profiles"]
-                ) >= int(self._state["settings"]["max_users"]):
-                    stats["messages_ignored"] = min(
-                        1_000_000,
-                        int(stats.get("messages_ignored", 0)) + 1,
-                    )
-                    outcome = {
-                        "accepted": False,
-                        "reason": "profile_capacity",
-                        "profile_id": key,
-                    }
-                else:
-                    merged = merge_observations(
-                        self._state,
-                        key,
-                        observations,
-                        text=event.text,
-                        at=event_at,
-                    )
-                    outcome = {
-                        "accepted": bool(merged["accepted"]),
-                        "changed": bool(merged["changed"]),
-                        "observation_count": int(merged["accepted"]),
-                        "profile_id": key,
-                        "route": route,
-                    }
-                    evicted_keys = profiles_before - set(self._state["profiles"])
-                    if evicted_keys:
-                        outcome["_evicted_clearances"] = [
-                            (
-                                evicted_key,
-                                targets_before.get(evicted_key, ""),
-                            )
-                            for evicted_key in sorted(evicted_keys)
-                        ]
-                    if outcome["accepted"] and event.lanlan:
-                        # Keep the raw routable name only in this process; the
-                        # profile persists only a salted collision fingerprint.
-                        self._remember_verified_target_locked(
-                            key,
-                            event.lanlan,
-                            at=event_at,
-                        )
-        if persist:
-            await self._persist_state()
-        injected = False
-        if inject and outcome.get("accepted"):
-            injected = await self._maybe_inject(key, target_lanlan=event.lanlan)
-        outcome["injected"] = injected
-        return outcome
-
-    async def _maybe_inject(self, key: str, *, target_lanlan: str = "") -> bool:
-        await self._acquire_thread_lock(self._delivery_guard)
-        try:
-            return await self._maybe_inject_body(
-                key,
-                target_lanlan=target_lanlan,
-            )
-        finally:
-            self._delivery_guard.release()
-
-    async def _push_uncancellable(
-        self,
-        **kwargs: Any,
-    ) -> tuple[Exception | None, bool]:
-        """Wait for the real thread even when the calling task is cancelled.
-
-        ``asyncio.to_thread`` cancellation only abandons the awaiter; it cannot
-        stop a synchronous push already running in the worker.  The delivery
-        guard must therefore remain held until that worker has really returned,
-        otherwise a late guidance push can overwrite a newer clearance that
-        uses the same coalesce key.
-        """
-
-        task = asyncio.create_task(
-            asyncio.to_thread(self.push_message, **kwargs)
-        )
-        cancelled = False
-        while True:
-            try:
-                await asyncio.shield(task)
-                break
-            except asyncio.CancelledError:
-                cancelled = True
-                if task.done():
-                    break
-                continue
-            except Exception as exc:
-                return exc, cancelled
-        try:
-            task.result()
-        except Exception as exc:
-            return exc, cancelled
-        return None, cancelled
-
-    async def _maybe_inject_body(
-        self,
-        key: str,
-        *,
-        target_lanlan: str = "",
-    ) -> bool:
-        if self._stopping.is_set() or not self._runtime_started:
-            return False
-        if bool(getattr(self.store, "enabled", False)) and not self._store_ready:
-            return False
-        target_lanlan = sanitize_identity(target_lanlan, limit=80)
-        if not target_lanlan:
-            return False
-        ts = time.time()
-        colliding = False
-        guidance = ""
-        reason = ""
-        fingerprint = ""
-        await self._acquire_thread_lock(self._entry_mutation_lock)
-        try:
-            with self._state_lock:
-                profile = self._state["profiles"].get(key)
-                if not isinstance(profile, dict):
-                    return False
-                if self._fresh_target_locked(key, at=ts) != target_lanlan:
-                    self._state["stats"]["injection_skips"] = min(
-                        1_000_000,
-                        int(self._state["stats"].get("injection_skips", 0)) + 1,
-                    )
-                    return False
-                colliding = self._target_collision_locked(key, target_lanlan)
-                if colliding:
-                    self._state["stats"]["injection_skips"] = min(
-                        1_000_000,
-                        int(self._state["stats"].get("injection_skips", 0)) + 1,
-                    )
-                else:
-                    settings = dict(self._state["settings"])
-                    preferences = profile_snapshot(
-                        self._state,
-                        key,
-                        at=ts,
-                    )["preferences"]
-                    guidance = build_guidance(preferences)
-                    allowed, reason, fingerprint = injection_decision(
-                        profile,
-                        settings,
-                        guidance,
-                        at=ts,
-                    )
-                    if not allowed:
-                        self._state["stats"]["injection_skips"] = min(
-                            1_000_000,
-                            int(
-                                self._state["stats"].get(
-                                    "injection_skips",
-                                    0,
-                                )
-                            )
-                            + 1,
-                        )
-                        return False
-        finally:
-            self._entry_mutation_lock.release()
-        if colliding:
-            await self._clear_queued_guidance_body(
-                key,
-                target_lanlan=target_lanlan,
-                reason="ambiguous_target",
-                force=True,
-            )
-            return False
-        if self._stopping.is_set() or not self._runtime_started:
-            return False
-        route_stale = False
-        sink_collision = False
-        push_error: Exception | None = None
-        was_cancelled = False
-        # A real chat event is the only authority for a raw character route.
-        # Recheck that short-lived route at the delivery sink, while holding
-        # the same mutation lock used by event ingestion, so a concurrent
-        # profile-to-character move cannot send guidance to the old target.
-        await self._acquire_thread_lock(self._entry_mutation_lock)
-        try:
-            with self._state_lock:
-                route_stale = (
-                    self._fresh_target_locked(key, at=time.time()) != target_lanlan
-                )
-                sink_collision = (
-                    not route_stale
-                    and self._target_collision_locked(key, target_lanlan)
-                )
-                if route_stale or sink_collision:
-                    self._state["stats"]["injection_skips"] = min(
-                        1_000_000,
-                        int(self._state["stats"].get("injection_skips", 0)) + 1,
-                    )
-            if not route_stale and not sink_collision:
-                push_error, was_cancelled = await self._push_uncancellable(
-                    source=PLUGIN_ID,
-                    parts=[{"type": "text", "text": guidance}],
-                    visibility=[],
-                    ai_behavior="read",
-                    target_lanlan=target_lanlan,
-                    priority=0,
-                    coalesce_key=self._target_coalesce_key(target_lanlan),
-                    metadata={
-                        "event_type": ("auto_prompt_harness.preference_guidance"),
-                        "profile_id": key,
-                        "fingerprint": fingerprint,
-                        "low_priority": True,
-                        "decision": reason,
-                        "delivery_confirmed": False,
-                        "routing_scope": "local_character",
-                    },
-                )
-                checkpoint = self._state_checkpoint()
-                with self._state_lock:
-                    if push_error is not None:
-                        self._state["stats"]["errors"] = min(
-                            1_000_000,
-                            int(self._state["stats"].get("errors", 0)) + 1,
-                        )
-                    else:
-                        current = self._state["profiles"].get(key)
-                        if isinstance(current, dict):
-                            # Never persist a delivery claim until the public
-                            # push call has returned without an exception.
-                            mark_injected(current, fingerprint, at=time.time())
-                        self._state["stats"]["injections"] = min(
-                            1_000_000,
-                            int(self._state["stats"].get("injections", 0)) + 1,
-                        )
-                if push_error is not None:
-                    await self._persist_or_rollback(checkpoint)
-                else:
-                    # The external queue write is irreversible.  If its claim
-                    # cannot be saved, retain the conservative live claim so a
-                    # later pause/delete/reset still sends clearance. Rolling
-                    # back here would falsely assert that nothing was queued.
-                    await self._persist_state()
-        finally:
-            self._entry_mutation_lock.release()
-        if route_stale:
-            return False
-        if sink_collision:
-            await self._clear_queued_guidance_body(
-                key,
-                target_lanlan=target_lanlan,
-                reason="ambiguous_target",
-                force=True,
-            )
-            return False
-        if push_error is not None:
-            self.logger.warning(
-                "Auto Prompt Harness guidance delivery failed: failure_class={}",
-                type(push_error).__name__,
-            )
-        if was_cancelled:
-            raise asyncio.CancelledError()
-        return push_error is None
-
-    async def _clear_queued_guidance(
-        self,
-        key: str,
-        *,
-        target_lanlan: str = "",
-        reason: str,
-        force: bool = False,
-    ) -> bool:
-        await self._acquire_thread_lock(self._delivery_guard)
-        try:
-            return await self._clear_queued_guidance_body(
-                key,
-                target_lanlan=target_lanlan,
-                reason=reason,
-                force=force,
-            )
-        finally:
-            self._delivery_guard.release()
-
-    async def _preclear_active_guidance_body(
-        self,
-        key: str,
-        *,
-        target_lanlan: str,
-        reason: str,
-    ) -> bool:
-        """Clear an actually queued hint before a destructive state change.
-
-        The caller owns ``_delivery_guard`` for the complete clear/mutate
-        transaction. A profile with no injection claim needs no route and can
-        be changed normally.
-        """
-
-        with self._state_lock:
-            profile = self._state["profiles"].get(key)
-            last_injection = (
-                profile.get("last_injection")
-                if isinstance(profile, Mapping)
-                else None
-            )
-            had_guidance = bool(
-                isinstance(last_injection, Mapping)
-                and last_injection.get("fingerprint")
-            )
-        if not had_guidance:
-            return True
-        return await self._clear_queued_guidance_body(
-            key,
-            target_lanlan=target_lanlan,
-            reason=reason,
-            force=True,
-        )
-
-    async def _clear_queued_guidance_body(
-        self,
-        key: str,
-        *,
-        target_lanlan: str = "",
-        reason: str,
-        force: bool = False,
-    ) -> bool:
-        """Supersede a queued hint after delete, pause, disable, or reset.
-
-        Coalescing can replace context that has not yet been consumed. Context
-        already read by a model cannot be retracted, so this queues a bounded
-        neutral status block rather than claiming retroactive removal.
-        """
-
-        if self._stopping.is_set() or not self._runtime_started:
-            return False
-        if bool(getattr(self.store, "enabled", False)) and not self._store_ready:
-            return False
-        target_lanlan = sanitize_identity(target_lanlan, limit=80)
-        if not target_lanlan:
-            return False
-        with self._state_lock:
-            profile = self._state["profiles"].get(key)
-            previous = (
-                profile.get("last_injection") if isinstance(profile, Mapping) else None
-            )
-            had_guidance = bool(
-                isinstance(previous, Mapping) and previous.get("fingerprint")
-            )
-        if not force and not had_guidance:
-            return False
-        route_stale = False
-        push_error: Exception | None = None
-        was_cancelled = False
-        await self._acquire_thread_lock(self._entry_mutation_lock)
-        try:
-            with self._state_lock:
-                route_stale = not self._verified_target_matches_locked(
-                    key,
-                    target_lanlan,
-                    at=time.time(),
-                    allow_missing_profile=True,
-                )
-            if not route_stale:
-                push_error, was_cancelled = await self._push_uncancellable(
-                    source=PLUGIN_ID,
-                    parts=[{"type": "text", "text": GUIDANCE_CLEARANCE}],
-                    visibility=[],
-                    ai_behavior="read",
-                    target_lanlan=target_lanlan,
-                    priority=0,
-                    coalesce_key=self._target_coalesce_key(target_lanlan),
-                    metadata={
-                        "event_type": ("auto_prompt_harness.guidance_clearance"),
-                        "profile_id": key,
-                        "low_priority": True,
-                        "decision": reason,
-                        "delivery_confirmed": False,
-                        "routing_scope": "local_character",
-                    },
-                )
-                checkpoint = self._state_checkpoint()
-                with self._state_lock:
-                    if push_error is not None:
-                        self._state["stats"]["errors"] = min(
-                            1_000_000,
-                            int(self._state["stats"].get("errors", 0)) + 1,
-                        )
-                    else:
-                        current = self._state["profiles"].get(key)
-                        if isinstance(current, dict):
-                            current["last_injection"] = {
-                                "fingerprint": "",
-                                "timestamp": time.time(),
-                            }
-                        else:
-                            self._profile_targets.pop(key, None)
-                            self._profile_target_seen_at.pop(key, None)
-                        self._state["stats"]["injections"] = min(
-                            1_000_000,
-                            int(self._state["stats"].get("injections", 0)) + 1,
-                        )
-                await self._persist_or_rollback(checkpoint)
-        finally:
-            self._entry_mutation_lock.release()
-        if route_stale:
-            with self._state_lock:
-                if key not in self._state["profiles"]:
-                    self._profile_targets.pop(key, None)
-                    self._profile_target_seen_at.pop(key, None)
-            return False
-        if push_error is not None:
-            self.logger.warning(
-                "Auto Prompt Harness guidance clearance failed: failure_class={}",
-                type(push_error).__name__,
-            )
-        if was_cancelled:
-            raise asyncio.CancelledError()
-        return push_error is None
-
-    # ------------------------------------------------------------------
-    # Shared safe views and validation
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _effective_preference_values(
-        state: dict[str, Any],
-        key: str,
-        *,
-        at: float,
-    ) -> dict[str, str]:
-        settings = normalize_settings(state.get("settings"))
-        profile = state.get("profiles", {}).get(key)
-        if (
-            not isinstance(profile, Mapping)
-            or not bool(profile.get("enabled", True))
-            or not settings["adaptation_enabled"]
-            or not settings["injection_enabled"]
-        ):
-            return {}
-        snapshot = profile_snapshot(state, key, at=at)
-        return {
-            str(item["dimension"]): str(item["value"])
-            for item in snapshot["preferences"]
-            if isinstance(item, Mapping)
-            and item.get("dimension") in ALLOWED_VALUES
-            and isinstance(item.get("value"), str)
-        }
-
-    @classmethod
-    def _queued_guidance_would_be_invalidated(
-        cls,
-        before: dict[str, Any],
-        after: dict[str, Any],
-        key: str,
-        *,
-        at: float,
-    ) -> bool:
-        old_values = cls._effective_preference_values(before, key, at=at)
-        if not old_values:
-            return False
-        new_values = cls._effective_preference_values(after, key, at=at)
-        return any(new_values.get(name) != value for name, value in old_values.items())
-
-    @staticmethod
-    def _import_items_retained(
-        state: Mapping[str, Any],
-        key: str,
-        imported_items: list[tuple[str, str, bool]],
-    ) -> bool:
-        profiles = state.get("profiles")
-        profile = profiles.get(key) if isinstance(profiles, Mapping) else None
-        manual = profile.get("manual") if isinstance(profile, Mapping) else None
-        if not isinstance(manual, Mapping):
-            return not imported_items
-        return all(
-            isinstance(manual.get(dimension), Mapping)
-            and manual[dimension].get("value") == value
-            and bool(manual[dimension].get("locked", False)) is locked
-            for dimension, value, locked in imported_items
-        )
-
-    def _snapshot_for_key(self, key: str) -> dict[str, Any]:
-        with self._state_lock:
-            return profile_snapshot(self._state, key)
-
-    def _panel_payload(self, key: str) -> dict[str, Any]:
-        with self._state_lock:
-            route_target = self._fresh_target_locked(key)
-            route_verified = bool(route_target)
-            route_collision = route_verified and self._target_collision_locked(
-                key, route_target
-            )
-            snapshot = profile_snapshot(
-                self._state,
-                key,
-                include_debug=True,
-            )
-            profile_options = []
-            for profile_key_value, profile in self._state["profiles"].items():
-                if not isinstance(profile, Mapping):
-                    continue
-                option_snapshot = profile_snapshot(
-                    self._state,
-                    profile_key_value,
-                )
-                profile_options.append(
-                    {
-                        "profile_id": profile_key_value,
-                        "enabled": option_snapshot["enabled"],
-                        "preference_count": option_snapshot["preference_count"],
-                        "updated_at": option_snapshot["updated_at"],
-                        "last_seen_at": option_snapshot["last_seen_at"],
-                    }
-                )
-            profile_options.sort(
-                key=lambda item: (
-                    -float(item["last_seen_at"]),
-                    str(item["profile_id"]),
-                )
-            )
-            return {
-                "status": (
-                    "degraded"
-                    if self._runtime_started and not self._store_ready
-                    else ("running" if self._runtime_started else "stopped")
-                ),
-                "profile": snapshot,
-                "selected_profile_id": (key if key in self._state["profiles"] else ""),
-                "profiles": profile_options,
-                "settings": copy.deepcopy(self._state["settings"]),
-                "defaults": copy.deepcopy(DEFAULT_SETTINGS),
-                "dimensions": {
-                    dimension: list(values)
-                    for dimension, values in ALLOWED_VALUES.items()
-                },
-                "recent_changes": copy.deepcopy(snapshot["recent_changes"]),
-                "reflection_proposals": copy.deepcopy(
-                    self._reflection_proposals.get(key, [])
-                ),
-                "aggregate_stats": copy.deepcopy(self._state["stats"]),
-                "profile_count": len(self._state["profiles"]),
-                "persistence_ready": self._store_ready,
-                "route_verified": route_verified,
-                "route_collision": route_collision,
-                "observation": {
-                    "message_handler_declared": True,
-                    "message_handler_active": False,
-                    "verified_memory_poll_active": bool(
-                        self._runtime_started
-                        and not self._stopping.is_set()
-                        and (
-                            not bool(getattr(self.store, "enabled", False))
-                            or self._store_ready
-                        )
-                    ),
-                    "memory_poll_fallback": True,
-                    "poll_seconds": POLL_SECONDS,
-                    "fallback_identity_scope": "local_character_only",
-                    "conversation_scope_requires_payload_identity": True,
-                },
-                "privacy": {
-                    "external_services": False,
-                    "raw_messages_stored_by_default": False,
-                    "debug_excerpts_enabled": bool(
-                        self._state["settings"]["debug_excerpts"]
-                    ),
-                    "system_prompt_mutation": False,
-                    "long_term_memory_api_mutation": False,
-                    "host_conversation_history_may_retain_consumed_guidance": True,
-                    "preview_is_guidance_body": True,
-                },
-            }
-
-    @staticmethod
-    def _validate_settings_input(raw: object) -> tuple[bool, str, dict[str, Any]]:
-        if not isinstance(raw, Mapping):
-            return False, "设置必须是对象。", {}
-        unknown = set(raw) - set(DEFAULT_SETTINGS)
-        if unknown:
-            return False, "设置中包含未知字段。", {}
-        for key in ("adaptation_enabled", "injection_enabled", "debug_excerpts"):
-            if key in raw and not isinstance(raw[key], bool):
-                return False, f"{key} 必须是布尔值。", {}
-        if "sensitivity" in raw and raw["sensitivity"] not in {
-            "conservative",
-            "balanced",
-            "responsive",
-        }:
-            return False, "推断灵敏度无效。", {}
-        if "scope" in raw and raw["scope"] not in {"user", "conversation"}:
-            return False, "档案范围无效。", {}
-        numeric_limits = {
-            "minimum_evidence": (1, 10),
-            "minimum_confidence": (0.5, 0.95),
-            "decay_days": (1, 365),
-            "ttl_days": (7, 730),
-            "cooldown_seconds": (0, 86400),
-            "max_users": (1, 256),
-            "max_preferences": (1, 16),
-        }
-        for key, (minimum, maximum) in numeric_limits.items():
-            if key not in raw:
-                continue
-            value = raw[key]
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                return False, f"{key} 必须是数字。", {}
-            if (
-                key
-                in {
-                    "minimum_evidence",
-                    "decay_days",
-                    "ttl_days",
-                    "cooldown_seconds",
-                    "max_users",
-                    "max_preferences",
-                }
-                and not isinstance(value, int)
-            ):
-                return False, f"{key} 必须是整数。", {}
-            try:
-                numeric = float(value)
-            except OverflowError:
-                return False, f"{key} 超出允许范围。", {}
-            if not math.isfinite(numeric) or not minimum <= numeric <= maximum:
-                return False, f"{key} 超出允许范围。", {}
-        return True, "", dict(raw)
-
-    @staticmethod
-    def _parse_import_document(
-        document: object,
-    ) -> tuple[bool, str, list[tuple[str, str, bool]]]:
-        if not isinstance(document, str) or len(document) < 2:
-            return False, "导入文档大小无效。", []
-        try:
-            if len(document.encode("utf-8")) > 32768:
-                return False, "导入文档大小无效。", []
-        except UnicodeEncodeError:
-            return False, "导入文档编码无效。", []
-        try:
-            payload = json.loads(document)
-        except (ValueError, RecursionError):
-            return False, "导入文档不是有效 JSON。", []
-        if not isinstance(payload, Mapping):
-            return False, "导入文档必须是 JSON 对象。", []
-        allowed_top = {
-            "schema_version",
-            "exported_at",
-            "profile",
-            "settings",
-            "aggregate_stats",
-            "recent_changes",
-            "privacy",
-        }
-        if set(payload) - allowed_top:
-            return False, "导入文档包含不受支持的字段。", []
-        version = payload.get("schema_version")
-        if type(version) is not int or version != IMPORT_SCHEMA_VERSION:
-            return False, "导入文档版本不受支持。", []
-        profile = payload.get("profile")
-        if not isinstance(profile, Mapping):
-            return False, "导入文档缺少安全档案。", []
-        allowed_profile = {
-            "profile_id",
-            "enabled",
-            "adaptation_enabled",
-            "injection_enabled",
-            "preferences",
-            "preference_count",
-            "guidance",
-            "guidance_fingerprint",
-            "updated_at",
-            "last_seen_at",
-            "recent_changes",
-        }
-        if set(profile) - allowed_profile:
-            return False, "导入档案包含不受支持的状态。", []
-        preferences = profile.get("preferences")
-        if not isinstance(preferences, list) or len(preferences) > 16:
-            return False, "导入偏好列表无效或超过上限。", []
-        allowed_preference = {
-            "dimension",
-            "value",
-            "confidence",
-            "evidence_count",
-            "source_type",
-            "locked",
-            "updated_at",
-        }
-        imported: list[tuple[str, str, bool]] = []
-        seen_dimensions: set[str] = set()
-        for item in preferences:
-            if not isinstance(item, Mapping) or set(item) - allowed_preference:
-                return False, "导入偏好包含未知字段。", []
-            dimension = item.get("dimension")
-            value = item.get("value")
-            locked = item.get("locked", False)
-            if (
-                not isinstance(dimension, str)
-                or dimension not in ALLOWED_VALUES
-                or dimension in seen_dimensions
-                or not isinstance(value, str)
-                or not isinstance(locked, bool)
-            ):
-                return False, "导入偏好的维度、值或锁定状态无效。", []
-            if dimension == "note":
-                note_ok, safe_note = validate_manual_note(value)
-                if not note_ok:
-                    return False, "导入的自定义备注不安全。", []
-                value = safe_note
-            elif value not in ALLOWED_VALUES[dimension]:
-                return False, "导入偏好值不在固定枚举中。", []
-            source_type = item.get("source_type")
-            if source_type is not None and source_type not in {
-                "manual",
-                "inferred",
-            }:
-                return False, "导入偏好来源无效。", []
-            seen_dimensions.add(dimension)
-            imported.append((dimension, value, locked))
-        return True, "", imported
-
-    # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
-    # LLM reflection (v0.2)
-    # ------------------------------------------------------------------
-
     async def _call_reflection_model(self, messages: list[dict[str, str]]) -> str:
-        """Call the host-configured agent model, mirroring study_companion."""
-
         try:
             import utils.config_manager as config_manager_module
             import utils.llm_client as llm_client_module
         except Exception as exc:
-            raise SdkError("反思模型运行时不可用") from exc
-        get_config_manager = getattr(config_manager_module, "get_config_manager", None)
-        create_chat_llm_async = getattr(llm_client_module, "create_chat_llm_async", None)
-        if not callable(get_config_manager) or not callable(create_chat_llm_async):
-            raise SdkError("反思模型运行时不可用")
-        api_config = get_config_manager().get_model_api_config("correction")
+            raise CharacterOperationError(
+                "反思模型运行时不可用。",
+                code="reflection_runtime_unavailable",
+            ) from exc
+        get_manager = getattr(config_manager_module, "get_config_manager", None)
+        create_llm = getattr(llm_client_module, "create_chat_llm_async", None)
+        if not callable(get_manager) or not callable(create_llm):
+            raise CharacterOperationError(
+                "反思模型运行时不可用。",
+                code="reflection_runtime_unavailable",
+            )
+        manager = get_manager()
+        api_config = manager.get_model_api_config("correction")
         if not str(api_config.get("base_url") or "").strip():
-            api_config = get_config_manager().get_model_api_config("agent")
+            api_config = manager.get_model_api_config("agent")
         base_url = str(api_config.get("base_url") or "").strip()
         model = str(api_config.get("model") or "").strip()
         api_key = str(api_config.get("api_key") or "").strip()
         if not base_url or not model:
-            raise SdkError("未配置反思模型；请先在主设置里配置 agent/correction 模型")
-        llm = await create_chat_llm_async(
+            raise CharacterOperationError(
+                "未配置反思模型；请先在主设置里配置 agent/correction 模型。",
+                code="reflection_model_unconfigured",
+            )
+        llm = await create_llm(
             model=model,
             base_url=base_url,
             api_key=api_key,
@@ -2054,1037 +980,1438 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
         reply = await llm.ainvoke(messages)
         content = getattr(reply, "content", reply)
         if isinstance(content, list):
-            content = " ".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content)
+            content = " ".join(
+                str(part.get("text", "")) if isinstance(part, dict) else str(part)
+                for part in content
+            )
         return str(content or "")
+
+    def _evidence_fingerprint_locked(self) -> str:
+        payload = "\n".join(
+            str(item.get("fingerprint") or "") for item in self._state["evidence"]
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    async def _reflect_now_internal(self, *, automatic: bool) -> dict[str, Any]:
+        if not self._reflection_guard.acquire(blocking=False):
+            return {"reflected": False, "reason": "reflection_in_flight"}
+        try:
+            with self._state_lock:
+                binding = copy.deepcopy(self._state.get("binding"))
+                evidence = copy.deepcopy(self._state["evidence"])
+                evidence_fp = self._evidence_fingerprint_locked()
+                last_evidence_fp = str(
+                    self._state.get("last_reflection_evidence_fingerprint") or ""
+                )
+                settings = copy.deepcopy(self._state["settings"])
+            if not isinstance(binding, dict):
+                raise CharacterOperationError(
+                    "请先选择角色卡并开始自适应。",
+                    code="binding_required",
+                )
+            version = active_version(binding)
+            if version is None:
+                raise CharacterOperationError(
+                    "适配版本记录不可用。",
+                    code="version_missing",
+                )
+            if not evidence:
+                return {"reflected": False, "reason": "evidence_empty"}
+            if (
+                automatic
+                and evidence_fp
+                == last_evidence_fp
+            ):
+                return {"reflected": False, "reason": "evidence_unchanged"}
+            reflection = await reflect_once(
+                self._call_reflection_model,
+                evidence,
+                version.get("adaptations", []),
+            )
+            await self._acquire_thread_lock(self._mutation_lock)
+            try:
+                checkpoint = self._checkpoint()
+                with self._state_lock:
+                    self._state["last_reflection_evidence_fingerprint"] = evidence_fp
+                    self._state["stats"]["reflections"] = min(
+                        1_000_000,
+                        int(self._state["stats"].get("reflections", 0)) + 1,
+                    )
+                    no_proposal = (
+                        reflection is None or not reflection.proposed_prompt
+                    )
+                    if no_proposal:
+                        proposal = None
+                    else:
+                        proposal = reflection.to_store()
+                        proposal.update(
+                            {
+                                "id": f"proposal-{uuid.uuid4().hex[:20]}",
+                                "status": "pending",
+                                "resolved_at": 0.0,
+                                "applied_prompt": "",
+                            }
+                        )
+                        self._state["proposals"].append(proposal)
+                        del self._state["proposals"][:-MAX_PROPOSALS]
+                if not await self._persist_or_restore(checkpoint):
+                    raise CharacterOperationError(
+                        (
+                            "反思状态暂时无法保存。"
+                            if no_proposal
+                            else "建议暂时无法保存。"
+                        ),
+                        code="store_failed",
+                    )
+                if no_proposal:
+                    return {
+                        "reflected": False,
+                        "reason": "no_stable_preference_or_invalid_output",
+                    }
+            finally:
+                self._mutation_lock.release()
+
+            auto_apply = bool(
+                automatic
+                and settings["auto_apply_low_risk"]
+                and reflection.risk == "low"
+                and reflection.confidence >= settings["minimum_confidence"]
+            )
+            result: dict[str, Any] = {
+                "reflected": True,
+                "proposal": copy.deepcopy(proposal),
+                "auto_applied": False,
+            }
+            if auto_apply:
+                applied = await self._resolve_proposal_internal(
+                    proposal_id=proposal["id"],
+                    action="approve",
+                    edited_prompt=None,
+                )
+                result["auto_applied"] = bool(applied.get("applied"))
+                result["proposal"] = applied.get("proposal", proposal)
+            return result
+        finally:
+            self._reflection_guard.release()
 
     @plugin_entry(
         id="reflect_now",
         name="立即反思一次",
-        description="用 LLM 对最近对话做一次结构化反思，生成可批准的 prompt 提案。",
-        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        description="从最近的脱敏证据生成一条待确认建议。",
+        input_schema=EMPTY_SCHEMA,
         timeout=60.0,
     )
-    async def reflect_now(self, **kwargs: Any):
+    async def reflect_now(self, **_: Any):
         try:
-            key = self._current_key(kwargs)
-            with self._state_lock:
-                buffer = list(self._reflection_buffers.get(key, []))
-                profile = self._state["profiles"].get(key)
-                preferences = profile_snapshot(self._state, key)["preferences"] if profile else []
-                guidance = build_guidance(preferences)
-            from . import reflection
-
-            result = await reflection.reflect_once(
-                self._call_reflection_model,
-                buffer,
-                guidance,
-            )
-            if result is None:
-                return Ok({"reflected": False, "reason": "no_stable_preference_or_invalid_output"})
-            proposal = result.to_store()
-            proposal["id"] = f"ref-{int(result.created_at)}-{abs(hash(proposal['proposed_prompt'])) % 10_000:04d}"
-            proposal["status"] = "pending"
-            with self._state_lock:
-                pending = self._reflection_proposals.setdefault(key, [])
-                pending.append(proposal)
-                del pending[:-20]
-            await self._persist_state()
-            return Ok({"reflected": True, "proposal": proposal})
-        except SdkError as exc:
-            return Err(exc)
+            return Ok(await self._reflect_now_internal(automatic=False))
+        except CharacterOperationError as exc:
+            return _friendly_error(str(exc), exc.code)
         except Exception:
-            return _friendly_error("反思暂时失败，请稍后重试。", "reflect_failed")
+            return _friendly_error("反思暂时失败，请稍后重试。", "reflection_failed")
+
+    async def _compensate_prompt(
+        self,
+        *,
+        binding: Mapping[str, Any],
+        expected_prompt: str,
+        restore_prompt: str,
+    ) -> bool:
+        try:
+            characters = await self._bridge().load()
+            overlay = self._guard_overlay_write(
+                characters,
+                binding,
+                expected_prompt=expected_prompt,
+            )
+            if overlay is None:
+                return False
+            set_stored_prompt(overlay, restore_prompt)
+            await self._bridge().save(characters)
+            verified = await self._bridge().load()
+            if self._guard_overlay_write(
+                verified,
+                binding,
+                expected_prompt=restore_prompt,
+            ) is None:
+                return False
+            overlay_name = str(binding.get("overlay_name") or "")
+            await self._bridge().refresh_managed_prompt(
+                overlay_name=overlay_name,
+                binding_id=str(binding["binding_id"]),
+                prompt_fingerprint=text_fingerprint(restore_prompt),
+                allow_compat_fallback=bool(
+                    not binding.get(
+                        "managed_prompt_composition_required",
+                        True,
+                    )
+                    or ADAPTATION_START not in restore_prompt
+                ),
+            )
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _guard_overlay_write(
+        characters: Mapping[str, Any],
+        binding: Mapping[str, Any],
+        *,
+        expected_prompt: str,
+    ) -> dict[str, Any] | None:
+        cards = characters.get("猫娘")
+        if not isinstance(cards, Mapping):
+            return None
+        original = cards.get(str(binding.get("original_name") or ""))
+        overlay = cards.get(str(binding.get("overlay_name") or ""))
+        if (
+            not isinstance(original, Mapping)
+            or card_fingerprint(original)
+            != binding.get("original_card_fingerprint")
+            or not isinstance(overlay, dict)
+            or not is_managed_overlay(overlay)
+            or provenance_fingerprint(overlay)
+            != binding.get("provenance_fingerprint")
+            or overlay_integrity_fingerprint(overlay)
+            != binding.get("overlay_integrity_fingerprint")
+            or stored_prompt(overlay) != expected_prompt
+        ):
+            return None
+        return overlay
+
+    async def _write_overlay_prompt(
+        self,
+        binding: dict[str, Any],
+        *,
+        expected_prompt: str,
+        new_prompt: str,
+    ) -> str:
+        characters = await self._bridge().load()
+        health = inspect_binding(characters, binding)
+        if not health["healthy"]:
+            raise CharacterOperationError(
+                str(health["message"]),
+                code=str(health["code"]),
+            )
+        overlay_name = str(binding["overlay_name"])
+        overlay = characters["猫娘"][overlay_name]
+        if stored_prompt(overlay) != expected_prompt:
+            raise CharacterOperationError(
+                "自适应副本已在本次操作前变化，未覆盖。",
+                code="overlay_prompt_changed",
+            )
+        set_stored_prompt(overlay, new_prompt)
+        await self._bridge().save(characters)
+        verified = await self._bridge().load()
+        if self._guard_overlay_write(
+            verified,
+            binding,
+            expected_prompt=new_prompt,
+        ) is None:
+            await self._compensate_prompt(
+                binding=binding,
+                expected_prompt=new_prompt,
+                restore_prompt=expected_prompt,
+            )
+            raise CharacterOperationError(
+                "角色配置在写入期间发生变化，未报告为已应用。",
+                code="character_write_conflict",
+            )
+        try:
+            return await self._bridge().refresh_managed_prompt(
+                overlay_name=overlay_name,
+                binding_id=str(binding["binding_id"]),
+                prompt_fingerprint=text_fingerprint(new_prompt),
+                allow_compat_fallback=not bool(
+                    binding.get(
+                        "managed_prompt_composition_required",
+                        True,
+                    )
+                ),
+            )
+        except Exception as exc:
+            compensated = await self._compensate_prompt(
+                binding=binding,
+                expected_prompt=new_prompt,
+                restore_prompt=expected_prompt,
+            )
+            if not compensated:
+                raise CharacterOperationError(
+                    "角色运行态刷新失败，且无法确认副本已恢复到上一版本；"
+                    "请在角色管理中检查。",
+                    code=str(
+                        getattr(exc, "code", None)
+                        or "runtime_refresh_failed"
+                    ),
+                ) from exc
+            raise
+
+    def _find_proposal_locked(self, proposal_id: str) -> dict[str, Any] | None:
+        return next(
+            (
+                proposal
+                for proposal in self._state["proposals"]
+                if proposal.get("id") == proposal_id
+            ),
+            None,
+        )
+
+    async def _resolve_proposal_internal(
+        self,
+        *,
+        proposal_id: str,
+        action: str,
+        edited_prompt: object,
+    ) -> dict[str, Any]:
+        await self._acquire_thread_lock(self._mutation_lock)
+        try:
+            checkpoint = self._checkpoint()
+            with self._state_lock:
+                proposal = self._find_proposal_locked(proposal_id)
+                binding = self._state.get("binding")
+                if not isinstance(proposal, dict) or proposal.get("status") != "pending":
+                    raise CharacterOperationError(
+                        "建议不存在或已经处理。",
+                        code="proposal_not_pending",
+                    )
+                if not isinstance(binding, dict):
+                    raise CharacterOperationError(
+                        "当前没有角色卡绑定。",
+                        code="binding_required",
+                    )
+                binding_work = copy.deepcopy(binding)
+            if action == "reject":
+                with self._state_lock:
+                    target = self._find_proposal_locked(proposal_id)
+                    if target is None or target.get("status") != "pending":
+                        raise CharacterOperationError(
+                            "建议状态已变化。",
+                            code="proposal_not_pending",
+                        )
+                    target["status"] = "rejected"
+                    target["resolved_at"] = now_ts()
+                    current_binding = self._state["binding"]
+                    append_history(
+                        current_binding,
+                        action="rejected",
+                        summary="已拒绝建议，角色卡未发生变化。",
+                        proposal_id=proposal_id,
+                    )
+                    self._state["stats"]["rejected"] = min(
+                        1_000_000,
+                        int(self._state["stats"].get("rejected", 0)) + 1,
+                    )
+                if not await self._persist_or_restore(checkpoint):
+                    raise CharacterOperationError(
+                        "拒绝结果暂时无法保存。",
+                        code="store_failed",
+                    )
+                return {
+                    "resolved": True,
+                    "action": "reject",
+                    "applied": False,
+                    "proposal": copy.deepcopy(target),
+                }
+            if action != "approve":
+                raise CharacterOperationError(
+                    "不支持的建议操作。",
+                    code="invalid_action",
+                )
+
+            candidate = (
+                edited_prompt
+                if isinstance(edited_prompt, str) and edited_prompt.strip()
+                else proposal.get("proposed_prompt")
+            )
+            valid, candidate = normalize_adaptation_text(candidate)
+            if not valid:
+                raise CharacterOperationError(
+                    candidate,
+                    code="unsafe_adaptation",
+                )
+            current_version = active_version(binding_work)
+            if current_version is None:
+                raise CharacterOperationError(
+                    "适配版本记录不可用。",
+                    code="version_missing",
+                )
+            adaptations = list(current_version.get("adaptations") or [])
+            if candidate in adaptations:
+                raise CharacterOperationError(
+                    "这条建议已经在当前适配中生效。",
+                    code="adaptation_unchanged",
+                )
+            adaptations.append(candidate)
+            adaptations = adaptations[-MAX_ACTIVE_ADAPTATIONS:]
+            new_prompt = compose_prompt(binding_work["base_prompt"], adaptations)
+            old_prompt = str(current_version["prompt"])
+            if new_prompt == old_prompt:
+                raise CharacterOperationError(
+                    "这条建议不会改变当前提示词。",
+                    code="adaptation_unchanged",
+                )
+            refresh_mode = await self._write_overlay_prompt(
+                binding_work,
+                expected_prompt=old_prompt,
+                new_prompt=new_prompt,
+            )
+            proposal_race = False
+            with self._state_lock:
+                target = self._find_proposal_locked(proposal_id)
+                live_binding = self._state.get("binding")
+                if (
+                    target is None
+                    or target.get("status") != "pending"
+                    or not isinstance(live_binding, dict)
+                    or live_binding.get("binding_id")
+                    != binding_work.get("binding_id")
+                ):
+                    proposal_race = True
+                else:
+                    live_versions = [
+                        item
+                        for item in live_binding["versions"]
+                        if isinstance(item, Mapping)
+                    ]
+                    next_number = max(
+                        [
+                            int(item.get("version", 0))
+                            for item in live_versions
+                        ]
+                        or [0]
+                    ) + 1
+                    active_number = live_binding.get("active_version")
+                    active_index = next(
+                        (
+                            index
+                            for index, item in enumerate(live_versions)
+                            if item.get("version") == active_number
+                        ),
+                        -1,
+                    )
+                    if active_index < 0:
+                        proposal_race = True
+                        live_versions = []
+                    else:
+                        # A rollback creates a branch. Discard inaccessible
+                        # future versions before appending the new child so
+                        # the next rollback returns to the actual parent.
+                        live_binding["versions"] = [
+                            dict(item)
+                            for item in live_versions[: active_index + 1]
+                        ]
+                    version = {
+                        "version": next_number,
+                        "prompt": new_prompt,
+                        "prompt_fingerprint": text_fingerprint(new_prompt),
+                        "adaptations": adaptations,
+                        "created_at": now_ts(),
+                        "proposal_id": proposal_id,
+                    }
+                    if not proposal_race:
+                        live_binding["versions"].append(version)
+                        del live_binding["versions"][:-MAX_VERSIONS]
+                        live_binding["active_version"] = next_number
+                        live_binding["status"] = (
+                            "active"
+                            if binding_work.get("status") == "active"
+                            else "inactive"
+                        )
+                        live_binding["runtime_refresh_mode"] = refresh_mode
+                        append_history(
+                            live_binding,
+                            action="approved",
+                            summary=str(
+                                target.get("evidence_summary")
+                                or "已批准一条沟通偏好。"
+                            ),
+                            proposal_id=proposal_id,
+                            before="\n".join(
+                                current_version.get("adaptations") or []
+                            )
+                            or "无",
+                            after="\n".join(adaptations) or "无",
+                            before_fingerprint=str(
+                                current_version["prompt_fingerprint"]
+                            ),
+                            after_fingerprint=version["prompt_fingerprint"],
+                            version=next_number,
+                        )
+                        target["status"] = "approved"
+                        target["resolved_at"] = now_ts()
+                        target["applied_prompt"] = candidate
+                        self._state["stats"]["approved"] = min(
+                            1_000_000,
+                            int(self._state["stats"].get("approved", 0)) + 1,
+                        )
+            if proposal_race:
+                await self._compensate_prompt(
+                    binding=binding_work,
+                    expected_prompt=new_prompt,
+                    restore_prompt=old_prompt,
+                )
+                raise CharacterOperationError(
+                    "建议状态在写入期间发生变化，已撤销。",
+                    code="proposal_race",
+                )
+            if not await self._persist_or_restore(checkpoint):
+                compensated = await self._compensate_prompt(
+                    binding=binding_work,
+                    expected_prompt=new_prompt,
+                    restore_prompt=old_prompt,
+                )
+                raise CharacterOperationError(
+                    (
+                        "建议记录保存失败，角色副本已恢复到上一版本。"
+                        if compensated
+                        else "建议记录保存失败；副本状态需要人工检查。"
+                    ),
+                    code="store_failed",
+                )
+            return {
+                "resolved": True,
+                "action": "approve",
+                "applied": True,
+                "overlay_name": binding_work["overlay_name"],
+                "runtime_refresh_mode": refresh_mode,
+                "version": next_number,
+                "proposal": copy.deepcopy(target),
+            }
+        finally:
+            self._mutation_lock.release()
 
     @plugin_entry(
         id="resolve_proposal",
-        name="处理反思提案",
-        description="批准、拒绝或回滚一条 LLM 反思生成的 prompt 提案。",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "proposal_id": {"type": "string", "minLength": 1, "maxLength": 64},
-                "action": {"type": "string", "enum": ["approve", "reject", "rollback"]},
-                "edited_prompt": {"type": "string", "maxLength": 400},
-            },
-            "required": ["proposal_id", "action"],
-            "additionalProperties": False,
-        },
-        timeout=15.0,
+        name="确认或拒绝建议",
+        description="批准后只修改受控角色副本的 system prompt；拒绝不会写角色卡。",
+        input_schema=RESOLVE_SCHEMA,
+        timeout=30.0,
     )
-    async def resolve_proposal(self, proposal_id: Any = None, action: Any = None, edited_prompt: Any = None, **kwargs: Any):
-        try:
-            key = self._current_key(kwargs)
-            proposal_id = self._identity_text(proposal_id)
-            action = self._identity_text(action)
-            if not proposal_id or action not in {"approve", "reject", "rollback"}:
-                raise SdkError("提案参数无效")
-            with self._state_lock:
-                pending = self._reflection_proposals.get(key, [])
-                target = next((item for item in pending if item.get("id") == proposal_id), None)
-                if target is None:
-                    raise SdkError("提案不存在或已处理")
-                if action == "reject":
-                    target["status"] = "rejected"
-                elif action == "rollback":
-                    target["status"] = "rolled_back"
-                    engine_delete_manual(self._state, key, dimension="note")
-                else:
-                    prompt = self._identity_text(edited_prompt)[:400] or target.get("proposed_prompt", "")
-                    if not prompt:
-                        raise SdkError("提案 prompt 为空")
-                    from . import reflection as _reflection_mod
-
-                    if any(pattern.search(prompt) for pattern in _reflection_mod._FORBIDDEN_PATTERNS):
-                        raise SdkError("提案 prompt 包含不允许的内容")
-                    engine_set_manual(self._state, key, dimension="note", value=prompt)
-                    target["status"] = "active"
-                    target["applied_prompt"] = prompt
-            await self._persist_state()
-            return Ok({"resolved": True, "proposal_id": proposal_id, "action": action})
-        except SdkError as exc:
-            return Err(exc)
-        except Exception:
-            return _friendly_error("提案处理失败。", "resolve_failed")
-
-    # Scoped management entries and context-free model capability
-    # ------------------------------------------------------------------
-
-    @plugin_entry(
-        id="inspect_profile",
-        name="查看自适应偏好",
-        description="查看当前范围内的偏好、置信度、证据计数和提示正文。",
-        input_schema=PROFILE_REQUIRED_SCHEMA,
-        llm_result_fields=[
-            "enabled",
-            "preferences",
-            "preference_count",
-            "guidance",
-        ],
-        timeout=15.0,
-    )
-    async def inspect_profile(self, **kwargs: Any):
-        try:
-            key = self._current_key(kwargs)
-            snapshot = self._snapshot_for_key(key)
-            return Ok(
-                {
-                    "enabled": snapshot["enabled"],
-                    "preferences": snapshot["preferences"],
-                    "preference_count": snapshot["preference_count"],
-                    "guidance": snapshot["guidance"],
-                }
-            )
-        except SdkError as exc:
-            return Err(exc)
-        except Exception:
-            return _friendly_error("暂时无法读取自适应偏好。", "inspect_failed")
-
-    @plugin_entry(
-        id="set_manual_preference",
-        name="保存手动偏好",
-        description="添加、编辑或锁定当前范围的手动偏好。",
-        input_schema=MANUAL_SCHEMA,
-        llm_result_fields=["saved", "preference", "guidance"],
-        timeout=15.0,
-    )
-    async def set_manual_preference(
+    async def resolve_proposal(
         self,
-        dimension: str,
-        value: str,
-        locked: bool = False,
-        **kwargs: Any,
+        proposal_id: str,
+        action: str,
+        edited_prompt: str | None = None,
+        **_: Any,
     ):
         try:
-            if not isinstance(locked, bool):
-                return _friendly_error(
-                    "locked 必须是布尔值。",
-                    "invalid_preference",
+            return Ok(
+                await self._resolve_proposal_internal(
+                    proposal_id=str(proposal_id),
+                    action=str(action),
+                    edited_prompt=edited_prompt,
                 )
-            key, target_lanlan = self._current_scope(kwargs)
-            comparison_at = time.time()
-            with self._state_lock:
-                before_state = copy.deepcopy(self._state)
-                validation_state = copy.deepcopy(self._state)
-            valid, message_text, _ = engine_set_manual(
-                validation_state,
-                key,
-                dimension=dimension,
-                value=value,
-                locked=locked,
-                at=comparison_at,
             )
-            if not valid:
-                return _friendly_error(message_text, "invalid_preference")
-            requires_clearance = self._queued_guidance_would_be_invalidated(
-                before_state,
-                validation_state,
-                key,
-                at=comparison_at,
-            )
-            await self._acquire_thread_lock(self._delivery_guard)
-            try:
-                with self._state_lock:
-                    if key not in self._state["profiles"]:
-                        return _friendly_error(
-                            "所选档案不存在或已过期，请刷新管理面板后重试。",
-                            "profile_not_found",
-                        )
-                    before_state = copy.deepcopy(self._state)
-                    validation_state = copy.deepcopy(self._state)
-                valid, message_text, _ = engine_set_manual(
-                    validation_state,
-                    key,
-                    dimension=dimension,
-                    value=value,
-                    locked=locked,
-                    at=comparison_at,
-                )
-                if not valid:
-                    return _friendly_error(message_text, "invalid_preference")
-                requires_clearance = self._queued_guidance_would_be_invalidated(
-                    before_state,
-                    validation_state,
-                    key,
-                    at=comparison_at,
-                )
-                if (
-                    requires_clearance
-                    and not await self._preclear_active_guidance_body(
-                        key,
-                        target_lanlan=target_lanlan,
-                        reason="manual_preference_changed",
-                    )
-                ):
-                    return _friendly_error(
-                        "旧提示暂时无法安全清除；偏好未更改，请在真实聊天后重试。",
-                        "clearance_failed",
-                    )
-                await self._acquire_thread_lock(self._entry_mutation_lock)
-                try:
-                    checkpoint = self._state_checkpoint()
-                    with self._state_lock:
-                        if key not in self._state["profiles"]:
-                            return _friendly_error(
-                                "所选档案不存在或已过期，请刷新管理面板后重试。",
-                                "profile_not_found",
-                            )
-                        ok, message_text, preference = engine_set_manual(
-                            self._state,
-                            key,
-                            dimension=dimension,
-                            value=value,
-                            locked=locked,
-                        )
-                        snapshot = profile_snapshot(self._state, key)
-                    if not ok:
-                        return _friendly_error(
-                            message_text,
-                            "invalid_preference",
-                        )
-                    if not await self._persist_or_rollback(checkpoint):
-                        return _friendly_error(
-                            "偏好暂时无法保存，请稍后重试。",
-                            "store_failed",
-                        )
-                finally:
-                    self._entry_mutation_lock.release()
-                await self._maybe_inject_body(
-                    key,
-                    target_lanlan=target_lanlan,
-                )
-                return Ok(
-                    {
-                        "saved": True,
-                        "preference": preference,
-                        "guidance": snapshot["guidance"],
-                    }
-                )
-            finally:
-                self._delivery_guard.release()
-        except SdkError as exc:
-            return Err(exc)
+        except CharacterOperationError as exc:
+            return _friendly_error(str(exc), exc.code)
         except Exception:
-            return _friendly_error("偏好暂时无法保存，请稍后重试。", "save_failed")
+            return _friendly_error("建议处理失败。", "proposal_resolution_failed")
 
     @plugin_entry(
-        id="delete_manual_preference",
-        name="删除手动偏好",
-        description="删除当前范围的一条手动偏好。",
-        input_schema=DELETE_SCHEMA,
-        llm_result_fields=["deleted", "dimension", "guidance"],
+        id="rollback_last_change",
+        name="回滚上一次修改",
+        description="把受控副本恢复到前一个已保存的 prompt 版本。",
+        input_schema=EMPTY_SCHEMA,
+        timeout=30.0,
+    )
+    async def rollback_last_change(self, **_: Any):
+        await self._acquire_thread_lock(self._mutation_lock)
+        try:
+            checkpoint = self._checkpoint()
+            with self._state_lock:
+                binding = copy.deepcopy(self._state.get("binding"))
+            if not isinstance(binding, dict):
+                return _friendly_error("当前没有角色卡绑定。", "binding_required")
+            versions = [
+                item
+                for item in binding.get("versions", [])
+                if isinstance(item, Mapping)
+            ]
+            current_number = binding.get("active_version")
+            current_index = next(
+                (
+                    index
+                    for index, item in enumerate(versions)
+                    if item.get("version") == current_number
+                ),
+                -1,
+            )
+            if current_index <= 0:
+                return _friendly_error("没有更早的修改版本可回滚。", "rollback_unavailable")
+            current_version = dict(versions[current_index])
+            previous_version = dict(versions[current_index - 1])
+            refresh_mode = await self._write_overlay_prompt(
+                binding,
+                expected_prompt=str(current_version["prompt"]),
+                new_prompt=str(previous_version["prompt"]),
+            )
+            binding_race = False
+            with self._state_lock:
+                live = self._state.get("binding")
+                if not isinstance(live, dict) or live.get("binding_id") != binding.get(
+                    "binding_id"
+                ):
+                    binding_race = True
+                else:
+                    live["active_version"] = int(previous_version["version"])
+                    live["runtime_refresh_mode"] = refresh_mode
+                    append_history(
+                        live,
+                        action="rolled_back",
+                        summary="已恢复受控副本的前一个提示词版本。",
+                        proposal_id=str(
+                            current_version.get("proposal_id") or ""
+                        ),
+                        before="\n".join(
+                            current_version.get("adaptations") or []
+                        )
+                        or "无",
+                        after="\n".join(
+                            previous_version.get("adaptations") or []
+                        )
+                        or "无",
+                        before_fingerprint=str(
+                            current_version["prompt_fingerprint"]
+                        ),
+                        after_fingerprint=str(
+                            previous_version["prompt_fingerprint"]
+                        ),
+                        version=int(previous_version["version"]),
+                    )
+                    proposal_id = str(
+                        current_version.get("proposal_id") or ""
+                    )
+                    proposal = self._find_proposal_locked(proposal_id)
+                    if (
+                        proposal is not None
+                        and proposal.get("status") == "approved"
+                    ):
+                        proposal["status"] = "superseded"
+                        proposal["resolved_at"] = now_ts()
+                    self._state["stats"]["rollbacks"] = min(
+                        1_000_000,
+                        int(self._state["stats"].get("rollbacks", 0)) + 1,
+                    )
+            if binding_race:
+                await self._compensate_prompt(
+                    binding=binding,
+                    expected_prompt=str(previous_version["prompt"]),
+                    restore_prompt=str(current_version["prompt"]),
+                )
+                raise CharacterOperationError(
+                    "绑定在回滚期间发生变化，已撤销。",
+                    code="binding_race",
+                )
+            if not await self._persist_or_restore(checkpoint):
+                compensated = await self._compensate_prompt(
+                    binding=binding,
+                    expected_prompt=str(previous_version["prompt"]),
+                    restore_prompt=str(current_version["prompt"]),
+                )
+                raise CharacterOperationError(
+                    (
+                        "回滚记录保存失败，副本已恢复到回滚前版本。"
+                        if compensated
+                        else "回滚记录保存失败；副本状态需要人工检查。"
+                    ),
+                    code="store_failed",
+                )
+            return Ok(
+                {
+                    "rolled_back": True,
+                    "version": previous_version["version"],
+                    "overlay_name": binding["overlay_name"],
+                    "runtime_refresh_mode": refresh_mode,
+                }
+            )
+        except CharacterOperationError as exc:
+            return _friendly_error(str(exc), exc.code)
+        except Exception:
+            return _friendly_error("暂时无法回滚。", "rollback_failed")
+        finally:
+            self._mutation_lock.release()
+
+    async def _activate_existing_binding(
+        self,
+        binding: dict[str, Any],
+        *,
+        previous_current: str,
+    ) -> dict[str, Any]:
+        checkpoint = self._checkpoint()
+        await self._bridge().switch_current(str(binding["overlay_name"]))
+        binding_race = False
+        with self._state_lock:
+            live = self._state.get("binding")
+            if not isinstance(live, dict) or live.get("binding_id") != binding.get(
+                "binding_id"
+            ):
+                binding_race = True
+            else:
+                live["desired_enabled"] = True
+                live["status"] = "active"
+                live["conflict_code"] = ""
+                live["last_error"] = ""
+                append_history(
+                    live,
+                    action="activated",
+                    summary=f"已切换到自适应副本「{live['overlay_name']}」。",
+                )
+        if binding_race:
+            if previous_current:
+                await self._bridge().switch_current_direct_if(
+                    expected_current=str(binding["overlay_name"]),
+                    target=previous_current,
+                )
+            raise CharacterOperationError(
+                "绑定在切换期间发生变化。",
+                code="binding_race",
+            )
+        if not await self._persist_or_restore(checkpoint):
+            if previous_current:
+                try:
+                    await self._bridge().switch_current_direct_if(
+                        expected_current=str(binding["overlay_name"]),
+                        target=previous_current,
+                    )
+                except Exception:
+                    pass
+            raise CharacterOperationError(
+                "启用状态无法保存，已尝试恢复原先角色。",
+                code="store_failed",
+            )
+        return {
+            "started": True,
+            "reused_overlay": True,
+            "original_name": binding["original_name"],
+            "overlay_name": binding["overlay_name"],
+            "effective": True,
+        }
+
+    async def _cleanup_failed_overlay(
+        self,
+        *,
+        overlay_name: str,
+        binding_id: str,
+        expected_card_fingerprint: str,
+    ) -> bool:
+        """Delete a just-created overlay through the host, or leave it marked."""
+
+        try:
+            latest = await self._bridge().load()
+            candidate = latest["猫娘"].get(overlay_name)
+            provenance = (
+                provenance_for(candidate)
+                if isinstance(candidate, Mapping)
+                else None
+            )
+            if (
+                not is_managed_overlay(candidate)
+                or not provenance
+                or provenance.get("binding_id") != binding_id
+                or card_fingerprint(candidate) != expected_card_fingerprint
+            ):
+                return False
+            await self._bridge().delete_character(
+                name=overlay_name,
+                binding_id=binding_id,
+                expected_card_fingerprint=expected_card_fingerprint,
+            )
+            return True
+        except Exception:
+            # Keeping a provenance-marked copy is recoverable and visible in
+            # reconciliation; directly popping it would skip host cleanup.
+            return False
+
+    @plugin_entry(
+        id="start_adaptation",
+        name="开始自适应",
+        description="从所选真实角色卡创建明确标记的深拷贝，并切换到副本。",
+        input_schema=START_SCHEMA,
+        timeout=30.0,
+    )
+    async def start_adaptation(self, original_name: str, **_: Any):
+        original_name = str(original_name or "").strip()
+        if not original_name:
+            return _friendly_error("请选择一张角色卡。", "character_required")
+        if not self._store_ready:
+            return _friendly_error(
+                "本地存储尚未就绪，不能安全创建绑定。",
+                "store_unavailable",
+            )
+        await self._acquire_thread_lock(self._mutation_lock)
+        try:
+            characters, health = await self._reconcile_locked()
+            cards = characters["猫娘"]
+            previous_current = str(characters.get("当前猫娘") or "")
+            existing_binding = self._state.get("binding")
+            if isinstance(existing_binding, dict) and existing_binding.get(
+                "status"
+            ) != "overlay_deleted":
+                if (
+                    existing_binding.get("original_name") == original_name
+                    and health.get("healthy")
+                ):
+                    return Ok(
+                        await self._activate_existing_binding(
+                            copy.deepcopy(existing_binding),
+                            previous_current=str(characters.get("当前猫娘") or ""),
+                        )
+                    )
+                return _friendly_error(
+                    "当前已有角色卡绑定；请先恢复原角色并按需删除旧副本。",
+                    "binding_exists",
+                )
+            if self._last_orphan_overlays:
+                return _friendly_error(
+                    "发现未绑定的受控副本；请先在面板中逐一确认删除，插件不会继续创建。",
+                    "ambiguous_managed_overlays",
+                    details={
+                        "overlay_names": copy.deepcopy(
+                            self._last_orphan_overlays
+                        )
+                    },
+                )
+            if self._last_invalid_managed_overlays:
+                return _friendly_error(
+                    "发现来源标记损坏的自适应副本；请先在角色管理中检查，"
+                    "插件不会把它当作原角色继续复制。",
+                    "invalid_managed_overlays",
+                    details={
+                        "overlay_names": copy.deepcopy(
+                            self._last_invalid_managed_overlays
+                        )
+                    },
+                )
+            original = cards.get(original_name)
+            if (
+                not isinstance(original, dict)
+                or has_managed_provenance_marker(original)
+            ):
+                return _friendly_error(
+                    "所选原角色卡不存在或不是可绑定的原卡。",
+                    "original_not_found",
+                )
+            original_snapshot = copy.deepcopy(original)
+            overlay_name = unique_overlay_name(original_name, list(cards))
+            binding_id = uuid.uuid4().hex[:24]
+            created_at = now_ts()
+            overlay, base_prompt = build_overlay(
+                original_name=original_name,
+                overlay_name=overlay_name,
+                original_card=original_snapshot,
+                binding_id=binding_id,
+                at=created_at,
+            )
+            cards[overlay_name] = overlay
+            if cards[original_name] != original_snapshot:
+                raise CharacterOperationError(
+                    "原角色卡在创建副本时发生变化，已中止。",
+                    code="original_changed",
+                )
+            await self._bridge().save(characters)
+            persisted_characters = await self._bridge().load()
+            persisted_original = persisted_characters["猫娘"].get(original_name)
+            persisted_overlay = persisted_characters["猫娘"].get(overlay_name)
+            if (
+                not isinstance(persisted_original, Mapping)
+                or card_fingerprint(persisted_original)
+                != card_fingerprint(original_snapshot)
+                or not isinstance(persisted_overlay, Mapping)
+                or card_fingerprint(persisted_overlay)
+                != card_fingerprint(overlay)
+            ):
+                await self._cleanup_failed_overlay(
+                    overlay_name=overlay_name,
+                    binding_id=binding_id,
+                    expected_card_fingerprint=card_fingerprint(overlay),
+                )
+                raise CharacterOperationError(
+                    "角色配置在创建副本期间发生变化，已停止绑定。",
+                    code="character_write_conflict",
+                )
+            try:
+                await self._bridge().reload_runtime()
+            except Exception:
+                await self._cleanup_failed_overlay(
+                    overlay_name=overlay_name,
+                    binding_id=binding_id,
+                    expected_card_fingerprint=card_fingerprint(overlay),
+                )
+                raise
+
+            binding = create_binding(
+                original_name=original_name,
+                overlay_name=overlay_name,
+                original_card=original_snapshot,
+                overlay_card=overlay,
+                base_prompt=base_prompt,
+                binding_id=binding_id,
+                at=created_at,
+            )
+            binding["status"] = "inactive"
+            checkpoint = self._checkpoint()
+            with self._state_lock:
+                self._state["binding"] = binding
+                self._state["proposals"] = []
+                self._state["evidence"] = []
+                self._state["last_reflection_evidence_fingerprint"] = ""
+            if not await self._persist_or_restore(checkpoint):
+                cleaned = await self._cleanup_failed_overlay(
+                    overlay_name=overlay_name,
+                    binding_id=binding_id,
+                    expected_card_fingerprint=card_fingerprint(overlay),
+                )
+                raise CharacterOperationError(
+                    (
+                        "绑定记录无法保存，未保留新副本。"
+                        if cleaned
+                        else "绑定记录无法保存；带来源标记的副本已保留，重启后可识别。"
+                    ),
+                    code="store_failed",
+                )
+            try:
+                await self._bridge().switch_current(overlay_name)
+            except CharacterOperationError as exc:
+                with self._state_lock:
+                    live = self._state.get("binding")
+                    if isinstance(live, dict):
+                        live["last_error"] = str(exc)
+                await self._persist_state()
+                raise
+            checkpoint = self._checkpoint()
+            with self._state_lock:
+                live = self._state["binding"]
+                live["status"] = "active"
+                live["desired_enabled"] = True
+                append_history(
+                    live,
+                    action="activated",
+                    summary=f"已切换到自适应副本「{overlay_name}」。",
+                )
+            if not await self._persist_or_restore(checkpoint):
+                try:
+                    if previous_current:
+                        await self._bridge().switch_current_direct_if(
+                            expected_current=overlay_name,
+                            target=previous_current,
+                        )
+                except Exception:
+                    pass
+                raise CharacterOperationError(
+                    "启用状态无法保存，已尝试切回原角色。",
+                    code="store_failed",
+                )
+            return Ok(
+                {
+                    "started": True,
+                    "reused_overlay": False,
+                    "original_name": original_name,
+                    "overlay_name": overlay_name,
+                    "effective": True,
+                    "base_prompt_fingerprint": binding[
+                        "base_prompt_fingerprint"
+                    ],
+                }
+            )
+        except CharacterOperationError as exc:
+            return _friendly_error(str(exc), exc.code)
+        except Exception as exc:
+            code = getattr(exc, "code", None) or "start_failed"
+            return _friendly_error(
+                "暂时无法开始自适应，请检查角色卡状态后重试。",
+                str(code),
+            )
+        finally:
+            self._mutation_lock.release()
+
+    async def _restore_original_locked(
+        self,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        checkpoint = self._checkpoint()
+        characters, health = await self._reconcile_locked()
+        with self._state_lock:
+            binding = self._state.get("binding")
+        if not isinstance(binding, dict):
+            raise CharacterOperationError(
+                "当前没有角色卡绑定。",
+                code="binding_required",
+            )
+        cards = characters["猫娘"]
+        original = str(binding.get("original_name") or "")
+        overlay = str(
+            health.get("overlay_name") or binding.get("overlay_name") or ""
+        )
+        current = str(characters.get("当前猫娘") or "")
+        switched = False
+        preserved_user_choice = False
+        if current == overlay:
+            if original not in cards:
+                raise CharacterOperationError(
+                    "原角色卡已删除或改名，无法自动恢复。",
+                    code="original_missing_or_renamed",
+                )
+            restore_result = await self._bridge().restore_original_if_overlay(
+                binding=binding,
+            )
+            switched = restore_result["switched"]
+            preserved_user_choice = restore_result[
+                "preserved_user_choice"
+            ]
+        elif current and current != original:
+            preserved_user_choice = True
+        with self._state_lock:
+            live = self._state.get("binding")
+            if not isinstance(live, dict):
+                raise CharacterOperationError(
+                    "绑定在恢复期间发生变化。",
+                    code="binding_race",
+                )
+            live["desired_enabled"] = False
+            if live.get("status") != "conflict":
+                live["status"] = "restored"
+            append_history(
+                live,
+                action="restored",
+                summary=(
+                    f"已切回原角色「{original}」。"
+                    if switched
+                    else (
+                        "检测到用户已切换其他角色，未抢切。"
+                        if preserved_user_choice
+                        else f"当前已经是原角色「{original}」。"
+                    )
+                ),
+            )
+        if not await self._persist_or_restore(checkpoint):
+            raise CharacterOperationError(
+                "恢复结果已执行，但本地记录保存失败。",
+                code="store_failed",
+            )
+        return {
+            "restored": switched or current == original,
+            "switched": switched,
+            "preserved_user_choice": preserved_user_choice,
+            "original_name": original,
+            "overlay_name": overlay,
+            "reason": reason,
+        }
+
+    @plugin_entry(
+        id="restore_original",
+        name="恢复原角色",
+        description="仅当当前角色仍是本插件副本时切回原卡；不会抢切其他角色。",
+        input_schema=EMPTY_SCHEMA,
+        timeout=30.0,
+    )
+    async def restore_original(self, **_: Any):
+        await self._acquire_thread_lock(self._mutation_lock)
+        try:
+            return Ok(await self._restore_original_locked(reason="manual"))
+        except CharacterOperationError as exc:
+            return _friendly_error(str(exc), exc.code)
+        except Exception:
+            return _friendly_error("暂时无法恢复原角色。", "restore_failed")
+        finally:
+            self._mutation_lock.release()
+
+    @plugin_entry(
+        id="delete_overlay",
+        name="删除自适应副本",
+        description="先安全恢复，再通过宿主删除副本、记忆目录和云存档墓碑。",
+        input_schema=DELETE_OVERLAY_SCHEMA,
+        timeout=30.0,
+    )
+    async def delete_overlay(self, confirmation: str, **_: Any):
+        if confirmation != "DELETE":
+            return _friendly_error(
+                "请输入 DELETE 确认删除自适应副本。",
+                "confirmation_required",
+            )
+        await self._acquire_thread_lock(self._mutation_lock)
+        try:
+            characters, health = await self._reconcile_locked()
+            with self._state_lock:
+                binding = copy.deepcopy(self._state.get("binding"))
+            if not isinstance(binding, dict):
+                return _friendly_error("当前没有角色卡绑定。", "binding_required")
+            overlay = str(
+                health.get("overlay_name") or binding.get("overlay_name") or ""
+            )
+            current = str(characters.get("当前猫娘") or "")
+            if current == overlay:
+                original = str(binding.get("original_name") or "")
+                if original not in characters["猫娘"]:
+                    return _friendly_error(
+                        "原角色卡不存在；请先在角色管理中切换到其他角色。",
+                        "original_missing_or_renamed",
+                    )
+                await self._bridge().restore_original_if_overlay(
+                    binding=binding,
+                )
+            latest = await self._bridge().load()
+            candidate = latest["猫娘"].get(overlay)
+            if (
+                not is_managed_overlay(candidate)
+                or provenance_fingerprint(candidate)
+                != binding.get("provenance_fingerprint")
+            ):
+                return _friendly_error(
+                    "副本来源标记不匹配，未删除。",
+                    "overlay_unmanaged",
+                )
+            checkpoint = self._checkpoint()
+            with self._state_lock:
+                live = self._state.get("binding")
+                if isinstance(live, dict):
+                    live["desired_enabled"] = False
+                    live["status"] = "deletion_pending"
+            if not await self._persist_or_restore(checkpoint):
+                raise CharacterOperationError(
+                    "删除准备状态无法保存。",
+                    code="store_failed",
+                )
+            await self._bridge().delete_character(
+                name=overlay,
+                binding_id=str(binding["binding_id"]),
+                expected_card_fingerprint=card_fingerprint(candidate),
+            )
+            checkpoint = self._checkpoint()
+            with self._state_lock:
+                live = self._state.get("binding")
+                if isinstance(live, dict):
+                    live["status"] = "overlay_deleted"
+                    live["desired_enabled"] = False
+                    append_history(
+                        live,
+                        action="overlay_deleted",
+                        summary=f"已删除自适应副本「{overlay}」。",
+                    )
+            if not await self._persist_or_restore(checkpoint):
+                raise CharacterOperationError(
+                    "副本已删除，但删除记录保存失败。",
+                    code="store_failed",
+                )
+            return Ok({"deleted": True, "overlay_name": overlay})
+        except CharacterOperationError as exc:
+            return _friendly_error(str(exc), exc.code)
+        except Exception:
+            return _friendly_error("暂时无法删除自适应副本。", "overlay_delete_failed")
+        finally:
+            self._mutation_lock.release()
+
+    @plugin_entry(
+        id="delete_orphan_overlay",
+        name="删除未绑定的受控副本",
+        description="按明确名称删除带本插件来源标记、但不属于当前绑定的副本。",
+        input_schema=DELETE_ORPHAN_SCHEMA,
+        timeout=30.0,
+    )
+    async def delete_orphan_overlay(
+        self,
+        overlay_name: str,
+        confirmation: str,
+        **_: Any,
+    ):
+        overlay_name = str(overlay_name or "").strip()
+        if confirmation != "DELETE":
+            return _friendly_error(
+                "请输入 DELETE 确认删除未绑定副本。",
+                "confirmation_required",
+            )
+        await self._acquire_thread_lock(self._mutation_lock)
+        try:
+            characters, _health = await self._reconcile_locked()
+            if overlay_name not in self._last_orphan_overlays:
+                return _friendly_error(
+                    "所选名称不是当前可确认删除的未绑定副本。",
+                    "orphan_overlay_not_found",
+                )
+            if str(characters.get("当前猫娘") or "") == overlay_name:
+                return _friendly_error(
+                    "该未绑定副本当前正在使用；请先在角色管理中切换到其他角色。",
+                    "orphan_overlay_is_current",
+                )
+            candidate = characters["猫娘"].get(overlay_name)
+            if not is_managed_overlay(candidate):
+                return _friendly_error(
+                    "副本来源标记无效，未删除。",
+                    "overlay_unmanaged",
+                )
+            provenance = provenance_for(candidate) or {}
+            await self._bridge().delete_character(
+                name=overlay_name,
+                binding_id=str(provenance.get("binding_id") or ""),
+                expected_card_fingerprint=card_fingerprint(candidate),
+            )
+            await self._reconcile_locked()
+            state_persisted = (
+                await self._persist_state()
+                if self._store_ready
+                else False
+            )
+            return Ok(
+                {
+                    "deleted": True,
+                    "overlay_name": overlay_name,
+                    "state_persisted": state_persisted,
+                }
+            )
+        except CharacterOperationError as exc:
+            return _friendly_error(str(exc), exc.code)
+        except Exception:
+            return _friendly_error(
+                "暂时无法删除未绑定副本。",
+                "orphan_overlay_delete_failed",
+            )
+        finally:
+            self._mutation_lock.release()
+
+    @staticmethod
+    def _validate_settings(raw: object) -> tuple[bool, str, dict[str, Any]]:
+        if not isinstance(raw, Mapping):
+            return False, "设置必须是对象。", {}
+        unknown = set(raw) - set(DEFAULT_SETTINGS)
+        if unknown:
+            return False, "设置包含不支持的字段。", {}
+        merged = {**DEFAULT_SETTINGS, **dict(raw)}
+        normalized = normalize_settings(merged)
+        for key in (
+            "learning_enabled",
+            "automatic_reflection",
+            "auto_apply_low_risk",
+            "show_evidence_excerpts",
+        ):
+            if key in raw and not isinstance(raw[key], bool):
+                return False, f"{key} 必须是布尔值。", {}
+        for key, minimum, maximum in (
+            ("reflection_threshold", 1, 12),
+            ("evidence_window", 2, 12),
+        ):
+            if key in raw and (
+                not isinstance(raw[key], int)
+                or isinstance(raw[key], bool)
+                or not minimum <= raw[key] <= maximum
+            ):
+                return False, f"{key} 超出允许范围。", {}
+        if "minimum_confidence" in raw:
+            value = raw["minimum_confidence"]
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+                or not 0.5 <= float(value) <= 0.95
+            ):
+                return False, "minimum_confidence 超出允许范围。", {}
+        if normalized["reflection_threshold"] > normalized["evidence_window"]:
+            return False, "触发条数不能大于证据窗口。", {}
+        return True, "", normalized
+
+    @plugin_entry(
+        id="save_settings",
+        name="保存高级设置",
+        description="验证并保存证据窗口、反思阈值和自动批准设置。",
+        input_schema=SETTINGS_SCHEMA,
         timeout=15.0,
     )
-    async def delete_manual_preference(self, dimension: str, **kwargs: Any):
+    async def save_settings(self, settings: Mapping[str, Any], **_: Any):
+        valid, message_text, normalized = self._validate_settings(settings)
+        if not valid:
+            return _friendly_error(message_text, "invalid_settings")
+        if not self._store_ready:
+            return _friendly_error("本地存储不可用。", "store_unavailable")
+        await self._acquire_thread_lock(self._mutation_lock)
         try:
-            key, target_lanlan = self._current_scope(kwargs)
+            checkpoint = self._checkpoint()
             with self._state_lock:
-                validation_state = copy.deepcopy(self._state)
-            valid, message_text = engine_delete_manual(
-                validation_state,
-                key,
-                dimension=dimension,
-            )
-            if not valid:
-                return _friendly_error(message_text, "preference_not_found")
-            await self._acquire_thread_lock(self._delivery_guard)
-            try:
-                if not await self._preclear_active_guidance_body(
-                    key,
-                    target_lanlan=target_lanlan,
-                    reason="preference_deleted",
+                self._state["settings"] = normalized
+                if len(self._state["evidence"]) > int(
+                    normalized["evidence_window"]
                 ):
-                    return _friendly_error(
-                        "旧提示暂时无法安全清除；偏好未删除，请在真实聊天后重试。",
-                        "clearance_failed",
-                    )
-                await self._acquire_thread_lock(self._entry_mutation_lock)
-                try:
-                    checkpoint = self._state_checkpoint()
-                    with self._state_lock:
-                        ok, message_text = engine_delete_manual(
-                            self._state,
-                            key,
-                            dimension=dimension,
-                        )
-                        snapshot = profile_snapshot(self._state, key)
-                    if not ok:
-                        return _friendly_error(
-                            message_text,
-                            "preference_not_found",
-                        )
-                    if not await self._persist_or_rollback(checkpoint):
-                        return _friendly_error(
-                            "删除结果暂时无法保存，请稍后重试。",
-                            "store_failed",
-                        )
-                finally:
-                    self._entry_mutation_lock.release()
-                if snapshot["guidance"]:
-                    await self._maybe_inject_body(
-                        key,
-                        target_lanlan=target_lanlan,
-                    )
-                return Ok(
-                    {
-                        "deleted": True,
-                        "dimension": dimension,
-                        "guidance": snapshot["guidance"],
-                    }
-                )
-            finally:
-                self._delivery_guard.release()
-        except SdkError as exc:
-            return Err(exc)
-        except Exception:
-            return _friendly_error("暂时无法删除这条偏好。", "delete_failed")
+                    self._state["evidence"] = self._state["evidence"][
+                        -int(normalized["evidence_window"]) :
+                    ]
+            if not await self._persist_or_restore(checkpoint):
+                return _friendly_error("设置暂时无法保存。", "store_failed")
+            return Ok({"saved": True, "settings": copy.deepcopy(normalized)})
+        finally:
+            self._mutation_lock.release()
+
+    @plugin_entry(
+        id="reset_settings",
+        name="恢复默认设置",
+        description="恢复内置的安全默认值，不删除角色副本或历史。",
+        input_schema=EMPTY_SCHEMA,
+        timeout=15.0,
+    )
+    async def reset_settings(self, **_: Any):
+        return await self.save_settings(copy.deepcopy(DEFAULT_SETTINGS))
 
     @llm_tool(
         name="auto_prompt_harness.analyze_text",
-        description="用本地确定性规则模拟分析一段文字，不保存文字或分析结果。",
+        description="只在内存中判断一段文字是否包含明确的表达风格偏好，不保存。",
         parameters=ANALYZE_SCHEMA,
         timeout=15.0,
     )
     @plugin_entry(
         id="analyze_text",
-        name="模拟分析文本",
-        description="仅在内存副本中模拟推断，不持久化。",
+        name="模拟偏好识别",
+        description="只返回固定枚举观察，不读取或修改角色卡。",
         input_schema=ANALYZE_SCHEMA,
-        llm_result_fields=["persisted", "observations", "preferences", "guidance"],
+        llm_result_fields=["persisted", "observations"],
         timeout=15.0,
     )
-    async def analyze_text(self, text: str, **kwargs: Any):
+    async def analyze_text(self, text: str, **_: Any):
+        observations = [
+            observation.dump() for observation in infer_observations(str(text or ""))
+        ]
+        return Ok({"persisted": False, "observations": observations})
+
+    def _public_binding(
+        self,
+        binding: Mapping[str, Any] | None,
+        health: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        if not isinstance(binding, Mapping):
+            return None
+        version = active_version(binding)
+        return {
+            "binding_id": str(binding.get("binding_id") or ""),
+            "original_name": str(binding.get("original_name") or ""),
+            "overlay_name": str(binding.get("overlay_name") or ""),
+            "base_prompt_fingerprint": str(
+                binding.get("base_prompt_fingerprint") or ""
+            ),
+            "status": str(binding.get("status") or ""),
+            "desired_enabled": bool(binding.get("desired_enabled", False)),
+            "effective": bool(health.get("effective", False)),
+            "healthy": bool(health.get("healthy", False)),
+            "conflict_code": str(binding.get("conflict_code") or ""),
+            "message": str(
+                health.get("message") or binding.get("last_error") or ""
+            ),
+            "current_character": str(health.get("current_name") or ""),
+            "current_version": (
+                int(version.get("version", 0)) if isinstance(version, Mapping) else 0
+            ),
+            "active_adaptations": (
+                copy.deepcopy(version.get("adaptations", []))
+                if isinstance(version, Mapping)
+                else []
+            ),
+            "prompt_fingerprint": (
+                str(version.get("prompt_fingerprint") or "")
+                if isinstance(version, Mapping)
+                else ""
+            ),
+            "runtime_refresh_mode": str(
+                binding.get("runtime_refresh_mode") or ""
+            ),
+            "history": copy.deepcopy(binding.get("history", []))[-MAX_HISTORY:],
+            "created_at": float(binding.get("created_at") or 0.0),
+            "updated_at": float(binding.get("updated_at") or 0.0),
+            "overlay_retention": "preserve_until_manual_delete",
+        }
+
+    async def _panel_state_locked(self) -> dict[str, Any]:
+        characters, health = await self._reconcile_locked()
+        with self._state_lock:
+            state = copy.deepcopy(self._state)
+        cards = characters["猫娘"]
+        binding = state.get("binding")
+        card_items = [
+            {
+                "name": str(name),
+                "current": str(characters.get("当前猫娘") or "") == str(name),
+                "bound": bool(
+                    isinstance(binding, Mapping)
+                    and binding.get("original_name") == name
+                ),
+            }
+            for name, card in cards.items()
+            if (
+                isinstance(card, Mapping)
+                and not has_managed_provenance_marker(card)
+            )
+        ]
+        card_items.sort(key=lambda item: item["name"].casefold())
+        evidence = (
+            copy.deepcopy(state["evidence"])
+            if state["settings"]["show_evidence_excerpts"]
+            else []
+        )
+        return {
+            "status": (
+                "running"
+                if self._runtime_started and self._store_ready
+                else "degraded"
+            ),
+            "persistence_ready": self._store_ready,
+            "characters": card_items,
+            "current_character": str(characters.get("当前猫娘") or ""),
+            "binding": self._public_binding(binding, health),
+            "proposals": copy.deepcopy(state["proposals"])[-MAX_PROPOSALS:],
+            "settings": copy.deepcopy(state["settings"]),
+            "evidence": evidence[-MAX_EVIDENCE_MESSAGES:],
+            "evidence_count": len(state["evidence"]),
+            "stats": copy.deepcopy(state["stats"]),
+            "legacy_migration": copy.deepcopy(state["legacy_migration"]),
+            "unbound_managed_overlays": copy.deepcopy(self._last_orphan_overlays),
+            "invalid_managed_overlays": copy.deepcopy(
+                self._last_invalid_managed_overlays
+            ),
+            "policy": {
+                "original_never_modified": True,
+                "overlay_deleted_only_manually": True,
+                "hidden_prompt_injection_used": False,
+            },
+        }
+
+    @plugin_entry(
+        id="list_characters",
+        name="列出真实角色卡",
+        description="列出可绑定的 N.E.K.O 原角色卡，不返回插件副本。",
+        input_schema=EMPTY_SCHEMA,
+        timeout=15.0,
+    )
+    async def list_characters(self, **_: Any):
+        await self._acquire_thread_lock(self._mutation_lock)
         try:
-            cleaned = sanitize_text(text)
-            if not cleaned:
-                return _friendly_error("示例文本不能为空。", "empty_text")
-            observations = infer_observations(cleaned)
-            # Generic tool arguments can forge ``_ctx`` in the current host.
-            # Always simulate in a fresh state so this global tool cannot read
-            # any persisted user's profile.
-            del kwargs
-            simulated = fresh_state()
-            with self._state_lock:
-                simulated["settings"] = copy.deepcopy(self._state["settings"])
-            key = profile_key(
-                simulated,
-                user_id="isolated-simulation",
-                conversation_id="isolated-simulation",
-            )
-            merge_observations(
-                simulated,
-                key,
-                observations,
-                text="",
-            )
-            snapshot = profile_snapshot(simulated, key)
+            payload = await self._panel_state_locked()
             return Ok(
                 {
-                    "persisted": False,
-                    "observations": [item.dump() for item in observations],
-                    "preferences": snapshot["preferences"],
-                    "guidance": snapshot["guidance"],
+                    "characters": payload["characters"],
+                    "current_character": payload["current_character"],
                 }
             )
-        except SdkError as exc:
-            return Err(exc)
+        except CharacterOperationError as exc:
+            return _friendly_error(str(exc), exc.code)
         except Exception:
-            return _friendly_error("示例文本未能安全分析。", "analysis_failed")
-
-    @plugin_entry(
-        id="set_adaptation",
-        name="暂停或恢复自适应",
-        description="只影响当前范围，不删除已保存的偏好。",
-        input_schema=ENABLE_SCHEMA,
-        llm_result_fields=["enabled", "profile_id"],
-        timeout=15.0,
-    )
-    async def set_adaptation(self, enabled: bool, **kwargs: Any):
-        try:
-            if not isinstance(enabled, bool):
-                return _friendly_error("enabled 必须是布尔值。", "invalid_enabled")
-            key, target_lanlan = self._current_scope(kwargs)
-            await self._acquire_thread_lock(self._delivery_guard)
-            try:
-                with self._state_lock:
-                    if key not in self._state["profiles"]:
-                        return _friendly_error(
-                            "所选档案不存在或已过期，请刷新管理面板后重试。",
-                            "profile_not_found",
-                        )
-                if not enabled and not await self._preclear_active_guidance_body(
-                    key,
-                    target_lanlan=target_lanlan,
-                    reason="profile_paused",
-                ):
-                    return _friendly_error(
-                        "旧提示暂时无法安全清除；自适应仍保持启用，请在真实聊天后重试。",
-                        "clearance_failed",
-                    )
-                await self._acquire_thread_lock(self._entry_mutation_lock)
-                try:
-                    checkpoint = self._state_checkpoint()
-                    with self._state_lock:
-                        if key not in self._state["profiles"]:
-                            return _friendly_error(
-                                "所选档案不存在或已过期，请刷新管理面板后重试。",
-                                "profile_not_found",
-                            )
-                        engine_set_enabled(self._state, key, enabled=enabled)
-                    if not await self._persist_or_rollback(checkpoint):
-                        return _friendly_error(
-                            "状态暂时无法保存，请稍后重试。",
-                            "store_failed",
-                        )
-                finally:
-                    self._entry_mutation_lock.release()
-                if enabled:
-                    await self._maybe_inject_body(
-                        key,
-                        target_lanlan=target_lanlan,
-                    )
-                return Ok({"enabled": enabled, "profile_id": key})
-            finally:
-                self._delivery_guard.release()
-        except SdkError as exc:
-            return Err(exc)
-        except Exception:
-            return _friendly_error("暂时无法更改自适应状态。", "adaptation_failed")
-
-    @plugin_entry(
-        id="export_profile",
-        name="导出安全 JSON",
-        description="导出当前档案、聚合统计与设置，不包含原始消息或身份。",
-        input_schema=PROFILE_REQUIRED_SCHEMA,
-        llm_result_fields=["profile", "privacy"],
-        timeout=15.0,
-    )
-    async def export_profile(self, **kwargs: Any):
-        try:
-            key = self._current_key(kwargs)
-            with self._state_lock:
-                exported = safe_export(self._state, key)
-            return Ok(
-                {
-                    "profile": exported["profile"],
-                    "privacy": exported["privacy"],
-                    "json": safe_json(exported),
-                }
-            )
-        except SdkError as exc:
-            return Err(exc)
-        except Exception:
-            return _friendly_error("当前档案暂时无法导出。", "export_failed")
-
-    @plugin_entry(
-        id="import_profile",
-        name="导入安全 JSON",
-        description="把本插件安全导出中的固定枚举偏好合并到明确选择的档案。",
-        input_schema=IMPORT_SCHEMA,
-        timeout=15.0,
-    )
-    async def import_profile(self, document: str, **kwargs: Any):
-        valid, message_text, imported_items = self._parse_import_document(document)
-        if not valid:
-            return _friendly_error(message_text, "invalid_import")
-        try:
-            key, target_lanlan = self._current_scope(kwargs)
-            if not imported_items:
-                snapshot = self._snapshot_for_key(key)
-                return Ok(
-                    {
-                        "imported": 0,
-                        "profile_id": key,
-                        "guidance": snapshot["guidance"],
-                    }
-                )
-            comparison_at = time.time()
-            with self._state_lock:
-                before_state = copy.deepcopy(self._state)
-                validation_state = copy.deepcopy(self._state)
-            for dimension, value, locked in imported_items:
-                item_ok, item_message, _ = engine_set_manual(
-                    validation_state,
-                    key,
-                    dimension=dimension,
-                    value=value,
-                    locked=locked,
-                    at=comparison_at,
-                )
-                if not item_ok:
-                    return _friendly_error(item_message, "invalid_import")
-            if not self._import_items_retained(
-                validation_state,
-                key,
-                imported_items,
-            ):
-                return _friendly_error(
-                    "导入偏好超过当前容量上限；文档未应用。",
-                    "invalid_import",
-                )
-            requires_clearance = self._queued_guidance_would_be_invalidated(
-                before_state,
-                validation_state,
-                key,
-                at=comparison_at,
-            )
-            await self._acquire_thread_lock(self._delivery_guard)
-            try:
-                with self._state_lock:
-                    if key not in self._state["profiles"]:
-                        return _friendly_error(
-                            "所选档案不存在或已过期，请刷新管理面板后重试。",
-                            "profile_not_found",
-                        )
-                    before_state = copy.deepcopy(self._state)
-                    validation_state = copy.deepcopy(self._state)
-                for dimension, value, locked in imported_items:
-                    item_ok, item_message, _ = engine_set_manual(
-                        validation_state,
-                        key,
-                        dimension=dimension,
-                        value=value,
-                        locked=locked,
-                        at=comparison_at,
-                    )
-                    if not item_ok:
-                        return _friendly_error(item_message, "invalid_import")
-                if not self._import_items_retained(
-                    validation_state,
-                    key,
-                    imported_items,
-                ):
-                    return _friendly_error(
-                        "导入偏好超过当前容量上限；文档未应用。",
-                        "invalid_import",
-                    )
-                requires_clearance = self._queued_guidance_would_be_invalidated(
-                    before_state,
-                    validation_state,
-                    key,
-                    at=comparison_at,
-                )
-                if (
-                    requires_clearance
-                    and not await self._preclear_active_guidance_body(
-                        key,
-                        target_lanlan=target_lanlan,
-                        reason="profile_imported",
-                    )
-                ):
-                    return _friendly_error(
-                        "旧提示暂时无法安全清除；导入未应用，请在真实聊天后重试。",
-                        "clearance_failed",
-                    )
-                await self._acquire_thread_lock(self._entry_mutation_lock)
-                try:
-                    checkpoint = self._state_checkpoint()
-                    with self._state_lock:
-                        if key not in self._state["profiles"]:
-                            return _friendly_error(
-                                "所选档案不存在或已过期，请刷新管理面板后重试。",
-                                "profile_not_found",
-                            )
-                        for dimension, value, locked in imported_items:
-                            item_ok, item_message, _ = engine_set_manual(
-                                self._state,
-                                key,
-                                dimension=dimension,
-                                value=value,
-                                locked=locked,
-                                at=comparison_at,
-                            )
-                            if not item_ok:
-                                self._rollback_state(checkpoint)
-                                return _friendly_error(
-                                    item_message,
-                                    "invalid_import",
-                                )
-                        if not self._import_items_retained(
-                            self._state,
-                            key,
-                            imported_items,
-                        ):
-                            self._rollback_state(checkpoint)
-                            return _friendly_error(
-                                "导入偏好超过当前容量上限；文档未应用。",
-                                "invalid_import",
-                            )
-                        snapshot = profile_snapshot(self._state, key)
-                    if not await self._persist_or_rollback(checkpoint):
-                        return _friendly_error(
-                            "导入结果暂时无法保存，请稍后重试。",
-                            "store_failed",
-                        )
-                finally:
-                    self._entry_mutation_lock.release()
-                if imported_items:
-                    await self._maybe_inject_body(
-                        key,
-                        target_lanlan=target_lanlan,
-                    )
-                return Ok(
-                    {
-                        "imported": len(imported_items),
-                        "profile_id": key,
-                        "guidance": snapshot["guidance"],
-                    }
-                )
-            finally:
-                self._delivery_guard.release()
-        except SdkError as exc:
-            return Err(exc)
-        except Exception:
-            return _friendly_error("当前档案暂时无法安全导入。", "import_failed")
-
-    # ------------------------------------------------------------------
-    # Panel-only state/settings/destructive actions
-    # ------------------------------------------------------------------
-
-    @plugin_entry(
-        id="create_local_profile",
-        name="创建本地猫娘档案",
-        description="用本地猫娘名称创建可选择的伪匿名空档案；真实聊天出现前不建立推送路由。",
-        input_schema=CREATE_PROFILE_SCHEMA,
-        timeout=15.0,
-    )
-    async def create_local_profile(self, character: str, **_: Any):
-        cleaned = sanitize_identity(character, limit=80)
-        if (
-            not cleaned
-            or any(marker in cleaned for marker in ("\n", "\r", "[", "]", "<", ">"))
-        ):
-            return _friendly_error(
-                "猫娘名称必须是 1–80 个字符的普通单行文本。",
-                "invalid_character",
-            )
-        try:
-            await self._acquire_thread_lock(self._entry_mutation_lock)
-            try:
-                with self._state_lock:
-                    if self._state["settings"].get("scope") == "conversation":
-                        return _friendly_error(
-                            "当前宿主没有可信的会话标识；会话隔离范围不能创建合成档案。",
-                            "scope_unavailable",
-                        )
-                checkpoint = self._state_checkpoint()
-                with self._state_lock:
-                    key = profile_key(
-                        self._state,
-                        user_id=f"local-character:{cleaned}",
-                        conversation_id=f"lanlan:{cleaned}",
-                        character_id=cleaned,
-                    )
-                    if key not in self._state["profiles"] and len(
-                        self._state["profiles"]
-                    ) >= int(self._state["settings"]["max_users"]):
-                        return _friendly_error(
-                            "偏好档案数量已达上限；请先导出并重置不再使用的档案。",
-                            "profile_capacity",
-                        )
-                    ensure_profile(self._state, key)
-                    enforce_bounds(self._state)
-                    if key not in self._state["profiles"]:
-                        self._rollback_state(checkpoint)
-                        return _friendly_error(
-                            "档案容量已被更高优先级的手动档案占满。",
-                            "profile_capacity",
-                        )
-                if not await self._persist_or_rollback(checkpoint):
-                    return _friendly_error(
-                        "档案暂时无法保存，请稍后重试。",
-                        "store_failed",
-                    )
-            finally:
-                self._entry_mutation_lock.release()
-            return Ok(
-                {
-                    "created": True,
-                    "profile_id": key,
-                    "route_verified": False,
-                }
-            )
-        except Exception:
-            return _friendly_error("暂时无法创建本地档案。", "profile_create_failed")
+            return _friendly_error("暂时无法读取角色卡。", "characters_load_failed")
+        finally:
+            self._mutation_lock.release()
 
     @plugin_entry(
         id="get_panel_state",
-        name="读取管理面板状态",
-        description="读取面板需要的安全状态、设置、选项和提示预览。",
+        name="读取角色卡自适应状态",
+        description="返回真实角色列表、绑定、生效状态、建议和修改记录。",
         input_schema=EMPTY_SCHEMA,
         timeout=15.0,
     )
-    async def get_panel_state(self, **kwargs: Any):
+    async def get_panel_state(self, **_: Any):
+        await self._acquire_thread_lock(self._mutation_lock)
         try:
-            requested = self._identity_text(kwargs.get("profile_id"))
-            key = self._current_key(kwargs) if requested else ""
-            return Ok(self._panel_payload(key))
-        except SdkError as exc:
-            return Err(exc)
+            checkpoint = self._checkpoint()
+            payload = await self._panel_state_locked()
+            if self._store_ready and self._state != checkpoint:
+                await self._persist_state()
+            return Ok(payload)
+        except CharacterOperationError as exc:
+            return _friendly_error(str(exc), exc.code)
         except Exception:
             return _friendly_error("管理面板状态暂时不可用。", "panel_state_failed")
-
-    @plugin_entry(
-        id="save_settings",
-        name="保存 Auto Prompt Harness 设置",
-        description="验证并持久化面板设置。",
-        input_schema=SAVE_SETTINGS_SCHEMA,
-        timeout=15.0,
-    )
-    async def save_settings(self, settings: Mapping[str, Any], **kwargs: Any):
-        try:
-            ok, message_text, patch = self._validate_settings_input(settings)
-            if not ok:
-                return _friendly_error(message_text, "invalid_settings")
-            with self._state_lock:
-                current_scope_setting = str(self._state["settings"]["scope"])
-                has_profiles = bool(self._state["profiles"])
-            if (
-                has_profiles
-                and "scope" in patch
-                and patch["scope"] != current_scope_setting
-            ):
-                return _friendly_error(
-                    "已有档案时不能直接切换隔离范围；请先导出并重置现有档案。",
-                    "scope_change_requires_reset",
-                )
-            self._current_scope(kwargs, require_unambiguous=False)
-            await self._acquire_thread_lock(self._delivery_guard)
-            try:
-                comparison_at = time.time()
-                with self._state_lock:
-                    self._prune_runtime_targets_locked()
-                    before_keys = list(self._state["profiles"])
-                    before_targets = {
-                        profile_key_value: self._fresh_target_locked(
-                            profile_key_value
-                        )
-                        for profile_key_value in before_keys
-                    }
-                    settings_changed = any(
-                        self._state["settings"].get(name) != value
-                        for name, value in patch.items()
-                    )
-                    before_state = copy.deepcopy(self._state)
-                    prospective_state = copy.deepcopy(self._state)
-                if settings_changed:
-                    prospective_state["settings"] = normalize_settings(
-                        {**prospective_state["settings"], **patch}
-                    )
-                    if not prospective_state["settings"]["debug_excerpts"]:
-                        for profile in prospective_state["profiles"].values():
-                            if isinstance(profile, dict):
-                                profile["debug_excerpts"] = []
-                    prune_expired_profiles(
-                        prospective_state,
-                        at=comparison_at,
-                    )
-                    affected_keys = [
-                        profile_key_value
-                        for profile_key_value in set(before_keys)
-                        | set(prospective_state["profiles"])
-                        if self._queued_guidance_would_be_invalidated(
-                            copy.deepcopy(before_state),
-                            copy.deepcopy(prospective_state),
-                            profile_key_value,
-                            at=comparison_at,
-                        )
-                    ]
-                else:
-                    affected_keys = []
-                if settings_changed:
-                    for affected_key in affected_keys:
-                        if not await self._preclear_active_guidance_body(
-                            affected_key,
-                            target_lanlan=before_targets.get(affected_key, ""),
-                            reason="settings_changed",
-                        ):
-                            return _friendly_error(
-                                "旧提示暂时无法安全清除；设置未更改，请在各档案出现真实聊天后重试。",
-                                "clearance_failed",
-                            )
-                await self._acquire_thread_lock(self._entry_mutation_lock)
-                try:
-                    with self._state_lock:
-                        if (
-                            self._state["profiles"]
-                            and "scope" in patch
-                            and patch["scope"] != self._state["settings"]["scope"]
-                        ):
-                            return _friendly_error(
-                                "已有档案时不能直接切换隔离范围；请先导出并重置现有档案。",
-                                "scope_change_requires_reset",
-                            )
-                    checkpoint = self._state_checkpoint()
-                    with self._state_lock:
-                        merged = {**self._state["settings"], **patch}
-                        self._state["settings"] = normalize_settings(merged)
-                        if not self._state["settings"]["debug_excerpts"]:
-                            for profile in self._state["profiles"].values():
-                                if isinstance(profile, dict):
-                                    profile["debug_excerpts"] = []
-                        if settings_changed:
-                            prune_expired_profiles(
-                                self._state,
-                                at=comparison_at,
-                            )
-                        after_keys = list(self._state["profiles"])
-                    if not await self._persist_or_rollback(checkpoint):
-                        return _friendly_error(
-                            "设置暂时无法保存，请稍后重试。",
-                            "store_failed",
-                        )
-                    with self._state_lock:
-                        for removed_key in set(before_keys) - set(after_keys):
-                            self._profile_targets.pop(removed_key, None)
-                            self._profile_target_seen_at.pop(removed_key, None)
-                        saved_settings = copy.deepcopy(self._state["settings"])
-                finally:
-                    self._entry_mutation_lock.release()
-                if settings_changed:
-                    for affected_key in after_keys:
-                        with self._state_lock:
-                            affected_profile = self._state["profiles"].get(
-                                affected_key
-                            )
-                            target = self._fresh_target_locked(affected_key)
-                            snapshot = (
-                                profile_snapshot(self._state, affected_key)
-                                if isinstance(affected_profile, Mapping)
-                                else None
-                            )
-                            should_inject = bool(
-                                isinstance(affected_profile, Mapping)
-                                and snapshot
-                                and saved_settings["adaptation_enabled"]
-                                and saved_settings["injection_enabled"]
-                                and affected_profile.get("enabled", True)
-                                and snapshot["guidance"]
-                            )
-                        if should_inject:
-                            await self._maybe_inject_body(
-                                affected_key,
-                                target_lanlan=target,
-                            )
-                return Ok(
-                    {
-                        "saved": True,
-                        "settings": saved_settings,
-                    }
-                )
-            finally:
-                self._delivery_guard.release()
-        except SdkError as exc:
-            return Err(exc)
-        except Exception:
-            return _friendly_error("设置暂时无法保存。", "settings_failed")
-
-    @plugin_entry(
-        id="reset_settings",
-        name="恢复默认设置",
-        description="恢复内置默认设置，不删除偏好档案。",
-        input_schema=EMPTY_SCHEMA,
-        timeout=15.0,
-    )
-    async def reset_settings(self, **kwargs: Any):
-        try:
-            self._current_scope(kwargs, require_unambiguous=False)
-            await self._acquire_thread_lock(self._delivery_guard)
-            try:
-                comparison_at = time.time()
-                with self._state_lock:
-                    if (
-                        self._state["profiles"]
-                        and self._state["settings"]["scope"]
-                        != DEFAULT_SETTINGS["scope"]
-                    ):
-                        return _friendly_error(
-                            "恢复默认设置会改变现有档案的隔离范围；请先导出并重置现有档案。",
-                            "scope_change_requires_reset",
-                        )
-                    self._prune_runtime_targets_locked()
-                    before_keys = list(self._state["profiles"])
-                    before_targets = {
-                        profile_key_value: self._fresh_target_locked(
-                            profile_key_value
-                        )
-                        for profile_key_value in before_keys
-                    }
-                    settings_changed = self._state["settings"] != DEFAULT_SETTINGS
-                    before_state = copy.deepcopy(self._state)
-                    prospective_state = copy.deepcopy(self._state)
-                if settings_changed:
-                    prospective_state["settings"] = copy.deepcopy(DEFAULT_SETTINGS)
-                    for profile in prospective_state["profiles"].values():
-                        if isinstance(profile, dict):
-                            profile["debug_excerpts"] = []
-                    enforce_bounds(prospective_state)
-                    affected_keys = [
-                        profile_key_value
-                        for profile_key_value in set(before_keys)
-                        | set(prospective_state["profiles"])
-                        if self._queued_guidance_would_be_invalidated(
-                            copy.deepcopy(before_state),
-                            copy.deepcopy(prospective_state),
-                            profile_key_value,
-                            at=comparison_at,
-                        )
-                    ]
-                else:
-                    affected_keys = []
-                if settings_changed:
-                    for affected_key in affected_keys:
-                        if not await self._preclear_active_guidance_body(
-                            affected_key,
-                            target_lanlan=before_targets.get(affected_key, ""),
-                            reason="settings_reset",
-                        ):
-                            return _friendly_error(
-                                "旧提示暂时无法安全清除；默认设置未恢复，请在各档案出现真实聊天后重试。",
-                                "clearance_failed",
-                            )
-                await self._acquire_thread_lock(self._entry_mutation_lock)
-                try:
-                    checkpoint = self._state_checkpoint()
-                    with self._state_lock:
-                        self._state["settings"] = copy.deepcopy(DEFAULT_SETTINGS)
-                        for profile in self._state["profiles"].values():
-                            if isinstance(profile, dict):
-                                profile["debug_excerpts"] = []
-                        enforce_bounds(self._state)
-                        affected_keys = list(self._state["profiles"])
-                    if not await self._persist_or_rollback(checkpoint):
-                        return _friendly_error(
-                            "默认设置暂时无法保存。",
-                            "store_failed",
-                        )
-                    with self._state_lock:
-                        for removed_key in set(before_keys) - set(affected_keys):
-                            self._profile_targets.pop(removed_key, None)
-                            self._profile_target_seen_at.pop(removed_key, None)
-                finally:
-                    self._entry_mutation_lock.release()
-                if settings_changed:
-                    for affected_key in affected_keys:
-                        with self._state_lock:
-                            affected_profile = self._state["profiles"].get(
-                                affected_key
-                            )
-                            current_target = self._fresh_target_locked(affected_key)
-                            snapshot = profile_snapshot(self._state, affected_key)
-                            should_inject = bool(
-                                isinstance(affected_profile, Mapping)
-                                and affected_profile.get("enabled", True)
-                                and snapshot["guidance"]
-                            )
-                        if should_inject:
-                            await self._maybe_inject_body(
-                                affected_key,
-                                target_lanlan=current_target,
-                            )
-                return Ok(
-                    {
-                        "reset": True,
-                        "settings": copy.deepcopy(DEFAULT_SETTINGS),
-                    }
-                    )
-            finally:
-                self._delivery_guard.release()
-        except SdkError as exc:
-            return Err(exc)
-        except Exception:
-            return _friendly_error("暂时无法恢复默认设置。", "reset_settings_failed")
-
-    @plugin_entry(
-        id="reset_profile",
-        name="重置当前偏好档案",
-        description="永久删除当前范围的档案；必须明确确认。该操作不是 LLM 工具。",
-        input_schema=RESET_SCHEMA,
-        timeout=15.0,
-    )
-    async def reset_profile(self, confirmation: str, **kwargs: Any):
-        if confirmation != "RESET":
-            return _friendly_error(
-                "请输入 RESET 以确认重置当前档案。", "confirmation_required"
-            )
-        try:
-            key, target_lanlan = self._current_scope(kwargs)
-            await self._acquire_thread_lock(self._delivery_guard)
-            try:
-                if not await self._preclear_active_guidance_body(
-                    key,
-                    target_lanlan=target_lanlan,
-                    reason="profile_reset",
-                ):
-                    return _friendly_error(
-                        "旧提示暂时无法安全清除；档案未重置，请在真实聊天后重试。",
-                        "clearance_failed",
-                    )
-                await self._acquire_thread_lock(self._entry_mutation_lock)
-                try:
-                    checkpoint = self._state_checkpoint()
-                    with self._state_lock:
-                        existed = self._state["profiles"].pop(key, None) is not None
-                        if self._state.get("last_active_profile") == key:
-                            self._state["last_active_profile"] = ""
-                    if not await self._persist_or_rollback(checkpoint):
-                        return _friendly_error(
-                            "重置结果暂时无法保存，请稍后重试。",
-                            "store_failed",
-                        )
-                    self._recent_route_digests.clear()
-                    if existed:
-                        with self._state_lock:
-                            self._profile_targets.pop(key, None)
-                            self._profile_target_seen_at.pop(key, None)
-                finally:
-                    self._entry_mutation_lock.release()
-                return Ok({"reset": existed, "profile_id": key})
-            finally:
-                self._delivery_guard.release()
-        except SdkError as exc:
-            return Err(exc)
-        except Exception:
-            return _friendly_error("当前档案暂时无法重置。", "reset_profile_failed")
+        finally:
+            self._mutation_lock.release()
 
 
 __all__ = ["AutoPromptHarnessPlugin", "PLUGIN_ID"]

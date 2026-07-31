@@ -3,75 +3,60 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; worker-src 'none'">
   <meta name="color-scheme" content="light dark">
-  <title data-i18n="app.title">Auto Prompt Harness · 偏好控制台</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; worker-src 'none'">
+  <title>角色卡自适应</title>
   <style>
     :root {
       color-scheme: light;
-      --page: #f3f6fb;
-      --page-accent: #e7efff;
-      --surface: rgba(255, 255, 255, .94);
-      --surface-solid: #ffffff;
-      --surface-soft: #f7f9fd;
+      --page: #f4f6fb;
+      --surface: #ffffff;
+      --surface-soft: #f7f9fc;
       --ink: #172033;
       --muted: #667085;
-      --subtle: #98a2b3;
-      --line: #dfe5ef;
-      --line-strong: #cbd5e1;
-      --primary: #3157d5;
-      --primary-strong: #2545ad;
-      --primary-soft: #e9efff;
-      --teal: #087f72;
-      --teal-soft: #e4f6f2;
-      --warning: #a15c00;
-      --warning-soft: #fff3dc;
-      --danger: #bd2c37;
-      --danger-strong: #981b25;
+      --line: #dce3ee;
+      --primary: #3856d6;
+      --primary-hover: #2945bd;
+      --primary-soft: #edf1ff;
+      --good: #087a55;
+      --good-soft: #e9f8f1;
+      --warn: #9a5a04;
+      --warn-soft: #fff5df;
+      --danger: #b42331;
+      --danger-hover: #951c28;
       --danger-soft: #fff0f1;
-      --success: #137a4d;
-      --success-soft: #e9f8f0;
-      --shadow: 0 18px 48px rgba(26, 38, 73, .10);
-      --shadow-small: 0 7px 20px rgba(26, 38, 73, .08);
-      --radius-xl: 24px;
-      --radius-lg: 18px;
-      --radius-md: 12px;
-      --focus: 0 0 0 3px rgba(49, 87, 213, .25);
-      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --shadow: 0 18px 50px rgba(25, 38, 72, .10);
+      --focus: 0 0 0 3px rgba(56, 86, 214, .24);
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
     }
 
     @media (prefers-color-scheme: dark) {
       :root {
         color-scheme: dark;
         --page: #101521;
-        --page-accent: #172039;
-        --surface: rgba(25, 32, 48, .95);
-        --surface-solid: #1a2131;
-        --surface-soft: #20293b;
-        --ink: #f1f5fb;
-        --muted: #b3bfd0;
-        --subtle: #8895a9;
-        --line: #354057;
-        --line-strong: #46536c;
-        --primary: #8da8ff;
-        --primary-strong: #b2c3ff;
-        --primary-soft: #27365e;
-        --teal: #67d5c5;
-        --teal-soft: #183e3b;
-        --warning: #ffc36b;
-        --warning-soft: #49351c;
-        --danger: #ff8a94;
-        --danger-strong: #ffb1b7;
-        --danger-soft: #49262b;
-        --success: #65d69d;
-        --success-soft: #183c2d;
+        --surface: #1b2231;
+        --surface-soft: #222b3d;
+        --ink: #f0f4fb;
+        --muted: #b2bdce;
+        --line: #374359;
+        --primary: #91a9ff;
+        --primary-hover: #b1c0ff;
+        --primary-soft: #28365d;
+        --good: #68d6a4;
+        --good-soft: #183c2e;
+        --warn: #ffc66d;
+        --warn-soft: #49371e;
+        --danger: #ff8b95;
+        --danger-hover: #ffb0b7;
+        --danger-soft: #49272d;
         --shadow: 0 18px 54px rgba(0, 0, 0, .28);
-        --shadow-small: 0 7px 20px rgba(0, 0, 0, .22);
       }
     }
 
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
     html { scroll-behavior: smooth; }
     body {
       min-width: 280px;
@@ -79,41 +64,28 @@
       margin: 0;
       color: var(--ink);
       background:
-        radial-gradient(circle at 12% -8%, var(--page-accent) 0, transparent 34rem),
-        radial-gradient(circle at 92% 8%, rgba(47, 180, 163, .09) 0, transparent 28rem),
+        radial-gradient(circle at 8% -8%, rgba(77, 105, 221, .17), transparent 32rem),
+        radial-gradient(circle at 96% 8%, rgba(22, 157, 119, .10), transparent 27rem),
         var(--page);
       line-height: 1.55;
     }
+
     button, input, select, textarea { font: inherit; }
     button, select, input[type="checkbox"], input[type="range"] { cursor: pointer; }
     button:disabled, input:disabled, select:disabled, textarea:disabled {
       cursor: not-allowed;
-      opacity: .56;
+      opacity: .55;
     }
     button:focus-visible, input:focus-visible, select:focus-visible,
-    textarea:focus-visible, summary:focus-visible, a:focus-visible {
+    textarea:focus-visible, summary:focus-visible {
       outline: none;
       box-shadow: var(--focus);
     }
-    [hidden] { display: none !important; }
-
-    .skip-link {
-      position: fixed;
-      z-index: 100;
-      top: 10px;
-      left: 10px;
-      padding: 9px 13px;
-      border-radius: 9px;
-      color: #fff;
-      background: var(--primary-strong);
-      transform: translateY(-160%);
-    }
-    .skip-link:focus { transform: translateY(0); }
 
     .shell {
-      width: min(1240px, calc(100% - 32px));
+      width: min(1120px, calc(100% - 32px));
       margin: 0 auto;
-      padding: 30px 0 64px;
+      padding: 28px 0 64px;
     }
 
     .hero {
@@ -124,2363 +96,1410 @@
       align-items: center;
       overflow: hidden;
       padding: 30px;
-      border: 1px solid rgba(255, 255, 255, .55);
-      border-radius: var(--radius-xl);
-      background:
-        linear-gradient(125deg, rgba(49, 87, 213, .94), rgba(34, 69, 171, .93) 52%, rgba(8, 127, 114, .91));
+      border-radius: 24px;
       color: #fff;
+      background: linear-gradient(125deg, #3e5ddd, #2e48b5 53%, #087c69);
       box-shadow: var(--shadow);
     }
     .hero::after {
       position: absolute;
+      top: -150px;
+      right: -95px;
       width: 280px;
       height: 280px;
-      right: -90px;
-      top: -155px;
-      border: 50px solid rgba(255, 255, 255, .08);
+      border: 48px solid rgba(255, 255, 255, .08);
       border-radius: 50%;
       content: "";
     }
     .eyebrow {
-      margin: 0 0 8px;
-      font-size: .76rem;
+      margin: 0 0 7px;
+      font-size: .75rem;
       font-weight: 800;
-      letter-spacing: .14em;
-      text-transform: uppercase;
-      opacity: .82;
+      letter-spacing: .13em;
+      opacity: .78;
     }
-    .hero h1 {
+    h1 {
       margin: 0;
-      font-size: clamp(1.7rem, 4vw, 2.75rem);
-      line-height: 1.12;
+      font-size: clamp(1.75rem, 4vw, 2.65rem);
+      line-height: 1.14;
       letter-spacing: -.035em;
     }
-    .hero-subtitle {
-      max-width: 720px;
+    .hero p {
+      max-width: 750px;
       margin: 12px 0 0;
-      color: rgba(255, 255, 255, .82);
+      color: rgba(255, 255, 255, .84);
     }
     .hero-actions {
       position: relative;
       z-index: 1;
       display: flex;
-      align-items: center;
       gap: 10px;
-      flex-wrap: wrap;
+      align-items: center;
       justify-content: flex-end;
+      flex-wrap: wrap;
     }
 
-    .status-chip, .tag {
+    .button {
+      min-height: 42px;
+      padding: 9px 15px;
+      border: 1px solid transparent;
+      border-radius: 11px;
+      color: #fff;
+      background: var(--primary);
+      font-weight: 750;
+      transition: background .16s ease, transform .16s ease, border-color .16s ease;
+    }
+    .button:hover:not(:disabled) {
+      background: var(--primary-hover);
+      transform: translateY(-1px);
+    }
+    .button.secondary {
+      border-color: var(--line);
+      color: var(--ink);
+      background: var(--surface);
+    }
+    .button.secondary:hover:not(:disabled) { background: var(--surface-soft); }
+    .button.ghost {
+      border-color: rgba(255, 255, 255, .38);
+      color: #fff;
+      background: rgba(255, 255, 255, .12);
+      backdrop-filter: blur(5px);
+    }
+    .button.ghost:hover:not(:disabled) { background: rgba(255, 255, 255, .2); }
+    .button.danger { color: #fff; background: var(--danger); }
+    .button.danger:hover:not(:disabled) { background: var(--danger-hover); }
+    .button.small { min-height: 36px; padding: 6px 11px; font-size: .9rem; }
+
+    .runtime-badge, .tag {
       display: inline-flex;
-      align-items: center;
       gap: 7px;
+      align-items: center;
       width: max-content;
       padding: 6px 10px;
       border-radius: 999px;
       font-size: .78rem;
       font-weight: 750;
-      white-space: nowrap;
     }
-    .status-chip {
+    .runtime-badge {
       border: 1px solid rgba(255, 255, 255, .28);
       background: rgba(255, 255, 255, .13);
     }
-    .status-chip::before {
+    .runtime-badge::before {
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: #b8c2d4;
+      background: currentColor;
       content: "";
     }
-    .status-chip[data-tone="success"]::before { background: #78f0b1; }
-    .status-chip[data-tone="warning"]::before { background: #ffd278; }
-    .status-chip[data-tone="danger"]::before { background: #ff9fa7; }
+    .tag { color: var(--muted); background: var(--surface-soft); }
+    .tag.good { color: var(--good); background: var(--good-soft); }
+    .tag.warn { color: var(--warn); background: var(--warn-soft); }
+    .tag.bad { color: var(--danger); background: var(--danger-soft); }
 
-    .button {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      min-height: 40px;
-      padding: 9px 15px;
-      border: 1px solid transparent;
-      border-radius: 11px;
-      font-weight: 750;
+    .notice {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      margin-top: 16px;
+      padding: 13px 15px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      color: var(--muted);
+      background: var(--surface);
+      box-shadow: 0 5px 18px rgba(25, 38, 72, .05);
+    }
+    .notice strong { color: var(--ink); }
+    .notice.warn { border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); background: var(--warn-soft); }
+    .notice.bad { border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); background: var(--danger-soft); }
+    .notice-mark {
+      display: grid;
+      flex: 0 0 auto;
+      place-items: center;
+      width: 25px;
+      height: 25px;
+      border-radius: 50%;
       color: #fff;
       background: var(--primary);
-      transition: transform .15s ease, background .15s ease, border-color .15s ease;
-    }
-    .button:hover:not(:disabled) { transform: translateY(-1px); background: var(--primary-strong); }
-    .button.secondary {
-      border-color: var(--line-strong);
-      color: var(--ink);
-      background: var(--surface-solid);
-    }
-    .button.secondary:hover:not(:disabled) { background: var(--surface-soft); }
-    .button.ghost {
-      border-color: rgba(255, 255, 255, .32);
-      color: #fff;
-      background: rgba(255, 255, 255, .10);
-    }
-    .button.ghost:hover:not(:disabled) { background: rgba(255, 255, 255, .18); }
-    .button.danger { background: var(--danger); }
-    .button.danger:hover:not(:disabled) { background: var(--danger-strong); }
-    .button.small { min-height: 34px; padding: 6px 11px; font-size: .82rem; }
-    .button.busy::before {
-      width: 13px;
-      height: 13px;
-      border: 2px solid currentColor;
-      border-right-color: transparent;
-      border-radius: 50%;
-      content: "";
-      animation: spin .7s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-
-    .notice-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 14px;
-      margin: 18px 0;
-    }
-    .notice {
-      display: grid;
-      grid-template-columns: auto minmax(0, 1fr);
-      gap: 12px;
-      padding: 16px;
-      border: 1px solid var(--line);
-      border-radius: var(--radius-lg);
-      background: var(--surface);
-      box-shadow: var(--shadow-small);
-    }
-    .notice-icon {
-      display: grid;
-      place-items: center;
-      width: 34px;
-      height: 34px;
-      border-radius: 11px;
-      color: var(--primary);
-      background: var(--primary-soft);
+      font-size: .78rem;
       font-weight: 900;
     }
-    .notice.warning .notice-icon { color: var(--warning); background: var(--warning-soft); }
-    .notice h2 { margin: 0 0 3px; font-size: .92rem; }
-    .notice p { margin: 0; color: var(--muted); font-size: .84rem; }
 
-    .panel {
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 18px;
       margin-top: 18px;
+    }
+    .card {
+      grid-column: span 12;
       padding: 22px;
       border: 1px solid var(--line);
-      border-radius: var(--radius-xl);
-      background: var(--surface);
-      box-shadow: var(--shadow-small);
+      border-radius: 18px;
+      background: color-mix(in srgb, var(--surface) 96%, transparent);
+      box-shadow: 0 8px 28px rgba(25, 38, 72, .06);
     }
-    .panel-header {
+    .card.half { grid-column: span 6; }
+    .card-header {
       display: flex;
+      gap: 16px;
       align-items: flex-start;
       justify-content: space-between;
-      gap: 18px;
-      margin-bottom: 18px;
+      margin-bottom: 17px;
     }
-    .panel-header h2 { margin: 0; font-size: 1.18rem; letter-spacing: -.015em; }
-    .panel-header p { margin: 4px 0 0; color: var(--muted); font-size: .88rem; }
-    .toolbar { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+    .card h2, .card h3 { margin: 0; line-height: 1.25; }
+    .card h2 { font-size: 1.16rem; }
+    .card h3 { font-size: 1rem; }
+    .card-description {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: .91rem;
+    }
+    .section-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
 
-    .profile-manager {
+    .choice-row {
       display: grid;
-      grid-template-columns: minmax(220px, .7fr) minmax(0, 1.3fr);
-      gap: 18px;
-      margin-bottom: 16px;
-      padding: 17px;
-      border: 1px solid var(--line);
-      border-radius: var(--radius-lg);
-      background: var(--surface-solid);
-    }
-    .profile-manager h3 { margin: 0; font-size: .98rem; }
-    .profile-manager-copy p { margin: 5px 0 0; color: var(--muted); font-size: .8rem; }
-    .profile-controls {
-      display: grid;
-      grid-template-columns: minmax(220px, 1fr) minmax(320px, 1.35fr);
-      gap: 14px;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
       align-items: end;
     }
-    .profile-create-form {
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: .88rem;
+      font-weight: 720;
+    }
+    select, input[type="text"], input[type="number"], textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      color: var(--ink);
+      background: var(--surface);
+    }
+    select, input[type="text"], input[type="number"] {
+      min-height: 42px;
+      padding: 8px 11px;
+    }
+    textarea {
+      min-height: 82px;
+      padding: 10px 11px;
+      resize: vertical;
+      line-height: 1.5;
+    }
+    .help {
+      display: block;
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: .82rem;
+    }
+
+    .facts {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 11px;
+      margin: 0;
+    }
+    .fact {
+      min-width: 0;
+      padding: 13px;
+      border-radius: 12px;
+      background: var(--surface-soft);
+    }
+    .fact dt {
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: .78rem;
+    }
+    .fact dd {
+      overflow-wrap: anywhere;
+      margin: 0;
+      font-weight: 760;
+    }
+    .adaptations {
+      margin: 15px 0 0;
+      padding: 14px 14px 14px 32px;
+      border-radius: 12px;
+      background: var(--primary-soft);
+    }
+    .adaptations li + li { margin-top: 6px; }
+
+    .empty {
+      margin: 0;
+      padding: 25px 16px;
+      border: 1px dashed var(--line);
+      border-radius: 12px;
+      color: var(--muted);
+      text-align: center;
+      background: var(--surface-soft);
+    }
+    .stack { display: grid; gap: 12px; }
+    .item {
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--surface-soft);
+    }
+    .item-head {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .item-title { margin: 0; font-size: .98rem; overflow-wrap: anywhere; }
+    .item-meta {
+      display: flex;
+      gap: 7px;
+      align-items: center;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: .79rem;
+    }
+    .item p { margin: 7px 0 0; }
+    .item-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    .evidence {
+      margin: 10px 0 0;
+      padding: 10px 12px;
+      border-left: 3px solid var(--line);
+      color: var(--muted);
+      background: var(--surface);
+      white-space: pre-wrap;
+    }
+    .change {
+      display: grid;
+      grid-template-columns: 68px minmax(0, 1fr);
+      gap: 12px;
+    }
+    .change-time { color: var(--muted); font-size: .78rem; }
+    .change-body { min-width: 0; }
+    .change-body p { margin: 2px 0 0; overflow-wrap: anywhere; }
+    .diff {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 9px;
+    }
+    .diff div {
+      padding: 9px;
+      border-radius: 9px;
+      background: var(--surface);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-size: .82rem;
+    }
+    .diff strong { display: block; margin-bottom: 4px; color: var(--muted); }
+
+    details {
+      border-top: 1px solid var(--line);
+      margin-top: 19px;
+      padding-top: 15px;
+    }
+    summary {
+      width: max-content;
+      border-radius: 8px;
+      font-weight: 760;
+      cursor: pointer;
+    }
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 13px 18px;
+      margin-top: 16px;
+    }
+    .toggle {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      margin: 0;
+      padding: 11px;
+      border-radius: 10px;
+      background: var(--surface-soft);
+    }
+    .toggle input { flex: 0 0 auto; margin-top: 4px; }
+    .toggle span { font-weight: 700; }
+    .toggle small { display: block; color: var(--muted); font-weight: 400; }
+    .settings-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 14px;
+    }
+    .danger-zone {
+      margin-top: 16px;
+      padding: 15px;
+      border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
+      border-radius: 12px;
+      background: var(--danger-soft);
+    }
+    .danger-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
       gap: 9px;
       align-items: end;
-    }
-    .profile-create-form .field-help { grid-column: 1 / -1; }
-    .profile-error { grid-column: 1 / -1; margin-top: 0; }
-    .persistence-warning {
-      display: grid;
-      grid-template-columns: auto minmax(0, 1fr);
-      gap: 10px;
-      margin-bottom: 16px;
-      padding: 12px 14px;
-      border: 1px solid color-mix(in srgb, var(--danger) 32%, var(--line));
-      border-radius: 11px;
-      color: var(--danger);
-      background: var(--danger-soft);
-      font-size: .8rem;
-    }
-    .persistence-warning strong { display: block; }
-    .persistence-warning span { display: block; margin-top: 2px; color: var(--muted); }
-
-    .stats-grid {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
-      gap: 11px;
-    }
-    .stat {
-      min-width: 0;
-      padding: 15px;
-      border: 1px solid var(--line);
-      border-radius: var(--radius-md);
-      background: var(--surface-soft);
-    }
-    .stat-label { display: block; color: var(--muted); font-size: .77rem; }
-    .stat-value {
-      display: block;
-      overflow: hidden;
-      margin-top: 5px;
-      font-size: 1.35rem;
-      font-weight: 820;
-      line-height: 1.15;
-      text-overflow: ellipsis;
-    }
-
-    .dashboard-grid {
-      display: grid;
-      grid-template-columns: minmax(0, 1.2fr) minmax(300px, .8fr);
-      gap: 16px;
-      margin-top: 16px;
-    }
-    .subpanel {
-      min-width: 0;
-      padding: 17px;
-      border: 1px solid var(--line);
-      border-radius: var(--radius-lg);
-      background: var(--surface-solid);
-    }
-    .subpanel h3 { margin: 0; font-size: .98rem; }
-    .subpanel-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 11px;
-    }
-    .hint { color: var(--muted); font-size: .8rem; }
-    .exact-preview {
-      min-height: 188px;
-      max-height: 360px;
-      margin: 0;
-      overflow: auto;
-      padding: 15px;
-      border: 1px solid var(--line-strong);
-      border-radius: var(--radius-md);
-      color: var(--ink);
-      background: var(--surface-soft);
-      font: .78rem/1.65 var(--mono);
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-    }
-    .empty {
-      margin: 12px 0 0;
-      padding: 18px;
-      border: 1px dashed var(--line-strong);
-      border-radius: var(--radius-md);
-      color: var(--muted);
-      text-align: center;
-      background: var(--surface-soft);
-    }
-
-    .preference-list { display: grid; gap: 10px; }
-    .preference-row {
-      display: grid;
-      grid-template-columns: minmax(140px, .75fr) minmax(160px, 1fr) minmax(150px, .85fr) auto;
-      gap: 12px;
-      align-items: center;
-      padding: 13px;
-      border: 1px solid var(--line);
-      border-radius: var(--radius-md);
-      background: var(--surface-soft);
-    }
-    .preference-name { min-width: 0; }
-    .preference-name strong, .preference-name span { display: block; overflow-wrap: anywhere; }
-    .preference-name span { color: var(--muted); font-size: .76rem; }
-    .preference-value { font-weight: 750; overflow-wrap: anywhere; }
-    .confidence { min-width: 0; }
-    .confidence-label {
-      display: flex;
-      justify-content: space-between;
-      gap: 8px;
-      color: var(--muted);
-      font-size: .75rem;
-    }
-    progress {
-      width: 100%;
-      height: 7px;
-      border: none;
-      border-radius: 999px;
-      overflow: hidden;
-      background: var(--line);
-    }
-    progress::-webkit-progress-bar { background: var(--line); border-radius: 999px; }
-    progress::-webkit-progress-value {
-      border-radius: 999px;
-      background: linear-gradient(90deg, var(--primary), var(--teal));
-    }
-    progress::-moz-progress-bar {
-      border-radius: 999px;
-      background: linear-gradient(90deg, var(--primary), var(--teal));
-    }
-    .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
-    .tag { padding: 3px 8px; color: var(--primary); background: var(--primary-soft); }
-    .tag.manual { color: var(--teal); background: var(--teal-soft); }
-    .tag.locked { color: var(--warning); background: var(--warning-soft); }
-
-    .changes-list {
-      display: grid;
-      gap: 8px;
-      max-height: 392px;
-      overflow: auto;
-    }
-    .change-row {
-      display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto;
-      gap: 10px;
-      align-items: center;
-      padding: 10px 0;
-      border-bottom: 1px solid var(--line);
-    }
-    .change-row:last-child { border-bottom: none; }
-    .change-dot {
-      width: 9px;
-      height: 9px;
-      border-radius: 50%;
-      background: var(--primary);
-    }
-    .change-main strong { display: block; font-size: .84rem; }
-    .change-main span, .change-time { color: var(--muted); font-size: .74rem; }
-
-    .form-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 15px;
-    }
-    .field { min-width: 0; }
-    .field.span-2 { grid-column: span 2; }
-    .field.span-3 { grid-column: 1 / -1; }
-    .field label, .field-label {
-      display: block;
-      margin-bottom: 6px;
-      font-size: .82rem;
-      font-weight: 750;
-    }
-    .field-help {
-      display: block;
-      margin-top: 5px;
-      color: var(--muted);
-      font-size: .73rem;
-    }
-    input[type="text"], input[type="number"], select, textarea {
-      width: 100%;
-      min-height: 42px;
-      padding: 9px 11px;
-      border: 1px solid var(--line-strong);
-      border-radius: 10px;
-      color: var(--ink);
-      background: var(--surface-solid);
-    }
-    textarea { min-height: 118px; resize: vertical; }
-    input[type="range"] { width: 100%; accent-color: var(--primary); }
-    .range-line {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 64px;
-      gap: 10px;
-      align-items: center;
-    }
-    .range-output {
-      padding: 5px 7px;
-      border-radius: 8px;
-      color: var(--primary);
-      background: var(--primary-soft);
-      font: 750 .77rem var(--mono);
-      text-align: center;
-    }
-    .switch-field {
-      display: flex;
-      align-items: flex-start;
-      gap: 10px;
-      min-height: 42px;
-      padding: 10px 11px;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: var(--surface-soft);
-    }
-    .switch-field input { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--primary); }
-    .switch-field strong { display: block; font-size: .82rem; }
-    .switch-field span { display: block; margin-top: 2px; color: var(--muted); font-size: .73rem; }
-    .form-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 18px; flex-wrap: wrap; }
-    .form-error {
       margin-top: 10px;
-      padding: 10px 12px;
-      border-radius: 10px;
-      color: var(--danger);
-      background: var(--danger-soft);
-      font-size: .82rem;
-    }
-
-    .workspace-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 18px;
-    }
-    .analysis-result {
-      margin-top: 14px;
-      padding-top: 14px;
-      border-top: 1px solid var(--line);
-    }
-    .result-list { display: flex; flex-wrap: wrap; gap: 7px; margin: 9px 0; }
-    .mini-preview {
-      max-height: 220px;
-      overflow: auto;
-      margin: 9px 0 0;
-      padding: 12px;
-      border-radius: 10px;
-      color: var(--ink);
-      background: var(--surface-soft);
-      font: .75rem/1.55 var(--mono);
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-    }
-
-    .privacy-grid {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 11px;
-    }
-    .privacy-card {
-      padding: 15px;
-      border: 1px solid var(--line);
-      border-radius: var(--radius-md);
-      background: var(--surface-soft);
-    }
-    .privacy-card strong { display: block; margin-bottom: 5px; font-size: .84rem; }
-    .privacy-card p { margin: 0; color: var(--muted); font-size: .76rem; }
-
-    .danger-panel { border-color: color-mix(in srgb, var(--danger) 30%, var(--line)); }
-    .danger-box {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(220px, 380px);
-      gap: 20px;
-      align-items: end;
-    }
-    .danger-copy h2 { margin: 0; color: var(--danger); font-size: 1.05rem; }
-    .danger-copy p { margin: 6px 0 0; color: var(--muted); font-size: .84rem; }
-
-    .observation-bar {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin-top: 14px;
-      padding: 11px 13px;
-      border-radius: 11px;
-      color: var(--warning);
-      background: var(--warning-soft);
-      font-size: .78rem;
     }
 
     .toast {
       position: fixed;
-      z-index: 90;
-      right: 18px;
-      bottom: 18px;
-      width: min(390px, calc(100% - 36px));
-      padding: 12px 14px;
+      z-index: 20;
+      right: 20px;
+      bottom: 20px;
+      max-width: min(430px, calc(100% - 40px));
+      padding: 12px 15px;
       border: 1px solid var(--line);
       border-radius: 12px;
       color: var(--ink);
-      background: var(--surface-solid);
-      box-shadow: var(--shadow);
-    }
-    .toast[data-tone="success"] { border-color: var(--success); background: var(--success-soft); }
-    .toast[data-tone="error"] { border-color: var(--danger); background: var(--danger-soft); }
-    .toast[data-tone="warning"] { border-color: var(--warning); background: var(--warning-soft); }
-
-    .boot {
-      display: grid;
-      place-items: center;
-      min-height: 70vh;
-      padding: 30px;
-    }
-    .boot-card {
-      width: min(470px, 100%);
-      padding: 28px;
-      border: 1px solid var(--line);
-      border-radius: var(--radius-xl);
-      text-align: center;
       background: var(--surface);
       box-shadow: var(--shadow);
     }
-    .loader {
-      width: 34px;
-      height: 34px;
-      margin: 0 auto 15px;
-      border: 3px solid var(--line);
-      border-right-color: var(--primary);
-      border-radius: 50%;
-      animation: spin .8s linear infinite;
-    }
-    .boot-card h1 { margin: 0; font-size: 1.1rem; }
-    .boot-card p { margin: 7px 0 0; color: var(--muted); font-size: .84rem; }
-    .boot-actions { margin-top: 16px; }
+    .toast.good { border-color: color-mix(in srgb, var(--good) 42%, var(--line)); }
+    .toast.bad { border-color: color-mix(in srgb, var(--danger) 42%, var(--line)); }
 
-    dialog {
-      width: min(500px, calc(100% - 28px));
-      padding: 0;
-      border: 1px solid var(--line);
-      border-radius: var(--radius-lg);
-      color: var(--ink);
-      background: var(--surface-solid);
-      box-shadow: var(--shadow);
-    }
-    dialog::backdrop { background: rgba(11, 17, 30, .58); backdrop-filter: blur(3px); }
-    .dialog-body { padding: 22px; }
-    .dialog-body h2 { margin: 0; font-size: 1.1rem; }
-    .dialog-body p { margin: 9px 0 0; color: var(--muted); }
-    .dialog-body .field { margin-top: 16px; }
-    .dialog-body textarea {
-      min-height: 220px;
-      resize: vertical;
-      font-family: var(--mono);
-      font-size: .78rem;
-    }
-    .dialog-actions {
-      display: flex;
-      justify-content: flex-end;
-      gap: 9px;
-      padding: 14px 22px;
-      border-top: 1px solid var(--line);
-      background: var(--surface-soft);
-    }
-
-    @media (max-width: 980px) {
-      .stats-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .dashboard-grid, .danger-box, .profile-manager { grid-template-columns: 1fr; }
-      .privacy-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .preference-row { grid-template-columns: minmax(130px, .7fr) minmax(150px, 1fr) auto; }
-      .confidence { grid-column: 1 / 3; }
-    }
-    @media (max-width: 720px) {
-      .shell { width: min(100% - 20px, 1240px); padding-top: 10px; }
-      .hero { grid-template-columns: 1fr; padding: 22px; border-radius: 20px; }
+    @media (max-width: 800px) {
+      .hero { grid-template-columns: 1fr; }
       .hero-actions { justify-content: flex-start; }
-      .notice-grid, .workspace-grid { grid-template-columns: 1fr; }
-      .panel { padding: 17px; border-radius: 19px; }
-      .panel-header { flex-direction: column; }
-      .toolbar { justify-content: flex-start; }
-      .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .form-grid { grid-template-columns: 1fr; }
-      .field.span-2, .field.span-3 { grid-column: auto; }
-      .privacy-grid { grid-template-columns: 1fr; }
-      .profile-controls, .profile-create-form { grid-template-columns: 1fr; }
-      .profile-create-form .field-help { grid-column: auto; }
-      .preference-row { grid-template-columns: 1fr; }
-      .confidence { grid-column: auto; }
-      .row-actions { justify-content: flex-start; }
+      .card.half { grid-column: span 12; }
     }
-    @media (max-width: 430px) {
-      .stats-grid { grid-template-columns: 1fr; }
-      .button { width: 100%; }
-      .toolbar, .hero-actions, .form-actions, .dialog-actions { width: 100%; }
-      .toolbar .button, .hero-actions .button, .form-actions .button, .dialog-actions .button { flex: 1 1 100%; }
-    }
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .001ms !important; transition-duration: .001ms !important; }
+    @media (max-width: 580px) {
+      .shell { width: min(100% - 20px, 1120px); padding-top: 10px; }
+      .hero, .card { padding: 18px; border-radius: 16px; }
+      .choice-row, .danger-row, .facts, .settings-grid, .diff { grid-template-columns: 1fr; }
+      .choice-row .button, .danger-row .button { width: 100%; }
+      .card-header { align-items: stretch; flex-direction: column; }
+      .section-actions { justify-content: flex-start; }
     }
   </style>
 </head>
 <body>
-  <a class="skip-link" href="#main" data-i18n="app.skip">跳到主要内容</a>
-  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-
-  <section id="boot" class="boot" aria-live="polite">
-    <div class="boot-card">
-      <div id="boot-loader" class="loader" aria-hidden="true"></div>
-      <h1 id="boot-title" data-i18n="boot.loading_title">正在读取本地偏好档案</h1>
-      <p id="boot-message" data-i18n="boot.loading_body">连接插件运行入口并加载安全状态，请稍候。</p>
-      <div id="boot-actions" class="boot-actions" hidden>
-        <button id="retry-button" class="button" type="button" data-i18n="action.retry">重试</button>
-      </div>
-    </div>
-  </section>
-
-  <div id="app" class="shell" hidden>
+  <div class="shell">
     <header class="hero">
       <div>
-        <p class="eyebrow" data-i18n="app.eyebrow">LOCAL · BOUNDED · TRANSPARENT</p>
-        <h1 data-i18n="app.title">Auto Prompt Harness · 偏好控制台</h1>
-        <p class="hero-subtitle" data-i18n="app.subtitle">只学习明确、稳定的表达偏好，并展示插件将尝试排队的每一行低优先级提示。</p>
+        <p class="eyebrow">N.E.K.O · AUTO PROMPT HARNESS</p>
+        <h1>角色卡自适应</h1>
+        <p>选择已有角色卡后，插件会创建一个明确标记的受控副本。原角色卡始终保持不变，只有你确认的沟通建议会写入副本。</p>
       </div>
       <div class="hero-actions">
-        <span id="runtime-status" class="status-chip" data-tone="warning" data-i18n="status.loading">加载中</span>
-        <button id="refresh-button" class="button ghost" type="button" data-i18n="action.refresh">刷新</button>
+        <span id="runtime-badge" class="runtime-badge">正在连接</span>
+        <button id="refresh-button" class="button ghost" type="button">刷新状态</button>
       </div>
     </header>
 
-    <div class="notice-grid">
-      <article class="notice">
-        <span class="notice-icon" aria-hidden="true">i</span>
-        <div>
-          <h2 data-i18n="boundary.title">能力边界</h2>
-          <p data-i18n="boundary.body">插件不修改系统提示词、角色人设或宿主长期记忆 API。它只会排队一段模型可读、不能覆盖更高优先级规则的低优先级偏好提示；模型消费后，已读上下文可能保留在会话历史。</p>
-        </div>
-      </article>
-      <article class="notice warning">
-        <span class="notice-icon" aria-hidden="true">2s</span>
-        <div>
-          <h2 data-i18n="timing.title">当前时序</h2>
-          <p data-i18n="timing.body">宿主通常每 2 秒轮询，单轮最多检查 256 条；提示一般从下一轮或更晚生效。面板创建绝不验证路由；管理注入要求当前进程最近 5 分钟内见过真实聊天。重启后的加盐指纹只检测碰撞，不恢复路由；目标在观察后消失时宿主仍可能回退到其他活动会话。计数只代表排队尝试。</p>
-        </div>
-      </article>
+    <div id="status-notice" class="notice" role="status" aria-live="polite">
+      <span class="notice-mark" aria-hidden="true">i</span>
+      <div>
+        <strong id="status-title">正在读取角色卡</strong>
+        <div id="status-message">请稍候。</div>
+      </div>
     </div>
 
-    <main id="main">
-      <section class="panel" aria-labelledby="dashboard-title">
-        <div class="panel-header">
+    <main id="app" class="grid" hidden>
+      <section class="card" aria-labelledby="choose-title">
+        <div class="card-header">
           <div>
-            <h2 id="dashboard-title" data-i18n="dashboard.title">当前档案</h2>
-            <p data-i18n="dashboard.description">状态、证据与插件将尝试排队的精确提示正文。</p>
+            <h2 id="choose-title">1. 选择角色卡</h2>
+            <p class="card-description">列表来自 N.E.K.O 当前角色配置；插件自己创建的副本不会出现在这里。</p>
           </div>
-          <div class="toolbar">
-            <button id="adaptation-button" class="button secondary" type="button" data-i18n="action.pause">暂停当前档案</button>
-            <button id="export-button" class="button secondary" type="button" data-i18n="action.export">导出安全 JSON</button>
-            <button id="import-button" class="button secondary" type="button" data-i18n="action.import">导入安全 JSON</button>
-          </div>
+          <span id="character-count" class="tag">0 张可选</span>
         </div>
-
-        <section class="profile-manager" aria-labelledby="profile-title">
-          <div class="profile-manager-copy">
-            <h3 id="profile-title" data-i18n="profile.title">选择本地档案</h3>
-            <p data-i18n="profile.description">面板只显示不透明的假名标识；先明确选择档案，再进行查看、编辑、导出或重置。</p>
-          </div>
-          <div class="profile-controls">
-            <div class="field">
-              <label for="profile-selector" data-i18n="profile.selector">当前档案</label>
-              <select id="profile-selector" aria-describedby="profile-selector-help">
-                <option value="" data-i18n="profile.none">尚未选择档案</option>
-              </select>
-              <span id="profile-selector-help" class="field-help" data-i18n="profile.help">标识由插件生成，不能反推出用户名；状态来自本地存储快照。</span>
-            </div>
-            <form id="profile-create-form" class="profile-create-form" novalidate>
-              <div class="field">
-                <label for="profile-character" data-i18n="profile.character">本地猫娘名称</label>
-                <input id="profile-character" type="text" minlength="1" maxlength="80" autocomplete="off" required data-i18n-placeholder="profile.character_placeholder" placeholder="例如：小铃">
-              </div>
-              <button id="profile-create-button" class="button" type="submit" data-i18n="action.create_profile">创建空档案</button>
-              <span class="field-help" data-i18n="profile.create_help">输入的名称只用于派生并选择本地伪匿名档案，绝不会验证或建立提示路由；管理注入必须等当前进程在最近 5 分钟内见到该猫娘的真实聊天。它不是用户姓名，也不会进入安全导出。</span>
-              <p id="profile-error" class="form-error profile-error" role="alert" hidden></p>
-            </form>
-          </div>
-        </section>
-
-        <div id="persistence-warning" class="persistence-warning" role="alert" hidden>
-          <span aria-hidden="true">!</span>
+        <div class="choice-row">
           <div>
-            <strong data-i18n="persistence.degraded_title">本地存储暂不可用</strong>
-            <span data-i18n="persistence.degraded_body">面板处于只读降级状态。不会学习、推送或接受持久化修改；示例分析仍可在本地运行。</span>
+            <label for="character-selector">要保留原样的角色卡</label>
+            <select id="character-selector">
+              <option value="">暂无可用角色卡</option>
+            </select>
+            <span class="help">开始后会自动切换到新副本；不会覆盖所选原卡的任何字段。</span>
           </div>
+          <button id="start-adaptation-button" class="button" type="button">开始自适应</button>
         </div>
-
-        <div class="stats-grid" aria-label="Aggregate statistics">
-          <div class="stat">
-            <span class="stat-label" data-i18n="stat.profile_status">档案状态</span>
-            <strong id="stat-profile-status" class="stat-value">—</strong>
-          </div>
-          <div class="stat">
-            <span class="stat-label" data-i18n="stat.profile_count">本地档案数</span>
-            <strong id="stat-profile-count" class="stat-value">0</strong>
-          </div>
-          <div class="stat">
-            <span class="stat-label" data-i18n="stat.preference_count">生效偏好</span>
-            <strong id="stat-preference-count" class="stat-value">0</strong>
-          </div>
-          <div class="stat">
-            <span class="stat-label" data-i18n="stat.messages_seen">已观察消息</span>
-            <strong id="stat-messages-seen" class="stat-value">0</strong>
-          </div>
-          <div class="stat">
-            <span class="stat-label" data-i18n="stat.injections">提示排队尝试</span>
-            <strong id="stat-injections" class="stat-value">0</strong>
-          </div>
-        </div>
-
-        <div id="observation-bar" class="observation-bar">
-          <strong data-i18n="observation.label">观察链路</strong>
-          <span id="observation-text">—</span>
-        </div>
-
-        <div class="dashboard-grid">
-          <article class="subpanel">
-            <div class="subpanel-head">
-              <div>
-                <h3 data-i18n="guidance.title">精确提示预览</h3>
-                <span class="hint" data-i18n="guidance.help">这是插件尝试排队的精确正文；排队不证明模型已经读取，宿主也可能在外层添加本地化信封。</span>
-              </div>
-              <span id="guidance-state" class="tag">—</span>
-            </div>
-            <pre id="guidance-preview" class="exact-preview" tabindex="0" aria-label="Exact guidance preview"></pre>
-            <p id="guidance-empty" class="empty" data-i18n="guidance.empty" hidden>当前没有达到阈值的提示，因此不会尝试排队正文。</p>
-          </article>
-
-          <article class="subpanel">
-            <div class="subpanel-head">
-              <h3 data-i18n="changes.title">最近变化</h3>
-              <span id="changes-count" class="tag">0</span>
-            </div>
-            <div id="changes-list" class="changes-list"></div>
-            <p id="changes-empty" class="empty" data-i18n="changes.empty">还没有偏好变化。</p>
-          </article>
-
-          <article class="subpanel">
-            <div class="subpanel-head">
-              <div>
-                <h3 data-i18n="proposals.title">LLM 反思提案</h3>
-                <span class="hint" data-i18n="proposals.help">让猫娘阅读最近的对话，反思并生成可批准的提示词提案；你可以批准、编辑或拒绝。</span>
-              </div>
-              <button type="button" id="reflect-btn" class="btn-primary" data-i18n="proposals.reflectNow">立即反思一次</button>
-            </div>
-            <div id="proposals-list" class="proposals-list"></div>
-            <p id="proposals-empty" class="empty" data-i18n="proposals.empty">还没有反思提案。点击"立即反思一次"试试。</p>
-          </article>
-        </div>
-
-        <article class="subpanel" style="margin-top:16px">
-          <div class="subpanel-head">
-            <div>
-              <h3 data-i18n="preferences.title">生效偏好</h3>
-              <span class="hint" data-i18n="preferences.help">手动值优先；锁定值不会被自动推断更新。</span>
-            </div>
-          </div>
-          <div id="preference-list" class="preference-list"></div>
-          <p id="preferences-empty" class="empty" data-i18n="preferences.empty">暂时没有达到阈值的偏好。可以添加手动偏好，或等待更多明确证据。</p>
-        </article>
       </section>
 
-      <section class="panel" aria-labelledby="settings-title">
-        <div class="panel-header">
+      <section class="card" aria-labelledby="binding-title">
+        <div class="card-header">
           <div>
-            <h2 id="settings-title" data-i18n="settings.title">推断与存储设置</h2>
-            <p data-i18n="settings.description">设置会经后端验证，并在本地存储可用时保存；TTL 不会短于衰减窗口。</p>
+            <h2 id="binding-title">2. 当前绑定</h2>
+            <p class="card-description">一眼确认原卡、副本和当前真正使用的角色。</p>
+          </div>
+          <div class="section-actions">
+            <span id="binding-effective" class="tag">尚未绑定</span>
+            <button id="resume-button" class="button small" type="button" hidden>重新启用副本</button>
+            <button id="restore-original-button" class="button secondary small" type="button" disabled>恢复原角色</button>
           </div>
         </div>
-        <form id="settings-form" novalidate>
-          <div class="form-grid">
-            <label class="switch-field">
-              <input id="setting-adaptation" name="adaptation_enabled" type="checkbox">
-              <span>
-                <strong data-i18n="settings.adaptation">全局启用自适应</strong>
-                <span data-i18n="settings.adaptation_help">关闭后不学习，也不尝试排队偏好提示。</span>
-              </span>
-            </label>
-            <label class="switch-field">
-              <input id="setting-injection" name="injection_enabled" type="checkbox">
-              <span>
-                <strong data-i18n="settings.injection">启用隐藏提示排队</strong>
-                <span data-i18n="settings.injection_help">仍可学习和查看档案，但不尝试排队模型可读提示。</span>
-              </span>
-            </label>
-            <label class="switch-field">
-              <input id="setting-debug" name="debug_excerpts" type="checkbox">
-              <span>
-                <strong data-i18n="settings.debug">保存调试证据摘要</strong>
-                <span data-i18n="settings.debug_help">显式选择加入；只记录规范化的维度与枚举值，最多 5 条、每条 120 字符，默认关闭。</span>
-              </span>
-            </label>
-
-            <div class="field">
-              <label for="setting-sensitivity" data-i18n="settings.sensitivity">推断灵敏度</label>
-              <select id="setting-sensitivity" name="sensitivity">
-                <option value="conservative" data-i18n="option.conservative">保守</option>
-                <option value="balanced" data-i18n="option.balanced">平衡</option>
-                <option value="responsive" data-i18n="option.responsive">响应更快</option>
-              </select>
+        <div id="binding-empty" class="empty">选择上方角色卡并开始后，这里会显示绑定详情。</div>
+        <div id="binding-details" hidden>
+          <dl class="facts">
+            <div class="fact">
+              <dt>原角色卡</dt>
+              <dd id="original-name">—</dd>
             </div>
-            <div class="field">
-              <label for="setting-min-evidence" data-i18n="settings.minimum_evidence">最小证据数</label>
-              <input id="setting-min-evidence" name="minimum_evidence" type="number" min="1" max="10" step="1" inputmode="numeric">
+            <div class="fact">
+              <dt>自适应副本</dt>
+              <dd id="overlay-name">—</dd>
             </div>
-            <div class="field">
-              <label for="setting-min-confidence" data-i18n="settings.minimum_confidence">最小置信度</label>
-              <div class="range-line">
-                <input id="setting-min-confidence" name="minimum_confidence" type="range" min="0.5" max="0.95" step="0.01">
-                <output id="confidence-output" class="range-output" for="setting-min-confidence">—</output>
-              </div>
+            <div class="fact">
+              <dt>当前角色</dt>
+              <dd id="current-character">—</dd>
             </div>
-
-            <div class="field">
-              <label for="setting-decay" data-i18n="settings.decay_days">弱证据半衰期（天）</label>
-              <input id="setting-decay" name="decay_days" type="number" min="1" max="365" step="1" inputmode="numeric">
+            <div class="fact">
+              <dt>基础提示词指纹</dt>
+              <dd id="base-fingerprint">—</dd>
             </div>
-            <div class="field">
-              <label for="setting-ttl" data-i18n="settings.ttl_days">档案 TTL（天）</label>
-              <input id="setting-ttl" name="ttl_days" type="number" min="7" max="730" step="1" inputmode="numeric">
-            </div>
-            <div class="field">
-              <label for="setting-cooldown" data-i18n="settings.cooldown_seconds">提示冷却（秒）</label>
-              <input id="setting-cooldown" name="cooldown_seconds" type="number" min="0" max="86400" step="1" inputmode="numeric">
-            </div>
-
-            <div class="field">
-              <label for="setting-scope" data-i18n="settings.scope">档案隔离范围</label>
-              <select id="setting-scope" name="scope">
-                <option value="user" data-i18n="option.scope_user">按用户（轮询退化为按角色）</option>
-                <option value="conversation" data-i18n="option.scope_conversation">按用户与会话（无会话 ID 时轮询停学）</option>
-              </select>
-              <span id="scope-help" class="field-help" data-i18n="settings.scope_locked">已有档案时会锁定隔离范围；恢复默认设置若会改变范围也会被阻止。如需切换，请先安全导出并重置所有现有档案。</span>
-            </div>
-            <div class="field">
-              <label for="setting-max-users" data-i18n="settings.max_users">最多档案数</label>
-              <input id="setting-max-users" name="max_users" type="number" min="1" max="256" step="1" inputmode="numeric">
-            </div>
-            <div class="field">
-              <label for="setting-max-preferences" data-i18n="settings.max_preferences">每档案最多偏好</label>
-              <input id="setting-max-preferences" name="max_preferences" type="number" min="1" max="16" step="1" inputmode="numeric">
+          </dl>
+          <ul id="active-adaptations" class="adaptations"></ul>
+          <p id="no-active-adaptations" class="help">目前还没有已批准的自适应内容。</p>
+          <div id="binding-warning" class="notice warn" hidden>
+            <span class="notice-mark" aria-hidden="true">!</span>
+            <div>
+              <strong>需要人工检查</strong>
+              <div id="binding-warning-message"></div>
             </div>
           </div>
-          <p id="settings-error" class="form-error" role="alert" hidden></p>
-          <div class="form-actions">
-            <button id="reset-settings-button" class="button secondary" type="button" data-i18n="action.reset_defaults">恢复默认设置</button>
-            <button id="save-settings-button" class="button" type="submit" data-i18n="action.save_settings">保存设置</button>
-          </div>
-        </form>
+        </div>
       </section>
 
-      <div class="workspace-grid">
-        <section id="manual-panel" class="panel" aria-labelledby="manual-title">
-          <div class="panel-header">
-            <div>
-              <h2 id="manual-title" data-i18n="manual.title">手动偏好</h2>
-              <p data-i18n="manual.description">添加、编辑或锁定安全枚举；自定义备注会经过严格验证。</p>
-            </div>
-            <span id="manual-mode" class="tag" data-i18n="manual.mode_new">新建</span>
+      <section class="card half" aria-labelledby="proposal-title">
+        <div class="card-header">
+          <div>
+            <h2 id="proposal-title">3. 待确认建议</h2>
+            <p class="card-description"><span id="evidence-count">0</span> 条脱敏证据已进入有界窗口。</p>
           </div>
-          <form id="manual-form" novalidate>
-            <div class="form-grid">
-              <div class="field">
-                <label for="manual-dimension" data-i18n="manual.dimension">偏好维度</label>
-                <select id="manual-dimension" required></select>
-              </div>
-              <div id="manual-select-field" class="field span-2">
-                <label for="manual-value" data-i18n="manual.value">偏好值</label>
-                <select id="manual-value"></select>
-              </div>
-              <div id="manual-note-field" class="field span-2" hidden>
-                <label for="manual-note" data-i18n="manual.note">安全自定义备注</label>
-                <textarea id="manual-note" maxlength="160" data-i18n-placeholder="manual.note_placeholder" placeholder="回答开头使用简短结论。"></textarea>
-                <span class="field-help" data-i18n="manual.note_help">仅接受受限中文 / 英文表达与排版语法；角色伪装、规则覆盖、XML 和危险指令会被拒绝。</span>
-              </div>
-              <label class="switch-field field span-3">
-                <input id="manual-locked" type="checkbox">
-                <span>
-                  <strong data-i18n="manual.locked">锁定这条偏好</strong>
-                  <span data-i18n="manual.locked_help">自动观察不能更新锁定维度；手动编辑和删除仍然可用。</span>
-                </span>
+          <button id="reflect-button" class="button secondary small" type="button">现在检查</button>
+        </div>
+        <div id="proposal-list" class="stack"></div>
+        <p id="proposal-empty" class="empty">暂无待确认建议。插件不会在你拒绝时修改角色卡。</p>
+      </section>
+
+      <section class="card half" aria-labelledby="history-title">
+        <div class="card-header">
+          <div>
+            <h2 id="history-title">4. 修改记录</h2>
+            <p class="card-description">记录绑定、确认、拒绝、回滚和恢复操作。</p>
+          </div>
+          <button id="rollback-button" class="button secondary small" type="button" disabled>回滚上次修改</button>
+        </div>
+        <div id="history-list" class="stack"></div>
+        <p id="history-empty" class="empty">还没有修改记录。</p>
+      </section>
+
+      <section class="card" aria-labelledby="control-title">
+        <div class="card-header">
+          <div>
+            <h2 id="control-title">控制与清理</h2>
+            <p class="card-description">恢复只在当前仍使用自适应副本时切回原卡；如果你已切到其他角色，插件不会抢切。</p>
+          </div>
+        </div>
+
+        <details>
+          <summary>高级设置</summary>
+          <form id="settings-form">
+            <div class="settings-grid">
+              <label class="toggle">
+                <input id="setting-learning" type="checkbox">
+                <span>收集脱敏证据<small>关闭后停止接收新的沟通偏好证据。</small></span>
               </label>
+              <label class="toggle">
+                <input id="setting-automatic" type="checkbox">
+                <span>自动生成建议<small>达到证据条数后尝试生成一条待确认建议。</small></span>
+              </label>
+              <label class="toggle">
+                <input id="setting-auto-apply" type="checkbox">
+                <span>自动批准低风险建议<small>默认关闭；开启前请确认你接受自动写入受控副本。</small></span>
+              </label>
+              <label class="toggle">
+                <input id="setting-show-evidence" type="checkbox">
+                <span>显示脱敏摘录<small>只影响面板展示，不恢复原始聊天内容。</small></span>
+              </label>
+              <div>
+                <label for="setting-threshold">生成建议所需证据条数</label>
+                <input id="setting-threshold" type="number" min="1" max="12" step="1">
+              </div>
+              <div>
+                <label for="setting-window">证据窗口大小</label>
+                <input id="setting-window" type="number" min="2" max="12" step="1">
+              </div>
+              <div>
+                <label for="setting-confidence">自动批准最低置信度</label>
+                <input id="setting-confidence" type="number" min="0.5" max="0.95" step="0.05">
+              </div>
             </div>
-            <p id="manual-error" class="form-error" role="alert" hidden></p>
-            <div class="form-actions">
-              <button id="manual-cancel-button" class="button secondary" type="button" data-i18n="action.cancel_edit" hidden>取消编辑</button>
-              <button id="manual-delete-button" class="button danger" type="button" data-i18n="action.delete_manual" disabled>删除手动值</button>
-              <button id="manual-save-button" class="button" type="submit" data-i18n="action.save_manual">添加 / 更新</button>
+            <div class="settings-actions">
+              <button id="reset-settings-button" class="button secondary small" type="button">恢复默认设置</button>
+              <button id="save-settings-button" class="button small" type="submit">保存设置</button>
             </div>
           </form>
-        </section>
+        </details>
 
-        <section class="panel" aria-labelledby="analysis-title">
-          <div class="panel-header">
+        <div id="orphan-cleanup" class="danger-zone" hidden>
+          <h3>清理未绑定的受控副本</h3>
+          <p class="card-description">这些角色卡带有本插件来源标记，但无法与当前绑定唯一对应。请选择明确名称后手动删除；当前正在使用的角色不会被删除。</p>
+          <div class="danger-row">
             <div>
-              <h2 id="analysis-title" data-i18n="analysis.title">不持久化模拟</h2>
-              <p data-i18n="analysis.description">用相同的本地规则分析示例文本，不保存文本、观察或结果。</p>
+              <label for="orphan-selector">未绑定副本</label>
+              <select id="orphan-selector"></select>
             </div>
-          </div>
-          <form id="analysis-form">
-            <div class="field">
-              <label for="analysis-text" data-i18n="analysis.sample">示例文本</label>
-              <textarea id="analysis-text" maxlength="4000" required data-i18n-placeholder="analysis.placeholder" placeholder="例如：以后回答短一点，先给代码，不要用 emoji。"></textarea>
+            <div>
+              <label for="orphan-confirmation">输入 DELETE 确认</label>
+              <input id="orphan-confirmation" type="text" maxlength="6" autocomplete="off" spellcheck="false">
             </div>
-            <p id="analysis-error" class="form-error" role="alert" hidden></p>
-            <div class="form-actions">
-              <button id="analysis-button" class="button" type="submit" data-i18n="action.analyze">分析但不保存</button>
-            </div>
-          </form>
-          <div id="analysis-result" class="analysis-result" aria-live="polite" hidden>
-            <div class="subpanel-head">
-              <h3 data-i18n="analysis.result_title">模拟结果</h3>
-              <span class="tag" data-i18n="analysis.not_persisted">未持久化</span>
-            </div>
-            <strong class="field-label" data-i18n="analysis.observations">识别到的明确观察</strong>
-            <div id="analysis-observations" class="result-list"></div>
-            <p id="analysis-empty" class="empty" data-i18n="analysis.empty">没有识别到足够明确的偏好。</p>
-            <strong class="field-label" data-i18n="analysis.preview">模拟提示正文</strong>
-            <pre id="analysis-guidance" class="mini-preview" tabindex="0"></pre>
-          </div>
-        </section>
-      </div>
-
-      <section class="panel" aria-labelledby="privacy-title">
-        <div class="panel-header">
-          <div>
-            <h2 id="privacy-title" data-i18n="privacy.title">隐私与安全说明</h2>
-            <p data-i18n="privacy.description">面板展示的限制与后端执行的实际边界一致。</p>
+            <button id="delete-orphan-button" class="button danger" type="button" disabled>删除所选副本</button>
           </div>
         </div>
-        <div class="privacy-grid">
-          <article class="privacy-card">
-            <strong data-i18n="privacy.local_title">完全本地</strong>
-            <p data-i18n="privacy.local_body">不调用外部 LLM、API 或云端服务，不需要密钥。</p>
-          </article>
-          <article class="privacy-card">
-            <strong data-i18n="privacy.raw_title">默认不存原文</strong>
-            <p data-i18n="privacy.raw_body">完整聊天消息不会进入档案；只记录有界聚合证据。</p>
-          </article>
-          <article class="privacy-card">
-            <strong data-i18n="privacy.debug_title">调试摘要需选择加入</strong>
-            <p data-i18n="privacy.debug_body">开启后只保存规范化的证据维度与枚举值，不保存聊天片段或自定义备注。</p>
-          </article>
-          <article class="privacy-card">
-            <strong data-i18n="privacy.export_title">安全导出</strong>
-            <p data-i18n="privacy.export_body">导出不含原始消息、调试证据摘要或真实身份。</p>
-          </article>
-        </div>
-      </section>
 
-      <section class="panel danger-panel" aria-labelledby="danger-title">
-        <div class="danger-box">
-          <div class="danger-copy">
-            <h2 id="danger-title" data-i18n="danger.title">重置当前档案</h2>
-            <p data-i18n="danger.description">永久删除当前隔离范围的手动与推断偏好。设置和其他档案不会被删除，操作无法撤销。</p>
-          </div>
-          <div class="field">
-            <label for="reset-confirmation" data-i18n="danger.confirmation">输入 RESET 以启用确认</label>
-            <input id="reset-confirmation" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="danger.placeholder" placeholder="RESET">
-            <div class="form-actions">
-              <button id="reset-profile-button" class="button danger" type="button" disabled data-i18n="action.reset_profile">重置当前档案</button>
+        <div class="danger-zone">
+          <h3>手动删除自适应副本</h3>
+          <p class="card-description">副本默认保留，方便再次启用。删除前会先安全恢复；只有来源标记匹配时才会删除。</p>
+          <div class="danger-row">
+            <div>
+              <label for="delete-confirmation">输入 DELETE 确认</label>
+              <input id="delete-confirmation" type="text" maxlength="6" autocomplete="off" spellcheck="false">
             </div>
+            <button id="delete-overlay-button" class="button danger" type="button" disabled>删除副本</button>
           </div>
         </div>
       </section>
     </main>
   </div>
 
-  <dialog id="export-dialog" aria-labelledby="export-dialog-title">
-    <div class="dialog-body">
-      <h2 id="export-dialog-title" data-i18n="dialog.export_title">安全 JSON 已生成</h2>
-      <p data-i18n="dialog.export_body">宿主 iframe 可能阻止下载；请复制以下完整 JSON 并保存到本地文件。</p>
-      <div class="field">
-        <label for="export-json-output" data-i18n="dialog.export_label">只读导出内容</label>
-        <textarea id="export-json-output" readonly spellcheck="false"></textarea>
-      </div>
-    </div>
-    <div class="dialog-actions">
-      <button id="export-dialog-close" class="button secondary" type="button" data-i18n="action.close">关闭</button>
-      <button id="export-copy-button" class="button" type="button" data-i18n="action.copy">复制 JSON</button>
-    </div>
-  </dialog>
-
-  <dialog id="import-dialog" aria-labelledby="import-dialog-title">
-    <div class="dialog-body">
-      <h2 id="import-dialog-title" data-i18n="dialog.import_title">导入安全 JSON</h2>
-      <p data-i18n="dialog.import_body">只会把固定枚举偏好合并到当前明确选择的档案；身份、路由、统计、证据和设置不会导入。</p>
-      <div class="field">
-        <label for="import-file" data-i18n="dialog.import_file">选择 JSON 文件（最多 32 KiB）</label>
-        <input id="import-file" type="file" accept="application/json,.json">
-      </div>
-      <div class="field">
-        <label for="import-json-input" data-i18n="dialog.import_label">待导入 JSON</label>
-        <textarea id="import-json-input" maxlength="32768" spellcheck="false"></textarea>
-      </div>
-      <p id="import-error" class="form-error" role="alert" hidden></p>
-    </div>
-    <div class="dialog-actions">
-      <button id="import-dialog-cancel" class="button secondary" type="button" data-i18n="action.cancel">取消</button>
-      <button id="import-dialog-confirm" class="button" type="button" data-i18n="action.confirm_import">确认合并</button>
-    </div>
-  </dialog>
-
-  <dialog id="reset-dialog" aria-labelledby="reset-dialog-title" aria-describedby="reset-dialog-body">
-    <div class="dialog-body">
-      <h2 id="reset-dialog-title" data-i18n="dialog.reset_title">最后确认重置档案</h2>
-      <p id="reset-dialog-body" data-i18n="dialog.reset_body">这会永久删除当前档案的所有偏好证据。确定继续吗？</p>
-    </div>
-    <div class="dialog-actions">
-      <button id="reset-dialog-cancel" class="button secondary" type="button" data-i18n="action.cancel">取消</button>
-      <button id="reset-dialog-confirm" class="button danger" type="button" data-i18n="action.confirm_reset">永久重置</button>
-    </div>
-  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
   <script>
   (() => {
     "use strict";
 
-    const PLUGIN_FALLBACK = "auto_prompt_harness";
+    const root = globalThis;
+    const runtimeWindow = root.window && typeof root.window === "object" ? root.window : root;
+    const runtimeLocation = runtimeWindow.location || root.location || {};
+    const pathMatch = String(runtimeLocation.pathname || "").match(/\/plugin\/([^/]+)\/ui(?:\/|$)/);
+    const pluginId = pathMatch ? decodeURIComponent(pathMatch[1]) : "auto_prompt_harness";
     const RUNS_URL = "/runs";
-    const RUN_TIMEOUT_MS = 30000;
-    const POLL_MIN_MS = 220;
-    const POLL_MAX_MS = 1200;
-    const SUPPORTED_LOCALES = ["zh-CN", "zh-TW", "en", "ja", "ko", "es", "pt", "ru"];
-    const INTEGER_SETTINGS = [
-      "minimum_evidence", "decay_days", "ttl_days", "cooldown_seconds",
-      "max_users", "max_preferences"
-    ];
-    const pluginMatch = window.location.pathname.match(/\/plugin\/([^/]+)\/ui(?:\/|$)/);
-    const pluginId = pluginMatch ? decodeURIComponent(pluginMatch[1]) : PLUGIN_FALLBACK;
-    const PROFILE_SELECTION_KEY = `neko:${pluginId}:auto-prompt-harness:selected-profile`;
+    const DEFAULT_TIMEOUT_MS = 30000;
+    const DEFAULT_POLL_MS = 180;
 
-    const ui = {
-      app: document.getElementById("app"),
-      boot: document.getElementById("boot"),
-      bootLoader: document.getElementById("boot-loader"),
-      bootTitle: document.getElementById("boot-title"),
-      bootMessage: document.getElementById("boot-message"),
-      bootActions: document.getElementById("boot-actions"),
-      toast: document.getElementById("toast"),
-      runtimeStatus: document.getElementById("runtime-status"),
-      refreshButton: document.getElementById("refresh-button"),
-      retryButton: document.getElementById("retry-button"),
-      profileSelector: document.getElementById("profile-selector"),
-      profileCreateForm: document.getElementById("profile-create-form"),
-      profileCharacter: document.getElementById("profile-character"),
-      profileCreateButton: document.getElementById("profile-create-button"),
-      profileError: document.getElementById("profile-error"),
-      persistenceWarning: document.getElementById("persistence-warning"),
-      adaptationButton: document.getElementById("adaptation-button"),
-      exportButton: document.getElementById("export-button"),
-      importButton: document.getElementById("import-button"),
-      preferenceList: document.getElementById("preference-list"),
-      preferencesEmpty: document.getElementById("preferences-empty"),
-      guidancePreview: document.getElementById("guidance-preview"),
-      guidanceEmpty: document.getElementById("guidance-empty"),
-      guidanceState: document.getElementById("guidance-state"),
-      changesList: document.getElementById("changes-list"),
-      changesEmpty: document.getElementById("changes-empty"),
-      changesCount: document.getElementById("changes-count"),
-      observationText: document.getElementById("observation-text"),
-      settingsForm: document.getElementById("settings-form"),
-      settingsError: document.getElementById("settings-error"),
-      saveSettingsButton: document.getElementById("save-settings-button"),
-      resetSettingsButton: document.getElementById("reset-settings-button"),
-      confidenceOutput: document.getElementById("confidence-output"),
-      manualForm: document.getElementById("manual-form"),
-      manualMode: document.getElementById("manual-mode"),
-      manualDimension: document.getElementById("manual-dimension"),
-      manualValue: document.getElementById("manual-value"),
-      manualSelectField: document.getElementById("manual-select-field"),
-      manualNoteField: document.getElementById("manual-note-field"),
-      manualNote: document.getElementById("manual-note"),
-      manualLocked: document.getElementById("manual-locked"),
-      manualError: document.getElementById("manual-error"),
-      manualSaveButton: document.getElementById("manual-save-button"),
-      manualDeleteButton: document.getElementById("manual-delete-button"),
-      manualCancelButton: document.getElementById("manual-cancel-button"),
-      analysisForm: document.getElementById("analysis-form"),
-      analysisText: document.getElementById("analysis-text"),
-      analysisButton: document.getElementById("analysis-button"),
-      analysisError: document.getElementById("analysis-error"),
-      analysisResult: document.getElementById("analysis-result"),
-      analysisObservations: document.getElementById("analysis-observations"),
-      analysisEmpty: document.getElementById("analysis-empty"),
-      analysisGuidance: document.getElementById("analysis-guidance"),
-      exportDialog: document.getElementById("export-dialog"),
-      exportJsonOutput: document.getElementById("export-json-output"),
-      exportDialogClose: document.getElementById("export-dialog-close"),
-      exportCopyButton: document.getElementById("export-copy-button"),
-      importDialog: document.getElementById("import-dialog"),
-      importFile: document.getElementById("import-file"),
-      importJsonInput: document.getElementById("import-json-input"),
-      importError: document.getElementById("import-error"),
-      importDialogCancel: document.getElementById("import-dialog-cancel"),
-      importDialogConfirm: document.getElementById("import-dialog-confirm"),
-      resetConfirmation: document.getElementById("reset-confirmation"),
-      resetProfileButton: document.getElementById("reset-profile-button"),
-      resetDialog: document.getElementById("reset-dialog"),
-      resetDialogCancel: document.getElementById("reset-dialog-cancel"),
-      resetDialogConfirm: document.getElementById("reset-dialog-confirm")
-    };
-
-    const state = {
-      locale: "zh-CN",
-      messages: {},
-      panel: null,
-      dimensions: {},
-      profiles: [],
-      selectedProfileId: "",
-      pendingStoredProfileId: readStoredProfileId(),
-      persistenceReady: false,
-      editingDimension: "",
-      editingSource: "",
-      toastTimer: 0,
-      loading: false
-    };
-
-    const DIMENSION_FALLBACKS = {
-      language: "语言",
-      verbosity: "详细程度",
-      tone: "语气",
-      structure: "结构",
-      response_order: "代码 / 解释顺序",
-      clarification: "澄清策略",
-      initiative: "主动程度",
-      evidence: "证据偏好",
-      emoji: "Emoji",
-      meme: "网络梗",
-      note: "安全自定义备注"
-    };
-
-    const VALUE_FALLBACKS = {
-      "zh-CN": "简体中文", "zh-TW": "繁體中文", en: "English", ja: "日本語",
-      ko: "한국어", es: "Español", pt: "Português", ru: "Русский",
-      concise: "简洁", balanced: "平衡", detailed: "详细",
-      casual: "轻松", neutral: "中性", formal: "正式", direct: "直接", gentle: "温和",
-      bullets: "项目符号", steps: "编号步骤", table: "表格", prose: "自然段落",
-      code_first: "代码优先", explanation_first: "解释优先",
-      ask_when_needed: "必要时提问", ask_first: "先澄清", minimize_questions: "尽量少问",
-      proactive: "主动建议", follow_instructions: "严格按要求", autonomous: "自主推进",
-      cite_sources: "引用来源", explain_reasoning: "说明依据", minimal: "尽量精简",
-      none: "不用", light: "少量", expressive: "丰富", avoid: "避免", allow: "允许"
-    };
-
-    function hasOwn(object, key) {
-      return Object.prototype.hasOwnProperty.call(object || {}, key);
+    function hasOwn(value, key) {
+      return Object.prototype.hasOwnProperty.call(value || {}, key);
     }
 
-    function t(key, fallback = "", params = {}) {
-      let value = typeof state.messages[key] === "string" ? state.messages[key] : (fallback || key);
-      Object.entries(params).forEach(([name, replacement]) => {
-        value = value.replaceAll(`{${name}}`, String(replacement));
-      });
-      return value;
+    function isRecord(value) {
+      return Boolean(value) && typeof value === "object" && !Array.isArray(value);
     }
 
-    function readStoredProfileId() {
-      try {
-        const value = String(window.sessionStorage.getItem(PROFILE_SELECTION_KEY) || "");
-        return value.length <= 128 ? value : "";
-      } catch (_error) {
-        return "";
+    function cleanText(value, fallback = "") {
+      return typeof value === "string" ? value.trim() : fallback;
+    }
+
+    function humanError(value, fallback = "操作失败，请稍后重试。") {
+      if (typeof value === "string" && value.trim()) return value.trim();
+      if (!value || typeof value !== "object") return fallback;
+      if (hasOwn(value, "error") && value.error !== value) {
+        const nested = humanError(value.error, "");
+        if (nested) return nested;
       }
-    }
-
-    function persistProfileId(profileId) {
-      try {
-        if (profileId) window.sessionStorage.setItem(PROFILE_SELECTION_KEY, profileId);
-        else window.sessionStorage.removeItem(PROFILE_SELECTION_KEY);
-      } catch (_error) {
-        // Selection persistence is optional; the panel remains functional.
+      if (typeof value.message === "string" && value.message.trim()) {
+        return value.message.trim();
       }
-    }
-
-    function normalizeLocale(value) {
-      const raw = String(value || "").trim().replaceAll("_", "-").toLowerCase();
-      if (!raw) return "";
-      if (raw === "zh" || raw === "zh-cn" || raw.startsWith("zh-hans")) return "zh-CN";
-      if (raw === "zh-tw" || raw === "zh-hk" || raw === "zh-mo" || raw.startsWith("zh-hant")) return "zh-TW";
-      return SUPPORTED_LOCALES.find((item) => item.toLowerCase() === raw) ||
-        SUPPORTED_LOCALES.find((item) => item.toLowerCase() === raw.split("-")[0]) || "";
-    }
-
-    function localeCandidates(value) {
-      const candidates = [];
-      const add = (candidate) => {
-        const normalized = normalizeLocale(candidate);
-        if (normalized && !candidates.includes(normalized)) candidates.push(normalized);
-      };
-      add(value);
-      add(String(value || "").split("-")[0]);
-      add("zh-CN");
-      add("en");
-      return candidates;
-    }
-
-    async function loadI18n() {
-      let storedLocale = "";
-      try {
-        storedLocale = window.localStorage.getItem("neko:locale") || "";
-      } catch (_error) {
-        // Storage can be denied in a sandboxed iframe; other locale hints still work.
+      if (hasOwn(value, "detail") && value.detail !== value) {
+        const nested = humanError(value.detail, "");
+        if (nested) return nested;
       }
-      let locale = new URLSearchParams(window.location.search).get("locale") ||
-        storedLocale ||
-        navigator.language ||
-        "zh-CN";
-      try {
-        const response = await fetch(`/plugin/${encodeURIComponent(pluginId)}/ui-api/locale`, {
-          headers: { Accept: "application/json" }
-        });
-        if (response.ok) {
-          const payload = await response.json();
-          locale = payload.locale || payload.language || locale;
-        }
-      } catch (_error) {
-        // Browser/query locale remains the safe fallback.
+      if (hasOwn(value, "details") && value.details !== value) {
+        const nested = humanError(value.details, "");
+        if (nested) return nested;
       }
-      for (const candidate of localeCandidates(locale)) {
-        try {
-          const response = await fetch(
-            `/plugin/${encodeURIComponent(pluginId)}/ui-api/i18n/${encodeURIComponent(candidate)}.json`,
-            { headers: { Accept: "application/json" } }
-          );
-          if (!response.ok) continue;
-          const payload = await response.json();
-          if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
-          state.locale = candidate;
-          state.messages = payload;
-          document.documentElement.lang = candidate;
-          return;
-        } catch (_error) {
-          // Try the next candidate.
-        }
+      if (typeof value.code === "string" && value.code.trim()) {
+        return `操作失败（${value.code.trim()}）`;
       }
-    }
-
-    function applyI18n(root = document) {
-      root.querySelectorAll("[data-i18n]").forEach((element) => {
-        const key = element.getAttribute("data-i18n");
-        element.textContent = t(key, element.textContent);
-      });
-      root.querySelectorAll("[data-i18n-placeholder]").forEach((element) => {
-        const key = element.getAttribute("data-i18n-placeholder");
-        element.setAttribute("placeholder", t(key, element.getAttribute("placeholder") || ""));
-      });
-      document.title = t("app.title", document.title);
-    }
-
-    function sleep(milliseconds) {
-      return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
-    }
-
-    async function fetchJson(url, options, deadline) {
-      const remaining = Math.max(1, deadline - Date.now());
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), remaining);
-      try {
-        const response = await fetch(url, { ...options, signal: controller.signal });
-        if (!response.ok) {
-          const detail = await response.text().catch(() => "");
-          throw new Error(t("error.http", "请求失败（HTTP {status}）", { status: response.status }) +
-            (detail ? `: ${detail.slice(0, 180)}` : ""));
-        }
-        return await response.json();
-      } catch (error) {
-        if (error && error.name === "AbortError") {
-          throw new Error(t("error.timeout", "插件调用超时。"));
-        }
-        throw error;
-      } finally {
-        window.clearTimeout(timeout);
-      }
-    }
-
-    function pluginError(payload, fallback) {
-      if (!payload || typeof payload !== "object") return fallback;
-      const error = payload.error;
-      const code = error && typeof error === "object" ? String(error.code || "") :
-        String(payload.code || "");
-      if (code) {
-        const key = `error.code.${code}`;
-        const localized = t(key, key);
-        if (localized !== key) return localized;
-      }
-      const mayShowBackendText = state.locale === "zh-CN";
-      if (mayShowBackendText && typeof error === "string" && error.trim()) return error;
-      if (mayShowBackendText && error && typeof error.message === "string") return error.message;
-      if (mayShowBackendText && typeof payload.message === "string" && payload.message.trim()) return payload.message;
       return fallback;
     }
 
-    function extractRunResult(exportPayload) {
-      const items = Array.isArray(exportPayload && exportPayload.items) ? exportPayload.items : [];
-      const item = items.find((candidate) => candidate && candidate.type === "json" && candidate.json) ||
-        items.find((candidate) => candidate && candidate.type === "text" && typeof candidate.text === "string");
-      if (!item) throw new Error(t("error.empty_result", "插件没有返回可读取的结果。"));
-      let payload = item.json;
-      if (!payload && item.text) {
-        try { payload = JSON.parse(item.text); }
-        catch (_error) { throw new Error(t("error.invalid_result", "插件结果不是有效 JSON。")); }
+    function unwrapEntryPayload(payload) {
+      if (!isRecord(payload)) return payload ?? {};
+      if (payload.success === false) {
+        throw new Error(humanError(payload, "插件拒绝了这次操作。"));
       }
-      if (payload && typeof payload === "object" && hasOwn(payload, "success")) {
-        if (payload.success === false) {
-          throw new Error(pluginError(payload, t("error.plugin", "插件拒绝了这次操作。")));
-        }
-        return hasOwn(payload, "data") ? (payload.data ?? {}) : payload;
+      if (payload.success === true && hasOwn(payload, "data")) {
+        return payload.data ?? {};
       }
-      if (payload && typeof payload === "object" && payload.error) {
-        throw new Error(pluginError(payload, t("error.plugin", "插件拒绝了这次操作。")));
+      if (payload.error) {
+        throw new Error(humanError(payload, "插件拒绝了这次操作。"));
       }
-      return payload || {};
+      return payload;
     }
 
-    async function callEntry(entryId, args = {}, timeoutMs = RUN_TIMEOUT_MS) {
-      const deadline = Date.now() + timeoutMs;
-      const created = await fetchJson(RUNS_URL, {
+    function extractRunResult(exportPayload) {
+      const items = Array.isArray(exportPayload && exportPayload.items)
+        ? exportPayload.items
+        : [];
+      const item = items.find((candidate) => candidate && candidate.type === "json")
+        || items.find((candidate) =>
+          candidate && candidate.type === "text" && typeof candidate.text === "string"
+        );
+      if (!item) throw new Error("任务没有返回可读取的结果。");
+
+      let payload;
+      if (hasOwn(item, "json")) payload = item.json;
+      else if (hasOwn(item, "payload")) payload = item.payload;
+      else if (hasOwn(item, "value")) payload = item.value;
+      else if (typeof item.text === "string") {
+        try {
+          payload = JSON.parse(item.text);
+        } catch (_error) {
+          throw new Error("任务结果不是有效 JSON。");
+        }
+      }
+      return unwrapEntryPayload(payload);
+    }
+
+    async function responsePayload(response) {
+      if (!response) throw new Error("宿主没有返回响应。");
+      if (typeof response.json === "function") {
+        try {
+          return await response.json();
+        } catch (_error) {
+          // A short text body is still useful for an HTTP error.
+        }
+      }
+      if (typeof response.text === "function") {
+        const text = await response.text();
+        if (!text) return {};
+        try {
+          return JSON.parse(text);
+        } catch (_error) {
+          return { message: text.slice(0, 300) };
+        }
+      }
+      return {};
+    }
+
+    async function requestJson(fetchFn, url, options) {
+      const response = await fetchFn(url, options);
+      const payload = await responsePayload(response);
+      if (response && response.ok === false) {
+        throw new Error(humanError(payload, `请求失败（HTTP ${response.status || "?"}）`));
+      }
+      return payload;
+    }
+
+    async function callEntry(entryId, args = {}, options = {}) {
+      const config = typeof options === "number" ? { timeoutMs: options } : (options || {});
+      const fetchFn = config.fetchFn || config.fetch || root.fetch || runtimeWindow.fetch;
+      if (typeof fetchFn !== "function") throw new Error("当前环境不能发送请求。");
+      const timeoutMs = Math.max(1000, Number(config.timeoutMs) || DEFAULT_TIMEOUT_MS);
+      const pollMs = Math.max(0, Number(config.pollMs ?? config.pollDelayMs) || DEFAULT_POLL_MS);
+      const now = typeof config.now === "function" ? config.now : Date.now;
+      const sleep = typeof config.sleep === "function"
+        ? config.sleep
+        : (milliseconds) => new Promise((resolve) => runtimeWindow.setTimeout(resolve, milliseconds));
+      const deadline = now() + timeoutMs;
+      const created = await requestJson(fetchFn, RUNS_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ plugin_id: pluginId, entry_id: entryId, args })
-      }, deadline);
-      const runId = created.run_id || created.id;
-      if (!runId) throw new Error(t("error.run_id", "宿主没有返回 run_id。"));
-      let delay = POLL_MIN_MS;
-      while (Date.now() < deadline) {
-        await sleep(Math.min(delay, Math.max(1, deadline - Date.now())));
-        const record = await fetchJson(`${RUNS_URL}/${encodeURIComponent(runId)}`, {
-          headers: { Accept: "application/json" }
-        }, deadline);
-        const status = String(record.status || "").toLowerCase();
-        if (status === "succeeded") {
-          const exported = await fetchJson(`${RUNS_URL}/${encodeURIComponent(runId)}/export`, {
-            headers: { Accept: "application/json" }
-          }, deadline);
+        body: JSON.stringify({
+          plugin_id: pluginId,
+          entry_id: String(entryId || ""),
+          args: isRecord(args) ? args : {}
+        })
+      });
+      const runId = cleanText(created && (created.run_id || created.id));
+      if (!runId) throw new Error("宿主没有返回 run_id。");
+
+      let record = created;
+      while (now() < deadline) {
+        let status = cleanText(record && record.status).toLowerCase();
+        if (["succeeded", "completed", "success"].includes(status)) {
+          const exported = await requestJson(
+            fetchFn,
+            `${RUNS_URL}/${encodeURIComponent(runId)}/export`,
+            { headers: { Accept: "application/json" } }
+          );
           return extractRunResult(exported);
         }
-        if (["failed", "canceled", "timeout"].includes(status)) {
-          throw new Error(pluginError(record, t("error.run_failed", "任务状态：{status}", { status })));
+        if (["failed", "canceled", "cancelled", "timeout", "timed_out"].includes(status)) {
+          throw new Error(humanError(record, `任务未完成（${status}）。`));
         }
-        delay = Math.min(POLL_MAX_MS, Math.round(delay * 1.45));
+        if (pollMs > 0) await sleep(Math.min(pollMs, Math.max(0, deadline - now())));
+        record = await requestJson(
+          fetchFn,
+          `${RUNS_URL}/${encodeURIComponent(runId)}`,
+          { headers: { Accept: "application/json" } }
+        );
       }
-      throw new Error(t("error.timeout", "插件调用超时。"));
+      throw new Error("插件调用超时。");
     }
 
-    function showToast(message, tone = "info") {
-      window.clearTimeout(state.toastTimer);
-      ui.toast.textContent = String(message || "");
-      ui.toast.dataset.tone = tone;
-      ui.toast.hidden = false;
-      state.toastTimer = window.setTimeout(() => { ui.toast.hidden = true; }, 4200);
-    }
-
-    function showFieldError(element, message) {
-      element.textContent = String(message || "");
-      element.hidden = !message;
-    }
-
-    async function withBusy(button, operation) {
-      const wasDisabled = button.disabled;
-      button.disabled = true;
-      button.classList.add("busy");
-      try {
-        return await operation();
-      } finally {
-        button.classList.remove("busy");
-        button.disabled = wasDisabled;
-        updateControlAvailability();
+    function normalizePanelState(input) {
+      const possible = isRecord(input) ? input : {};
+      const source = isRecord(possible.data) && !Array.isArray(possible.characters)
+        ? possible.data
+        : possible;
+      const seenNames = new Set();
+      const characters = [];
+      for (const raw of Array.isArray(source.characters) ? source.characters : []) {
+        if (!isRecord(raw)) continue;
+        const name = cleanText(raw.name);
+        if (!name || seenNames.has(name)) continue;
+        seenNames.add(name);
+        characters.push({
+          name,
+          current: raw.current === true,
+          bound: raw.bound === true
+        });
       }
+
+      let binding = null;
+      if (isRecord(source.binding)) {
+        const raw = source.binding;
+        binding = {
+          binding_id: cleanText(raw.binding_id),
+          original_name: cleanText(raw.original_name),
+          overlay_name: cleanText(raw.overlay_name),
+          base_prompt_fingerprint: cleanText(raw.base_prompt_fingerprint),
+          status: cleanText(raw.status),
+          desired_enabled: raw.desired_enabled === true,
+          effective: raw.effective === true,
+          healthy: raw.healthy === true,
+          conflict_code: cleanText(raw.conflict_code),
+          message: cleanText(raw.message),
+          current_character: cleanText(raw.current_character),
+          current_version: Number.isInteger(raw.current_version) ? raw.current_version : 0,
+          active_adaptations: Array.isArray(raw.active_adaptations)
+            ? raw.active_adaptations.filter((item) => typeof item === "string").slice(-8)
+            : [],
+          prompt_fingerprint: cleanText(raw.prompt_fingerprint),
+          runtime_refresh_mode: cleanText(raw.runtime_refresh_mode),
+          history: Array.isArray(raw.history)
+            ? raw.history.filter(isRecord).slice(-100)
+            : [],
+          overlay_retention: cleanText(raw.overlay_retention)
+        };
+      }
+
+      const proposals = (Array.isArray(source.proposals) ? source.proposals : [])
+        .filter(isRecord)
+        .map((raw) => ({
+          id: cleanText(raw.id),
+          status: cleanText(raw.status),
+          trigger: cleanText(raw.trigger),
+          evidence_summary: cleanText(raw.evidence_summary),
+          preference: cleanText(raw.preference),
+          proposed_prompt: cleanText(raw.proposed_prompt),
+          applied_prompt: cleanText(raw.applied_prompt),
+          confidence: Number.isFinite(Number(raw.confidence)) ? Number(raw.confidence) : 0,
+          risk: cleanText(raw.risk),
+          created_at: Number(raw.created_at) || 0,
+          resolved_at: Number(raw.resolved_at) || 0,
+          evidence_excerpt: Array.isArray(raw.evidence_excerpt)
+            ? raw.evidence_excerpt.filter((item) => typeof item === "string").slice(-4)
+            : []
+        }))
+        .filter((item) => item.id);
+
+      const settingsSource = isRecord(source.settings) ? source.settings : {};
+      const settings = {
+        learning_enabled: settingsSource.learning_enabled !== false,
+        automatic_reflection: settingsSource.automatic_reflection === true,
+        auto_apply_low_risk: settingsSource.auto_apply_low_risk === true,
+        reflection_threshold: Number.isInteger(settingsSource.reflection_threshold)
+          ? settingsSource.reflection_threshold : 4,
+        minimum_confidence: Number.isFinite(Number(settingsSource.minimum_confidence))
+          ? Number(settingsSource.minimum_confidence) : 0.75,
+        evidence_window: Number.isInteger(settingsSource.evidence_window)
+          ? settingsSource.evidence_window : 12,
+        show_evidence_excerpts: settingsSource.show_evidence_excerpts !== false
+      };
+
+      return {
+        status: cleanText(source.status, "degraded"),
+        persistence_ready: source.persistence_ready === true,
+        characters,
+        current_character: cleanText(source.current_character),
+        binding,
+        proposals,
+        settings,
+        evidence_count: Number.isInteger(source.evidence_count)
+          ? Math.max(0, source.evidence_count) : 0,
+        stats: isRecord(source.stats) ? source.stats : {},
+        unbound_managed_overlays: Array.isArray(source.unbound_managed_overlays)
+          ? source.unbound_managed_overlays.slice(0, 20)
+          : [],
+        invalid_managed_overlays: Array.isArray(source.invalid_managed_overlays)
+          ? source.invalid_managed_overlays.slice(0, 20)
+          : [],
+        policy: isRecord(source.policy) ? source.policy : {}
+      };
     }
 
-    function safeArray(value) {
-      return Array.isArray(value) ? value : [];
+    const hooks = Object.freeze({
+      humanError,
+      extractRunResult,
+      callEntry,
+      normalizePanelState
+    });
+    root.__APH_TEST_HOOKS__ = hooks;
+    if (runtimeWindow !== root) runtimeWindow.__APH_TEST_HOOKS__ = hooks;
+    if (root.__APH_TEST_MODE__ || runtimeWindow.__APH_TEST_MODE__) return;
+
+    const document = root.document || runtimeWindow.document;
+    if (!document) return;
+
+    const ui = {
+      app: document.getElementById("app"),
+      runtimeBadge: document.getElementById("runtime-badge"),
+      refreshButton: document.getElementById("refresh-button"),
+      statusNotice: document.getElementById("status-notice"),
+      statusTitle: document.getElementById("status-title"),
+      statusMessage: document.getElementById("status-message"),
+      characterCount: document.getElementById("character-count"),
+      characterSelector: document.getElementById("character-selector"),
+      startButton: document.getElementById("start-adaptation-button"),
+      bindingEffective: document.getElementById("binding-effective"),
+      bindingEmpty: document.getElementById("binding-empty"),
+      bindingDetails: document.getElementById("binding-details"),
+      originalName: document.getElementById("original-name"),
+      overlayName: document.getElementById("overlay-name"),
+      currentCharacter: document.getElementById("current-character"),
+      baseFingerprint: document.getElementById("base-fingerprint"),
+      activeAdaptations: document.getElementById("active-adaptations"),
+      noActiveAdaptations: document.getElementById("no-active-adaptations"),
+      bindingWarning: document.getElementById("binding-warning"),
+      bindingWarningMessage: document.getElementById("binding-warning-message"),
+      resumeButton: document.getElementById("resume-button"),
+      restoreButton: document.getElementById("restore-original-button"),
+      evidenceCount: document.getElementById("evidence-count"),
+      reflectButton: document.getElementById("reflect-button"),
+      proposalList: document.getElementById("proposal-list"),
+      proposalEmpty: document.getElementById("proposal-empty"),
+      rollbackButton: document.getElementById("rollback-button"),
+      historyList: document.getElementById("history-list"),
+      historyEmpty: document.getElementById("history-empty"),
+      settingsForm: document.getElementById("settings-form"),
+      settingLearning: document.getElementById("setting-learning"),
+      settingAutomatic: document.getElementById("setting-automatic"),
+      settingAutoApply: document.getElementById("setting-auto-apply"),
+      settingShowEvidence: document.getElementById("setting-show-evidence"),
+      settingThreshold: document.getElementById("setting-threshold"),
+      settingWindow: document.getElementById("setting-window"),
+      settingConfidence: document.getElementById("setting-confidence"),
+      saveSettingsButton: document.getElementById("save-settings-button"),
+      resetSettingsButton: document.getElementById("reset-settings-button"),
+      orphanCleanup: document.getElementById("orphan-cleanup"),
+      orphanSelector: document.getElementById("orphan-selector"),
+      orphanConfirmation: document.getElementById("orphan-confirmation"),
+      deleteOrphanButton: document.getElementById("delete-orphan-button"),
+      deleteConfirmation: document.getElementById("delete-confirmation"),
+      deleteButton: document.getElementById("delete-overlay-button"),
+      toast: document.getElementById("toast")
+    };
+
+    const view = {
+      data: normalizePanelState({}),
+      loading: false,
+      toastTimer: 0
+    };
+
+    function setText(node, value) {
+      if (node) node.textContent = String(value ?? "");
     }
 
-    function safeNumber(value, fallback = 0) {
+    function formatDate(value) {
       const number = Number(value);
-      return Number.isFinite(number) ? number : fallback;
-    }
-
-    function formatCount(value) {
-      return new Intl.NumberFormat(state.locale).format(Math.max(0, safeNumber(value)));
-    }
-
-    function formatDate(timestamp) {
-      const value = safeNumber(timestamp);
-      if (!value) return t("common.never", "从未");
+      if (!Number.isFinite(number) || number <= 0) return "—";
+      const milliseconds = number < 10_000_000_000 ? number * 1000 : number;
       try {
-        return new Intl.DateTimeFormat(state.locale, {
-          dateStyle: "medium",
-          timeStyle: "short"
-        }).format(new Date(value * 1000));
+        return new Intl.DateTimeFormat("zh-CN", {
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit"
+        }).format(new Date(milliseconds));
       } catch (_error) {
-        return new Date(value * 1000).toLocaleString();
+        return "—";
       }
     }
 
-    function dimensionLabel(dimension) {
-      return t(`dimension.${dimension}`, DIMENSION_FALLBACKS[dimension] || dimension);
+    function shortFingerprint(value) {
+      const text = cleanText(value);
+      return text ? `${text.slice(0, 12)}…` : "—";
     }
 
-    function valueLabel(value) {
-      return t(`value.${value}`, VALUE_FALLBACKS[value] || String(value || "—").replaceAll("_", " "));
+    function showToast(message, kind = "good") {
+      setText(ui.toast, message);
+      ui.toast.className = `toast ${kind}`;
+      ui.toast.hidden = false;
+      runtimeWindow.clearTimeout(view.toastTimer);
+      view.toastTimer = runtimeWindow.setTimeout(() => {
+        ui.toast.hidden = true;
+      }, 4200);
     }
 
-    function actionLabel(action) {
-      return t(`change.${action}`, action || "—");
+    function setBusy(busy) {
+      view.loading = busy;
+      document.querySelectorAll("button, select, input, textarea").forEach((node) => {
+        if (busy) {
+          node.dataset.wasDisabled = node.disabled ? "1" : "0";
+          node.disabled = true;
+        } else if (node.dataset.wasDisabled !== "1") {
+          node.disabled = false;
+        }
+        if (!busy) delete node.dataset.wasDisabled;
+      });
+      if (!busy) updateControls();
     }
 
-    function sourceLabel(source) {
-      return t(`source.${source}`, source === "manual" ? "手动" : source === "system" ? "系统" : "推断");
+    function showStatus(title, message, kind = "") {
+      setText(ui.statusTitle, title);
+      setText(ui.statusMessage, message);
+      ui.statusNotice.className = `notice ${kind}`.trim();
     }
 
-    function hasSelectedProfile() {
-      return Boolean(
-        state.selectedProfileId &&
-        state.profiles.some((profile) => profile.profile_id === state.selectedProfileId)
+    function updateControls() {
+      const data = view.data;
+      const binding = data.binding;
+      const usableBinding = binding && binding.status !== "overlay_deleted";
+      const ready = data.persistence_ready && !view.loading;
+      const invalidManagedCards = data.invalid_managed_overlays.length > 0;
+      ui.characterSelector.disabled = !ready || Boolean(usableBinding)
+        || invalidManagedCards;
+      ui.startButton.disabled = !ready || Boolean(usableBinding)
+        || invalidManagedCards || !ui.characterSelector.value;
+      ui.restoreButton.disabled = !ready || !usableBinding;
+      ui.resumeButton.disabled = !ready || !usableBinding || !binding.healthy;
+      ui.reflectButton.disabled = !ready || !usableBinding || !binding.healthy;
+      ui.rollbackButton.disabled = !ready || !usableBinding || !binding.healthy
+        || binding.current_version <= 0;
+      ui.saveSettingsButton.disabled = !ready;
+      ui.resetSettingsButton.disabled = !ready;
+      ui.orphanSelector.disabled = !ready || !view.data.unbound_managed_overlays.length;
+      ui.orphanConfirmation.disabled = !ready
+        || !view.data.unbound_managed_overlays.length;
+      ui.deleteOrphanButton.disabled = !ready
+        || !view.data.unbound_managed_overlays.length
+        || ui.orphanConfirmation.value !== "DELETE";
+      ui.deleteConfirmation.disabled = !ready || !usableBinding;
+      ui.deleteButton.disabled = !ready || !usableBinding
+        || ui.deleteConfirmation.value !== "DELETE";
+    }
+
+    function renderCharacters() {
+      const data = view.data;
+      const previous = ui.characterSelector.value;
+      ui.characterSelector.replaceChildren();
+      if (!data.characters.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "暂无可用角色卡";
+        ui.characterSelector.append(option);
+      } else {
+        for (const item of data.characters) {
+          const option = document.createElement("option");
+          option.value = item.name;
+          option.textContent = `${item.name}${item.current ? "（当前）" : ""}`;
+          ui.characterSelector.append(option);
+        }
+        const names = new Set(data.characters.map((item) => item.name));
+        const preferred = names.has(previous)
+          ? previous
+          : (data.characters.find((item) => item.current) || data.characters[0]).name;
+        ui.characterSelector.value = preferred;
+      }
+      setText(ui.characterCount, `${data.characters.length} 张可选`);
+    }
+
+    function renderBinding() {
+      const binding = view.data.binding;
+      ui.bindingEmpty.hidden = Boolean(binding);
+      ui.bindingDetails.hidden = !binding;
+      ui.restoreButton.disabled = !binding;
+      ui.resumeButton.hidden = !binding || binding.status === "overlay_deleted"
+        || binding.effective || !binding.healthy;
+      if (!binding) {
+        setText(ui.bindingEffective, "尚未绑定");
+        ui.bindingEffective.className = "tag";
+        return;
+      }
+      setText(ui.originalName, binding.original_name || "—");
+      setText(ui.overlayName, binding.overlay_name || "—");
+      setText(ui.currentCharacter, binding.current_character || view.data.current_character || "—");
+      setText(ui.baseFingerprint, shortFingerprint(binding.base_prompt_fingerprint));
+      ui.activeAdaptations.replaceChildren();
+      for (const adaptation of binding.active_adaptations) {
+        const item = document.createElement("li");
+        item.textContent = adaptation;
+        ui.activeAdaptations.append(item);
+      }
+      ui.activeAdaptations.hidden = !binding.active_adaptations.length;
+      ui.noActiveAdaptations.hidden = Boolean(binding.active_adaptations.length);
+
+      let label = "当前未生效";
+      let className = "tag warn";
+      if (binding.status === "overlay_deleted") {
+        label = "副本已删除";
+        className = "tag";
+      } else if (!binding.healthy) {
+        label = "绑定有冲突";
+        className = "tag bad";
+      } else if (binding.effective) {
+        label = "正在生效";
+        className = "tag good";
+      } else if (binding.status === "restored" || !binding.desired_enabled) {
+        label = "已恢复原角色";
+      }
+      setText(ui.bindingEffective, label);
+      ui.bindingEffective.className = className;
+
+      const warning = !binding.healthy || Boolean(binding.message);
+      ui.bindingWarning.hidden = !warning;
+      setText(
+        ui.bindingWarningMessage,
+        binding.message || (binding.conflict_code
+          ? `检测到冲突：${binding.conflict_code}。插件不会猜测或覆盖。`
+          : "")
       );
     }
 
-    function selectedScopeArgs() {
-      return state.selectedProfileId ? { profile_id: state.selectedProfileId } : {};
+    function riskLabel(value) {
+      return value === "high" ? "高风险" : value === "medium" ? "中风险" : "低风险";
     }
 
-    function requireSelectedProfile(errorElement = null) {
-      if (hasSelectedProfile()) return selectedScopeArgs();
-      const message = t("profile.selection_required", "请先选择一个本地档案。");
-      if (errorElement) showFieldError(errorElement, message);
-      else showToast(message, "warning");
-      return null;
-    }
+    function renderProposals() {
+      const pending = view.data.proposals.filter((item) => item.status === "pending");
+      ui.proposalList.replaceChildren();
+      ui.proposalEmpty.hidden = Boolean(pending.length);
+      for (const proposal of pending.slice().reverse()) {
+        const card = document.createElement("article");
+        card.className = "item";
 
-    function shortProfileId(profileId) {
-      const value = String(profileId || "");
-      if (value.length <= 18) return value;
-      return `${value.slice(0, 8)}…${value.slice(-8)}`;
-    }
+        const head = document.createElement("div");
+        head.className = "item-head";
+        const heading = document.createElement("h3");
+        heading.className = "item-title";
+        heading.textContent = proposal.preference || "沟通方式建议";
+        const meta = document.createElement("div");
+        meta.className = "item-meta";
+        const risk = document.createElement("span");
+        risk.className = proposal.risk === "high" ? "tag bad"
+          : proposal.risk === "medium" ? "tag warn" : "tag good";
+        risk.textContent = riskLabel(proposal.risk);
+        const confidence = document.createElement("span");
+        confidence.textContent = `置信度 ${Math.round(proposal.confidence * 100)}%`;
+        meta.append(risk, confidence);
+        head.append(heading, meta);
+        card.append(head);
 
-    function renderProfileSelector(payload) {
-      state.profiles = safeArray(payload.profiles)
-        .filter((profile) => profile && typeof profile.profile_id === "string" && profile.profile_id);
-      const available = new Set(state.profiles.map((profile) => profile.profile_id));
-      const backendSelection = typeof payload.selected_profile_id === "string" ?
-        payload.selected_profile_id : "";
-      if (!available.has(state.selectedProfileId)) {
-        state.selectedProfileId = available.has(backendSelection) ? backendSelection : "";
-      }
-      persistProfileId(state.selectedProfileId);
-
-      ui.profileSelector.replaceChildren();
-      const none = document.createElement("option");
-      none.value = "";
-      none.textContent = t("profile.none", "尚未选择档案");
-      ui.profileSelector.append(none);
-      state.profiles.forEach((profile, index) => {
-        const option = document.createElement("option");
-        const profileId = profile.profile_id;
-        option.value = profileId;
-        option.title = profileId;
-        option.textContent = t(
-          "profile.option",
-          "#{index} · {id} · {status} · {count} 项 · 最近 {seen}",
-          {
-            index: index + 1,
-            id: shortProfileId(profileId),
-            status: profile.enabled === false ? t("status.paused", "已暂停") : t("status.active", "已启用"),
-            count: formatCount(profile.preference_count),
-            seen: formatDate(profile.last_seen_at)
-          }
-        );
-        ui.profileSelector.append(option);
-      });
-      ui.profileSelector.value = state.selectedProfileId;
-    }
-
-    function updateControlAvailability() {
-      const interactive = !state.loading;
-      const selected = hasSelectedProfile();
-      const canPersist = interactive && state.persistenceReady;
-      const canReadProfile = interactive && selected;
-      const canMutateProfile = canReadProfile && state.persistenceReady;
-
-      ui.profileSelector.disabled = !interactive;
-      ui.profileCharacter.disabled = !canPersist;
-      ui.profileCreateButton.disabled = !canPersist;
-      ui.adaptationButton.disabled = !canMutateProfile;
-      ui.exportButton.disabled = !canReadProfile;
-      ui.importButton.disabled = !canMutateProfile;
-
-      ui.settingsForm.querySelectorAll("input, select").forEach((element) => {
-        element.disabled = !canPersist;
-      });
-      document.getElementById("setting-scope").disabled =
-        !canPersist || state.profiles.length > 0;
-      ui.saveSettingsButton.disabled = !canPersist;
-      ui.resetSettingsButton.disabled = !canPersist;
-
-      ui.manualForm.querySelectorAll("input, select, textarea").forEach((element) => {
-        element.disabled = !canMutateProfile;
-      });
-      ui.manualSaveButton.disabled = !canMutateProfile;
-      ui.manualCancelButton.disabled = !canMutateProfile;
-      ui.manualDeleteButton.disabled =
-        !canMutateProfile || state.editingSource !== "manual";
-      ui.preferenceList.querySelectorAll("button").forEach((button) => {
-        button.disabled = !canMutateProfile;
-      });
-
-      ui.resetConfirmation.disabled = !canMutateProfile;
-      ui.resetProfileButton.disabled =
-        !canMutateProfile || ui.resetConfirmation.value !== "RESET";
-      ui.resetDialogConfirm.disabled = !canMutateProfile;
-    }
-
-    function createButton(label, className, handler) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = className;
-      button.textContent = label;
-      button.addEventListener("click", handler);
-      return button;
-    }
-
-    function renderPreferences(preferences) {
-      ui.preferenceList.replaceChildren();
-      const items = safeArray(preferences);
-      ui.preferencesEmpty.hidden = items.length > 0;
-      items.forEach((preference) => {
-        const row = document.createElement("article");
-        row.className = "preference-row";
-
-        const name = document.createElement("div");
-        name.className = "preference-name";
-        const strong = document.createElement("strong");
-        strong.textContent = dimensionLabel(preference.dimension);
-        const source = document.createElement("span");
-        source.textContent = `${sourceLabel(preference.source_type)} · ${formatDate(preference.updated_at)}`;
-        name.append(strong, source);
-
-        const value = document.createElement("div");
-        value.className = "preference-value";
-        value.textContent = preference.dimension === "note" ?
-          String(preference.value || "") : valueLabel(preference.value);
-        const badges = document.createElement("div");
-        badges.className = "result-list";
-        const sourceTag = document.createElement("span");
-        sourceTag.className = `tag ${preference.source_type === "manual" ? "manual" : ""}`;
-        sourceTag.textContent = sourceLabel(preference.source_type);
-        badges.append(sourceTag);
-        if (preference.locked) {
-          const locked = document.createElement("span");
-          locked.className = "tag locked";
-          locked.textContent = t("preference.locked", "已锁定");
-          badges.append(locked);
+        if (proposal.evidence_summary) {
+          const summary = document.createElement("p");
+          summary.textContent = proposal.evidence_summary;
+          card.append(summary);
         }
-        value.append(badges);
 
-        const confidence = document.createElement("div");
-        confidence.className = "confidence";
-        const confidenceValue = Math.max(0, Math.min(1, safeNumber(preference.confidence)));
-        const label = document.createElement("div");
-        label.className = "confidence-label";
-        const left = document.createElement("span");
-        left.textContent = t("preference.confidence", "置信度");
-        const right = document.createElement("span");
-        right.textContent = `${Math.round(confidenceValue * 100)}% · ${t("preference.evidence", "{count} 条证据", {
-          count: formatCount(preference.evidence_count)
-        })}`;
-        label.append(left, right);
-        const progress = document.createElement("progress");
-        progress.max = 100;
-        progress.value = confidenceValue * 100;
-        progress.setAttribute("aria-label", `${left.textContent} ${Math.round(confidenceValue * 100)}%`);
-        confidence.append(label, progress);
+        const label = document.createElement("label");
+        label.textContent = "批准后写入副本的内容";
+        const textarea = document.createElement("textarea");
+        textarea.maxLength = 400;
+        textarea.value = proposal.proposed_prompt;
+        textarea.setAttribute("aria-label", "可编辑的自适应建议");
+        label.append(textarea);
+        card.append(label);
+
+        for (const excerptText of proposal.evidence_excerpt) {
+          const excerpt = document.createElement("blockquote");
+          excerpt.className = "evidence";
+          excerpt.textContent = excerptText;
+          card.append(excerpt);
+        }
 
         const actions = document.createElement("div");
-        actions.className = "row-actions";
-        const edit = createButton(
-          t("action.edit", "编辑"),
-          "button secondary small",
-          () => beginEditPreference(preference)
-        );
-        actions.append(edit);
-        if (preference.source_type === "manual") {
-          const remove = createButton(
-            t("action.delete", "删除"),
-            "button danger small",
-            () => deleteManualPreference(preference.dimension, remove)
-          );
-          actions.append(remove);
-        }
-        row.append(name, value, confidence, actions);
-        ui.preferenceList.append(row);
-      });
+        actions.className = "item-actions";
+        const reject = document.createElement("button");
+        reject.type = "button";
+        reject.className = "button secondary small";
+        reject.textContent = "拒绝";
+        reject.addEventListener("click", () => mutate(
+          "resolve_proposal",
+          { proposal_id: proposal.id, action: "reject" },
+          "建议已拒绝，角色卡没有变化。"
+        ));
+        const approve = document.createElement("button");
+        approve.type = "button";
+        approve.className = "button small";
+        approve.textContent = "批准并应用";
+        approve.addEventListener("click", () => mutate(
+          "resolve_proposal",
+          {
+            proposal_id: proposal.id,
+            action: "approve",
+            edited_prompt: textarea.value.trim()
+          },
+          "建议已写入自适应副本。"
+        ));
+        actions.append(reject, approve);
+        card.append(actions);
+        ui.proposalList.append(card);
+      }
     }
 
-    function renderChanges(changes) {
-      ui.changesList.replaceChildren();
-      const items = safeArray(changes).slice().reverse();
-      ui.changesCount.textContent = formatCount(items.length);
-      ui.changesEmpty.hidden = items.length > 0;
-      items.forEach((change) => {
-        const row = document.createElement("div");
-        row.className = "change-row";
-        const dot = document.createElement("span");
-        dot.className = "change-dot";
-        dot.setAttribute("aria-hidden", "true");
-        const main = document.createElement("div");
-        main.className = "change-main";
-        const title = document.createElement("strong");
-        const value = change.value ? valueLabel(change.value) : t("common.none", "无");
-        title.textContent = `${dimensionLabel(change.dimension)} · ${actionLabel(change.action)}`;
-        const meta = document.createElement("span");
-        meta.textContent = `${value} · ${sourceLabel(change.source_type)} · ${Math.round(safeNumber(change.confidence) * 100)}%`;
-        main.append(title, meta);
+    const actionNames = {
+      bound: "已创建绑定",
+      activated: "已启用",
+      approved: "已批准",
+      rejected: "已拒绝",
+      rolled_back: "已回滚",
+      restored: "已恢复",
+      shutdown_restored: "关闭时恢复",
+      recovered: "重启后恢复绑定",
+      overlay_renamed: "已识别副本改名",
+      overlay_deleted: "已删除副本",
+      conflict: "检测到冲突"
+    };
+
+    function renderHistory() {
+      const binding = view.data.binding;
+      const history = binding ? binding.history : [];
+      ui.historyList.replaceChildren();
+      ui.historyEmpty.hidden = Boolean(history.length);
+      for (const change of history.slice().reverse()) {
+        const item = document.createElement("article");
+        item.className = "item change";
         const time = document.createElement("time");
         time.className = "change-time";
-        time.textContent = formatDate(change.timestamp);
-        row.append(dot, main, time);
-        ui.changesList.append(row);
-      });
-    }
-
-    function renderProposals(proposals) {
-      const container = document.getElementById("proposalsList") || document.getElementById("proposals-list");
-      const empty = document.getElementById("proposalsEmpty") || document.getElementById("proposals-empty");
-      if (!container) return;
-      container.replaceChildren();
-      const items = safeArray(proposals).slice().reverse();
-      if (empty) empty.hidden = items.length > 0;
-      items.forEach((proposal) => {
-        const card = document.createElement("div");
-        card.className = "proposal-card";
-        const head = document.createElement("div");
-        head.className = "proposal-head";
-        const status = document.createElement("span");
-        status.className = `proposal-status proposal-status-${proposal.status || "pending"}`;
-        status.textContent = proposal.status || "pending";
+        time.textContent = formatDate(change.at);
+        const body = document.createElement("div");
+        body.className = "change-body";
         const title = document.createElement("strong");
-        title.textContent = proposal.trigger || t("proposals.untitled", "反思提案");
-        head.append(status, title);
+        title.textContent = actionNames[cleanText(change.action)] || cleanText(change.action, "状态变化");
         const summary = document.createElement("p");
-        summary.textContent = proposal.evidence_summary || "";
-        const promptBox = document.createElement("textarea");
-        promptBox.className = "proposal-prompt";
-        promptBox.value = proposal.applied_prompt || proposal.proposed_prompt || "";
-        promptBox.rows = 2;
-        promptBox.readOnly = proposal.status !== "pending";
-        const meta = document.createElement("div");
-        meta.className = "proposal-meta";
-        meta.textContent = `${Math.round(safeNumber(proposal.confidence) * 100)}% · ${proposal.risk || "?"} · ${formatDate(proposal.created_at)}`;
-        card.append(head, summary, promptBox, meta);
-        if (proposal.status === "pending") {
-          const actions = document.createElement("div");
-          actions.className = "proposal-actions";
-          const approve = document.createElement("button");
-          approve.type = "button";
-          approve.className = "btn-primary";
-          approve.textContent = t("proposals.approve", "批准");
-          approve.addEventListener("click", async () => {
-            await withBusy(approve, async () => {
-              try {
-                await callEntry("resolve_proposal", {
-                  proposal_id: proposal.id,
-                  action: "approve",
-                  edited_prompt: promptBox.value,
-                  ...selectedScopeArgs(),
-                });
-                showToast(t("proposals.approved", "提案已应用。"), "success");
-                await loadPanel(true);
-              } catch (error) {
-                showToast(error.message, "error");
-              }
-            });
-          });
-          const reject = document.createElement("button");
-          reject.type = "button";
-          reject.textContent = t("proposals.reject", "拒绝");
-          reject.addEventListener("click", async () => {
-            await withBusy(reject, async () => {
-              try {
-                await callEntry("resolve_proposal", {
-                  proposal_id: proposal.id,
-                  action: "reject",
-                  ...selectedScopeArgs(),
-                });
-                showToast(t("proposals.rejected", "提案已拒绝。"), "info");
-                await loadPanel(true);
-              } catch (error) {
-                showToast(error.message, "error");
-              }
-            });
-          });
-          actions.append(approve, reject);
-          card.append(actions);
+        summary.textContent = cleanText(change.summary, "—");
+        body.append(title, summary);
+        if (cleanText(change.before) || cleanText(change.after)) {
+          const diff = document.createElement("div");
+          diff.className = "diff";
+          const before = document.createElement("div");
+          const beforeTitle = document.createElement("strong");
+          beforeTitle.textContent = "修改前";
+          before.append(beforeTitle, document.createTextNode(cleanText(change.before, "无")));
+          const after = document.createElement("div");
+          const afterTitle = document.createElement("strong");
+          afterTitle.textContent = "修改后";
+          after.append(afterTitle, document.createTextNode(cleanText(change.after, "无")));
+          diff.append(before, after);
+          body.append(diff);
         }
-        container.append(card);
-      });
-    }
-
-    function setText(id, value) {
-      const element = document.getElementById(id);
-      if (element) element.textContent = String(value);
-    }
-
-    function renderSummary(payload) {
-      const profile = payload.profile || {};
-      const stats = payload.aggregate_stats || {};
-      const runtimeStatus = String(payload.status || "stopped");
-      if (runtimeStatus === "running") {
-        ui.runtimeStatus.textContent = t("status.running", "运行中");
-        ui.runtimeStatus.dataset.tone = "success";
-      } else if (runtimeStatus === "degraded") {
-        ui.runtimeStatus.textContent = t("status.degraded", "只读降级");
-        ui.runtimeStatus.dataset.tone = "warning";
-      } else {
-        ui.runtimeStatus.textContent = t("status.stopped", "已停止");
-        ui.runtimeStatus.dataset.tone = "danger";
+        item.append(time, body);
+        ui.historyList.append(item);
       }
-      ui.persistenceWarning.hidden = state.persistenceReady;
-
-      const profileEnabled = profile.enabled !== false;
-      setText(
-        "stat-profile-status",
-        hasSelectedProfile() ?
-          (profileEnabled ? t("status.active", "已启用") : t("status.paused", "已暂停")) :
-          t("status.unselected", "未选择")
-      );
-      setText("stat-profile-count", formatCount(payload.profile_count));
-      setText("stat-preference-count", formatCount(profile.preference_count));
-      setText("stat-messages-seen", formatCount(stats.messages_seen));
-      setText("stat-injections", formatCount(stats.injections));
-
-      ui.adaptationButton.textContent = profileEnabled ? t("action.pause", "暂停当前档案") : t("action.resume", "恢复当前档案");
-      ui.adaptationButton.dataset.nextEnabled = profileEnabled ? "false" : "true";
-
-      const guidance = typeof profile.guidance === "string" ? profile.guidance : "";
-      ui.guidancePreview.textContent = guidance;
-      ui.guidanceEmpty.hidden = Boolean(guidance);
-      ui.guidancePreview.hidden = !guidance;
-      const settings = payload.settings || {};
-      const routeVerified = payload.route_verified === true;
-      const routeCollision = payload.route_collision === true;
-      const deliveryEnabled = profileEnabled &&
-        settings.adaptation_enabled !== false && settings.injection_enabled !== false;
-      const canInject = hasSelectedProfile() && deliveryEnabled &&
-        routeVerified && !routeCollision;
-      ui.guidanceState.textContent = guidance ?
-        (canInject ?
-          t("guidance.ready", "可尝试排队") :
-          (deliveryEnabled ?
-            (routeCollision ?
-              t("guidance.route_collision", "目标与其他档案冲突，已停止排队") :
-              t("guidance.waiting_route", "等待真实聊天路由")) :
-            t("guidance.disabled", "推送已关闭"))) :
-        t("guidance.none", "无正文");
-      ui.guidanceState.className = `tag ${canInject ? "manual" : ""}`;
-
-      const observation = payload.observation || {};
-      ui.observationText.textContent = t(
-        "observation.body",
-        "公开聊天处理器拒绝未证明可信的调用；已验证的用户上下文轮询是唯一活动观察链路：{enabled}，每 {seconds} 秒最多读取 256 条。轮询只有角色路由而没有真人或会话 ID：用户范围退化为按角色并可能混档，会话范围停止学习。路由 5 分钟后过期；宿主没有严格目标路由或送达确认，排队可能静默丢失或改投。",
-        {
-          enabled: observation.verified_memory_poll_active ? t("common.enabled", "启用") : t("common.disabled", "关闭"),
-          seconds: safeNumber(observation.poll_seconds, 2)
-        }
-      );
-      renderPreferences(profile.preferences);
-      renderChanges(payload.recent_changes);
-      renderProposals(payload.reflection_proposals);
     }
 
-    function setFormValue(id, value) {
-      const element = document.getElementById(id);
-      if (element) element.value = value ?? "";
+    function renderSettings() {
+      const settings = view.data.settings;
+      ui.settingLearning.checked = settings.learning_enabled;
+      ui.settingAutomatic.checked = settings.automatic_reflection;
+      ui.settingAutoApply.checked = settings.auto_apply_low_risk;
+      ui.settingShowEvidence.checked = settings.show_evidence_excerpts;
+      ui.settingThreshold.value = String(settings.reflection_threshold);
+      ui.settingWindow.value = String(settings.evidence_window);
+      ui.settingConfidence.value = String(settings.minimum_confidence);
     }
 
-    function renderSettings(settings) {
-      const value = settings || {};
-      document.getElementById("setting-adaptation").checked = value.adaptation_enabled !== false;
-      document.getElementById("setting-injection").checked = value.injection_enabled !== false;
-      document.getElementById("setting-debug").checked = value.debug_excerpts === true;
-      setFormValue("setting-sensitivity", value.sensitivity || "conservative");
-      setFormValue("setting-min-evidence", safeNumber(value.minimum_evidence, 2));
-      setFormValue("setting-min-confidence", safeNumber(value.minimum_confidence, .65));
-      setFormValue("setting-decay", safeNumber(value.decay_days, 45));
-      setFormValue("setting-ttl", safeNumber(value.ttl_days, 180));
-      setFormValue("setting-cooldown", safeNumber(value.cooldown_seconds, 120));
-      setFormValue("setting-scope", value.scope || "user");
-      setFormValue("setting-max-users", safeNumber(value.max_users, 64));
-      setFormValue("setting-max-preferences", safeNumber(value.max_preferences, 12));
-      updateConfidenceOutput();
-    }
-
-    function populateDimensions() {
-      const current = ui.manualDimension.value;
-      ui.manualDimension.replaceChildren();
-      Object.keys(state.dimensions).forEach((dimension) => {
+    function renderOrphans() {
+      const names = view.data.unbound_managed_overlays;
+      const previous = ui.orphanSelector.value;
+      ui.orphanCleanup.hidden = !names.length;
+      ui.orphanSelector.replaceChildren();
+      for (const name of names) {
         const option = document.createElement("option");
-        option.value = dimension;
-        option.textContent = dimensionLabel(dimension);
-        ui.manualDimension.append(option);
-      });
-      if (current && hasOwn(state.dimensions, current)) ui.manualDimension.value = current;
-      syncManualValueControl();
-    }
-
-    function syncManualValueControl() {
-      const dimension = ui.manualDimension.value;
-      const note = dimension === "note";
-      ui.manualSelectField.hidden = note;
-      ui.manualNoteField.hidden = !note;
-      ui.manualValue.required = !note;
-      ui.manualNote.required = note;
-      if (!note) {
-        const current = ui.manualValue.value;
-        ui.manualValue.replaceChildren();
-        safeArray(state.dimensions[dimension]).forEach((value) => {
-          const option = document.createElement("option");
-          option.value = value;
-          option.textContent = valueLabel(value);
-          ui.manualValue.append(option);
-        });
-        if (current && safeArray(state.dimensions[dimension]).includes(current)) ui.manualValue.value = current;
+        option.value = name;
+        option.textContent = name;
+        ui.orphanSelector.append(option);
       }
+      if (names.includes(previous)) ui.orphanSelector.value = previous;
     }
 
-    function resetManualForm() {
-      state.editingDimension = "";
-      state.editingSource = "";
-      ui.manualForm.reset();
-      ui.manualMode.textContent = t("manual.mode_new", "新建");
-      ui.manualCancelButton.hidden = true;
-      ui.manualDeleteButton.disabled = true;
-      showFieldError(ui.manualError, "");
-      populateDimensions();
-      updateControlAvailability();
-    }
-
-    function beginEditPreference(preference) {
-      if (!requireSelectedProfile(ui.manualError) || !state.persistenceReady) return;
-      state.editingDimension = String(preference.dimension || "");
-      state.editingSource = String(preference.source_type || "");
-      ui.manualDimension.value = state.editingDimension;
-      syncManualValueControl();
-      if (state.editingDimension === "note") {
-        ui.manualNote.value = String(preference.value || "");
+    function render() {
+      const data = view.data;
+      ui.app.hidden = false;
+      setText(ui.evidenceCount, data.evidence_count);
+      setText(ui.runtimeBadge, data.status === "running" ? "插件运行中" : "运行受限");
+      if (!data.persistence_ready) {
+        showStatus("本地存储不可用", "为避免产生无法追踪的副本，写入操作已暂停。", "bad");
+      } else if (data.binding && !data.binding.healthy) {
+        showStatus(
+          "角色卡状态需要检查",
+          data.binding.message || "原卡或副本发生了无法安全判断的变化，插件不会自动覆盖。",
+          "warn"
+        );
+      } else if (data.invalid_managed_overlays.length) {
+        showStatus(
+          "发现来源标记损坏的自适应副本",
+          `请先在角色管理中检查：${data.invalid_managed_overlays.join("、")}。插件不会把它当成原角色继续复制。`,
+          "warn"
+        );
+      } else if (data.unbound_managed_overlays.length) {
+        showStatus(
+          "发现未绑定的受控副本",
+          "这些副本带有本插件标记，但无法与当前绑定唯一对应；请在角色管理中检查。",
+          "warn"
+        );
+      } else if (data.binding && data.binding.status === "overlay_deleted") {
+        showStatus("自适应副本已删除", "可以重新选择任意原角色卡开始自适应。");
+      } else if (data.binding && data.binding.effective) {
+        showStatus("自适应副本正在生效", `当前使用「${data.binding.overlay_name}」，原卡保持不变。`);
+      } else if (data.binding) {
+        showStatus("绑定已保留", "当前没有使用自适应副本，可随时重新启用或手动删除。");
       } else {
-        ui.manualValue.value = String(preference.value || "");
+        showStatus("请选择一张角色卡", "开始后会创建明确标记的受控副本，并自动切换过去。");
       }
-      ui.manualLocked.checked = preference.locked === true;
-      ui.manualMode.textContent = t("manual.mode_edit", "编辑");
-      ui.manualCancelButton.hidden = false;
-      ui.manualDeleteButton.disabled = state.editingSource !== "manual";
-      showFieldError(ui.manualError, "");
-      updateControlAvailability();
-      document.getElementById("manual-panel").scrollIntoView({ behavior: "smooth", block: "start" });
-      window.setTimeout(() => ui.manualDimension.focus(), 180);
+      renderCharacters();
+      renderBinding();
+      renderProposals();
+      renderHistory();
+      renderSettings();
+      renderOrphans();
+      updateControls();
     }
 
-    function hydrate(payload) {
-      state.panel = payload || {};
-      state.persistenceReady = payload.persistence_ready === true;
-      state.dimensions = payload.dimensions && typeof payload.dimensions === "object" ? payload.dimensions : {};
-      renderProfileSelector(payload);
-      renderSummary(payload);
-      renderSettings(payload.settings);
-      populateDimensions();
-      updateControlAvailability();
+    async function loadState() {
+      const payload = await callEntry("get_panel_state");
+      view.data = normalizePanelState(payload);
+      render();
+      return view.data;
     }
 
-    function showBootError(error) {
-      ui.app.hidden = true;
-      ui.boot.hidden = false;
-      ui.bootLoader.hidden = true;
-      ui.bootTitle.textContent = t("boot.error_title", "无法加载管理面板");
-      ui.bootMessage.textContent = error instanceof Error ? error.message : String(error);
-      ui.bootActions.hidden = false;
-    }
-
-    async function loadPanel(announce = false) {
-      if (state.loading) return false;
-      state.loading = true;
-      ui.refreshButton.disabled = true;
-      ui.refreshButton.classList.add("busy");
-      updateControlAvailability();
+    async function refresh(showSuccess = false) {
+      setBusy(true);
       try {
-        const requestedScope = selectedScopeArgs();
-        let payload;
-        try {
-          payload = await callEntry("get_panel_state", requestedScope);
-        } catch (error) {
-          if (!requestedScope.profile_id) throw error;
-          state.selectedProfileId = "";
-          persistProfileId("");
-          payload = await callEntry("get_panel_state", {});
-        }
-        if (state.pendingStoredProfileId) {
-          const storedProfileId = state.pendingStoredProfileId;
-          state.pendingStoredProfileId = "";
-          const exists = safeArray(payload.profiles).some(
-            (profile) => profile && profile.profile_id === storedProfileId
-          );
-          if (exists) {
-            state.selectedProfileId = storedProfileId;
-            persistProfileId(storedProfileId);
-            if (payload.selected_profile_id !== storedProfileId) {
-              payload = await callEntry("get_panel_state", {
-                profile_id: storedProfileId
-              });
-            }
-          } else {
-            persistProfileId("");
-          }
-        }
-        hydrate(payload);
-        ui.boot.hidden = true;
+        await loadState();
+        if (showSuccess) showToast("已按后台最新状态刷新。");
+      } catch (error) {
         ui.app.hidden = false;
-        if (announce) showToast(t("success.refreshed", "状态已刷新。"), "success");
-        return true;
-      } catch (error) {
-        if (ui.app.hidden) showBootError(error);
-        else showToast(error.message || t("error.load", "加载失败。"), "error");
-        return false;
+        showStatus("暂时无法读取状态", humanError(error), "bad");
+        showToast(humanError(error), "bad");
       } finally {
-        state.loading = false;
-        ui.refreshButton.classList.remove("busy");
-        ui.refreshButton.disabled = false;
-        updateControlAvailability();
+        setBusy(false);
       }
     }
 
-    function collectSettings() {
-      const settings = {
-        adaptation_enabled: document.getElementById("setting-adaptation").checked,
-        injection_enabled: document.getElementById("setting-injection").checked,
-        debug_excerpts: document.getElementById("setting-debug").checked,
-        sensitivity: document.getElementById("setting-sensitivity").value,
-        minimum_confidence: Number(document.getElementById("setting-min-confidence").value),
-        scope: document.getElementById("setting-scope").value
-      };
-      INTEGER_SETTINGS.forEach((name) => {
-        const element = ui.settingsForm.elements.namedItem(name);
-        settings[name] = Number(element.value);
-      });
-      return settings;
-    }
-
-    function validateSettings(settings) {
-      if (settings.ttl_days < settings.decay_days) {
-        return t("validation.ttl", "档案 TTL 不能短于弱证据半衰期。");
-      }
-      if (INTEGER_SETTINGS.some((name) => !Number.isFinite(settings[name]))) {
-        return t("validation.number", "请为所有数值设置填写有效数字。");
-      }
-      return "";
-    }
-
-    function updateConfidenceOutput() {
-      const value = Number(document.getElementById("setting-min-confidence").value);
-      ui.confidenceOutput.textContent = `${Math.round(value * 100)}%`;
-    }
-
-    async function createLocalProfile(event) {
-      event.preventDefault();
-      showFieldError(ui.profileError, "");
-      const character = ui.profileCharacter.value.trim();
-      if (!character || character.length > 80) {
-        showFieldError(
-          ui.profileError,
-          t("validation.character", "请输入 1–80 个字符的本地猫娘名称。")
-        );
-        return;
-      }
-      await withBusy(ui.profileCreateButton, async () => {
-        try {
-          const result = await callEntry("create_local_profile", { character });
-          if (!result || typeof result.profile_id !== "string" || !result.profile_id) {
-            throw new Error(t("error.invalid_result", "插件结果不是有效 JSON。"));
-          }
-          state.selectedProfileId = result.profile_id;
-          ui.profileCharacter.value = "";
-          if (await loadPanel()) {
-            showToast(t("success.profile_created", "空档案已创建并选中；创建不会验证路由，管理注入需当前进程最近 5 分钟内的真实聊天。"), "success");
-          }
-        } catch (error) {
-          showFieldError(ui.profileError, error.message);
-        }
-      });
-    }
-
-    async function saveSettings(event) {
-      event.preventDefault();
-      showFieldError(ui.settingsError, "");
-      const settings = collectSettings();
-      const validation = validateSettings(settings);
-      if (validation) {
-        showFieldError(ui.settingsError, validation);
-        return;
-      }
-      await withBusy(ui.saveSettingsButton, async () => {
-        try {
-          await callEntry("save_settings", { settings, ...selectedScopeArgs() });
-          if (await loadPanel()) {
-            showToast(t("success.settings_saved", "设置已保存到可用的本地存储。"), "success");
-          }
-        } catch (error) {
-          showFieldError(ui.settingsError, error.message);
-        }
-      });
-    }
-
-    async function resetSettings() {
-      const currentScope = state.panel && state.panel.settings ? state.panel.settings.scope : "";
-      const defaultScope = state.panel && state.panel.defaults ? state.panel.defaults.scope : "";
-      if (state.profiles.length > 0 && currentScope && defaultScope && currentScope !== defaultScope) {
-        showFieldError(
-          ui.settingsError,
-          t(
-            "settings.scope_locked",
-            "已有档案时会锁定隔离范围；恢复默认设置若会改变范围也会被阻止。如需切换，请先安全导出并重置所有现有档案。"
-          )
-        );
-        return;
-      }
-      await withBusy(ui.resetSettingsButton, async () => {
-        try {
-          await callEntry("reset_settings", selectedScopeArgs());
-          if (await loadPanel()) {
-            showToast(t("success.settings_reset", "已恢复内置默认设置。"), "success");
-          }
-        } catch (error) {
-          showFieldError(ui.settingsError, error.message);
-        }
-      });
-    }
-
-    async function saveManualPreference(event) {
-      event.preventDefault();
-      showFieldError(ui.manualError, "");
-      const scope = requireSelectedProfile(ui.manualError);
-      if (!scope) return;
-      const dimension = ui.manualDimension.value;
-      const value = dimension === "note" ? ui.manualNote.value.trim() : ui.manualValue.value;
-      if (!dimension || !value) {
-        showFieldError(ui.manualError, t("validation.preference", "请选择维度并填写偏好值。"));
-        return;
-      }
-      await withBusy(ui.manualSaveButton, async () => {
-        try {
-          await callEntry("set_manual_preference", {
-            dimension,
-            value,
-            locked: ui.manualLocked.checked,
-            ...scope
-          });
-          resetManualForm();
-          if (await loadPanel()) {
-            showToast(t("success.manual_saved", "手动偏好已保存。"), "success");
-          }
-        } catch (error) {
-          showFieldError(ui.manualError, error.message);
-        }
-      });
-    }
-
-    async function deleteManualPreference(dimension, button = ui.manualDeleteButton) {
-      if (!dimension) return;
-      const scope = requireSelectedProfile(ui.manualError);
-      if (!scope) return;
-      await withBusy(button, async () => {
-        try {
-          await callEntry("delete_manual_preference", { dimension, ...scope });
-          resetManualForm();
-          if (await loadPanel()) {
-            showToast(t("success.manual_deleted", "手动偏好已删除。"), "success");
-          }
-        } catch (error) {
-          showFieldError(ui.manualError, error.message);
-          showToast(error.message, "error");
-        }
-      });
-    }
-
-    async function analyzeSample(event) {
-      event.preventDefault();
-      showFieldError(ui.analysisError, "");
-      const text = ui.analysisText.value.trim();
-      if (!text) {
-        showFieldError(ui.analysisError, t("validation.sample", "请输入要模拟分析的文本。"));
-        return;
-      }
-      await withBusy(ui.analysisButton, async () => {
-        try {
-          const result = await callEntry("analyze_text", { text });
-          const observations = safeArray(result.observations);
-          ui.analysisObservations.replaceChildren();
-          observations.forEach((observation) => {
-            const tag = document.createElement("span");
-            tag.className = "tag";
-            tag.textContent = `${dimensionLabel(observation.dimension)} · ${valueLabel(observation.value)}`;
-            ui.analysisObservations.append(tag);
-          });
-          ui.analysisEmpty.hidden = observations.length > 0;
-          ui.analysisGuidance.textContent = typeof result.guidance === "string" && result.guidance ?
-            result.guidance : t("guidance.empty_short", "（无提示正文）");
-          ui.analysisResult.hidden = false;
-          showToast(t("success.analyzed", "模拟完成；没有保存文本或结果。"), "success");
-        } catch (error) {
-          showFieldError(ui.analysisError, error.message);
-        }
-      });
-    }
-
-    async function toggleAdaptation() {
-      const scope = requireSelectedProfile();
-      if (!scope) return;
-      const enabled = ui.adaptationButton.dataset.nextEnabled === "true";
-      await withBusy(ui.adaptationButton, async () => {
-        try {
-          await callEntry("set_adaptation", { enabled, ...scope });
-          if (await loadPanel()) {
-            showToast(enabled ? t("success.resumed", "当前档案已恢复。") : t("success.paused", "当前档案已暂停。"), "success");
-          }
-        } catch (error) {
-          showToast(error.message, "error");
-        }
-      });
-    }
-
-    async function exportProfile() {
-      const scope = requireSelectedProfile();
-      if (!scope) return;
-      await withBusy(ui.exportButton, async () => {
-        try {
-          const result = await callEntry("export_profile", scope);
-          const text = typeof result.json === "string" ? result.json : JSON.stringify({
-            profile: result.profile || {},
-            privacy: result.privacy || {}
-          }, null, 2);
-          const exportJsonOutput = ui.exportJsonOutput;
-          exportJsonOutput.value = text;
-          if (typeof ui.exportDialog.showModal === "function") ui.exportDialog.showModal();
-          else ui.exportDialog.setAttribute("open", "");
-          exportJsonOutput.focus();
-          exportJsonOutput.select();
-          showToast(t("success.exported", "安全 JSON 已生成。"), "success");
-        } catch (error) {
-          showToast(error.message, "error");
-        }
-      });
-    }
-
-    function closeExportDialog() {
-      if (typeof ui.exportDialog.close === "function") ui.exportDialog.close();
-      else ui.exportDialog.removeAttribute("open");
-    }
-
-    async function copyExportJson() {
-      const text = ui.exportJsonOutput.value;
-      let copied = false;
+    async function mutate(entryId, args, successMessage) {
+      setBusy(true);
       try {
-        await navigator.clipboard.writeText(text);
-        copied = true;
-      } catch (_error) {
-        ui.exportJsonOutput.focus();
-        ui.exportJsonOutput.select();
-        try {
-          copied = document.execCommand("copy");
-        } catch (_fallbackError) {
-          copied = false;
-        }
-      }
-      showToast(
-        copied ?
-          t("success.copied", "JSON 已复制。") :
-          t("error.copy", "自动复制受限；内容已选中，请手动复制。"),
-        copied ? "success" : "warning"
-      );
-    }
-
-    function openImportDialog() {
-      if (!requireSelectedProfile()) return;
-      ui.importFile.value = "";
-      ui.importJsonInput.value = "";
-      showFieldError(ui.importError, "");
-      if (typeof ui.importDialog.showModal === "function") ui.importDialog.showModal();
-      else ui.importDialog.setAttribute("open", "");
-    }
-
-    function closeImportDialog() {
-      if (typeof ui.importDialog.close === "function") ui.importDialog.close();
-      else ui.importDialog.removeAttribute("open");
-    }
-
-    async function readImportFile() {
-      showFieldError(ui.importError, "");
-      const file = ui.importFile.files && ui.importFile.files[0];
-      if (!file) return;
-      ui.importJsonInput.value = "";
-      if (file.size > 32768) {
-        showFieldError(ui.importError, t("validation.import_size", "文件不能超过 32 KiB。"));
-        ui.importFile.value = "";
-        return;
-      }
-      try {
-        const text = await file.text();
-        if (new TextEncoder().encode(text).length > 32768) {
-          throw new Error(t("validation.import_size", "文件不能超过 32 KiB。"));
-        }
-        ui.importJsonInput.value = text;
+        await callEntry(entryId, args);
+        await loadState();
+        showToast(successMessage);
       } catch (error) {
-        showFieldError(
-          ui.importError,
-          error.message || t("error.import_read", "无法读取所选文件。")
-        );
-      }
-    }
-
-    async function confirmImportProfile() {
-      const scope = requireSelectedProfile(ui.importError);
-      if (!scope) return;
-      const documentText = ui.importJsonInput.value.trim();
-      if (!documentText) {
-        showFieldError(ui.importError, t("validation.import_empty", "请选择文件或粘贴导出 JSON。"));
-        return;
-      }
-      if (new TextEncoder().encode(documentText).length > 32768) {
-        showFieldError(ui.importError, t("validation.import_size", "文件不能超过 32 KiB。"));
-        return;
-      }
-      await withBusy(ui.importDialogConfirm, async () => {
+        showToast(humanError(error), "bad");
         try {
-          await callEntry("import_profile", { document: documentText, ...scope });
-          closeImportDialog();
-          if (await loadPanel()) {
-            showToast(t("success.imported", "安全偏好已合并到当前档案。"), "success");
-          }
-        } catch (error) {
-          showFieldError(ui.importError, error.message);
+          await loadState();
+        } catch (_refreshError) {
+          // Keep the last confirmed view when a follow-up read also fails.
         }
-      });
+      } finally {
+        setBusy(false);
+      }
     }
 
-    function openResetDialog() {
-      if (!requireSelectedProfile() || ui.resetConfirmation.value !== "RESET") return;
-      if (typeof ui.resetDialog.showModal === "function") ui.resetDialog.showModal();
-      else ui.resetDialog.setAttribute("open", "");
-    }
-
-    function closeResetDialog() {
-      if (typeof ui.resetDialog.close === "function") ui.resetDialog.close();
-      else ui.resetDialog.removeAttribute("open");
-    }
-
-    async function confirmProfileReset() {
-      const scope = requireSelectedProfile();
-      if (!scope) {
-        closeResetDialog();
+    ui.refreshButton.addEventListener("click", () => refresh(true));
+    ui.characterSelector.addEventListener("change", updateControls);
+    ui.startButton.addEventListener("click", () => {
+      const originalName = ui.characterSelector.value;
+      if (!originalName) {
+        showToast("请先选择一张角色卡。", "bad");
         return;
       }
-      await withBusy(ui.resetDialogConfirm, async () => {
-        try {
-          await callEntry("reset_profile", { confirmation: "RESET", ...scope });
-          closeResetDialog();
-          state.selectedProfileId = "";
-          persistProfileId("");
-          ui.resetConfirmation.value = "";
-          ui.resetProfileButton.disabled = true;
-          resetManualForm();
-          ui.analysisResult.hidden = true;
-          if (await loadPanel()) {
-            showToast(t("success.profile_reset", "当前档案已永久重置。"), "success");
-          }
-        } catch (error) {
-          showToast(error.message, "error");
-        }
+      mutate(
+        "start_adaptation",
+        { original_name: originalName },
+        "自适应副本已创建并启用，原角色卡未修改。"
+      );
+    });
+    ui.resumeButton.addEventListener("click", () => {
+      const binding = view.data.binding;
+      if (!binding) return;
+      mutate(
+        "start_adaptation",
+        { original_name: binding.original_name },
+        "已重新切换到自适应副本。"
+      );
+    });
+    ui.restoreButton.addEventListener("click", () => mutate(
+      "restore_original",
+      {},
+      "恢复操作已完成；若你已切到其他角色，插件保留了你的选择。"
+    ));
+    ui.reflectButton.addEventListener("click", () => mutate(
+      "reflect_now",
+      {},
+      "检查完成，待确认建议已刷新。"
+    ));
+    ui.rollbackButton.addEventListener("click", () => mutate(
+      "rollback_last_change",
+      {},
+      "自适应副本已恢复到前一版本。"
+    ));
+    ui.orphanConfirmation.addEventListener("input", updateControls);
+    ui.deleteOrphanButton.addEventListener("click", () => {
+      if (ui.orphanConfirmation.value !== "DELETE") return;
+      const overlayName = ui.orphanSelector.value;
+      if (!overlayName) return;
+      mutate(
+        "delete_orphan_overlay",
+        { overlay_name: overlayName, confirmation: "DELETE" },
+        "所选未绑定副本已删除。"
+      ).finally(() => {
+        ui.orphanConfirmation.value = "";
+        updateControls();
       });
-    }
-
-    function bindEvents() {
-      ui.refreshButton.addEventListener("click", () => loadPanel(true));
-      const reflectBtn = document.getElementById("reflect-btn");
-      if (reflectBtn) {
-        reflectBtn.addEventListener("click", async () => {
-          await withBusy(reflectBtn, async () => {
-            try {
-              const result = await callEntry("reflect_now", selectedScopeArgs(), 60_000);
-              if (result && result.reflected === false) {
-                showToast(t("proposals.noPreference", "这次反思没有提炼出稳定偏好，再聊几轮试试。"), "info");
-              } else {
-                showToast(t("proposals.reflected", "反思完成，请审阅新的提案。"), "success");
-              }
-              await loadPanel(true);
-            } catch (error) {
-              showToast(error.message, "error");
-            }
-          });
-        });
+    });
+    ui.deleteConfirmation.addEventListener("input", updateControls);
+    ui.deleteButton.addEventListener("click", () => {
+      if (ui.deleteConfirmation.value !== "DELETE") return;
+      mutate(
+        "delete_overlay",
+        { confirmation: "DELETE" },
+        "自适应副本已删除。"
+      ).finally(() => {
+        ui.deleteConfirmation.value = "";
+        updateControls();
+      });
+    });
+    ui.settingsForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const reflectionThreshold = Number(ui.settingThreshold.value);
+      const evidenceWindow = Number(ui.settingWindow.value);
+      if (!Number.isInteger(reflectionThreshold) || !Number.isInteger(evidenceWindow)) {
+        showToast("证据条数必须是整数。", "bad");
+        return;
       }
-      ui.retryButton.addEventListener("click", () => {
-        ui.bootLoader.hidden = false;
-        ui.bootTitle.textContent = t("boot.loading_title", "正在读取本地偏好档案");
-        ui.bootMessage.textContent = t("boot.loading_body", "连接插件运行入口并加载安全状态，请稍候。");
-        ui.bootActions.hidden = true;
-        loadPanel();
-      });
-      ui.profileSelector.addEventListener("change", async () => {
-        state.selectedProfileId = ui.profileSelector.value;
-        persistProfileId(state.selectedProfileId);
-        resetManualForm();
-        ui.analysisResult.hidden = true;
-        ui.resetConfirmation.value = "";
-        if (ui.resetDialog.open) closeResetDialog();
-        const loaded = await loadPanel();
-        if (!loaded) {
-          state.selectedProfileId = "";
-          persistProfileId("");
-          ui.profileSelector.value = "";
-          updateControlAvailability();
+      if (reflectionThreshold > evidenceWindow) {
+        showToast("生成建议所需条数不能大于证据窗口。", "bad");
+        return;
+      }
+      mutate("save_settings", {
+        settings: {
+          learning_enabled: ui.settingLearning.checked,
+          automatic_reflection: ui.settingAutomatic.checked,
+          auto_apply_low_risk: ui.settingAutoApply.checked,
+          reflection_threshold: reflectionThreshold,
+          minimum_confidence: Number(ui.settingConfidence.value),
+          evidence_window: evidenceWindow,
+          show_evidence_excerpts: ui.settingShowEvidence.checked
         }
-      });
-      ui.profileCreateForm.addEventListener("submit", createLocalProfile);
-      ui.adaptationButton.addEventListener("click", toggleAdaptation);
-      ui.exportButton.addEventListener("click", exportProfile);
-      ui.importButton.addEventListener("click", openImportDialog);
-      ui.exportDialogClose.addEventListener("click", closeExportDialog);
-      ui.exportCopyButton.addEventListener("click", copyExportJson);
-      ui.exportDialog.addEventListener("cancel", (event) => {
-        event.preventDefault();
-        closeExportDialog();
-      });
-      ui.importFile.addEventListener("change", readImportFile);
-      ui.importDialogCancel.addEventListener("click", closeImportDialog);
-      ui.importDialogConfirm.addEventListener("click", confirmImportProfile);
-      ui.importDialog.addEventListener("cancel", (event) => {
-        event.preventDefault();
-        closeImportDialog();
-      });
-      ui.settingsForm.addEventListener("submit", saveSettings);
-      ui.resetSettingsButton.addEventListener("click", resetSettings);
-      document.getElementById("setting-min-confidence").addEventListener("input", updateConfidenceOutput);
-      ui.manualDimension.addEventListener("change", () => {
-        if (state.editingDimension && ui.manualDimension.value !== state.editingDimension) {
-          state.editingSource = "";
-          ui.manualDeleteButton.disabled = true;
-        }
-        syncManualValueControl();
-      });
-      ui.manualForm.addEventListener("submit", saveManualPreference);
-      ui.manualCancelButton.addEventListener("click", resetManualForm);
-      ui.manualDeleteButton.addEventListener("click", () => deleteManualPreference(ui.manualDimension.value));
-      ui.analysisForm.addEventListener("submit", analyzeSample);
-      ui.resetConfirmation.addEventListener("input", () => {
-        updateControlAvailability();
-      });
-      ui.resetProfileButton.addEventListener("click", openResetDialog);
-      ui.resetDialogCancel.addEventListener("click", closeResetDialog);
-      ui.resetDialogConfirm.addEventListener("click", confirmProfileReset);
-      ui.resetDialog.addEventListener("cancel", (event) => {
-        event.preventDefault();
-        closeResetDialog();
-      });
-    }
+      }, "设置已保存。");
+    });
+    ui.resetSettingsButton.addEventListener("click", () => mutate(
+      "reset_settings",
+      {},
+      "已恢复默认设置。"
+    ));
 
-    async function start() {
-      bindEvents();
-      await loadI18n();
-      applyI18n();
-      await loadPanel();
-    }
-
-    start().catch(showBootError);
+    refresh(false);
   })();
   </script>
 </body>

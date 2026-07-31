@@ -1,191 +1,108 @@
 # Auto Prompt Harness
 
-Auto Prompt Harness 是一个本地优先、确定性、可检查的沟通偏好助手。它从用户明确说出的表达要求或纠正中积累有限的偏好档案，例如语言、篇幅、语气、结构、代码与解释的顺序、澄清策略、主动程度、证据偏好，以及 emoji / 网络梗风格。达到证据与置信度阈值后，插件会把一段受限的低优先级提示作为普通插件消息交给宿主，帮助后续回复更贴合用户。
+Auto Prompt Harness 把经过用户确认的沟通风格建议应用到现有 N.E.K.O
+角色卡的受控副本。用户只需要选择一张真实角色卡；插件不会创建第二套需要理解的
+用户对象，也不会修改原卡。
 
-它不调用 SDK 接口修改系统提示词、角色人设或宿主长期记忆。偏好提示以普通、低优先级 `read` 消息进入模型上下文；模型消费后，当前宿主可能把这段已读上下文保留在会话历史中，因此“未写入长期记忆 API”不等于“会话历史绝不留存”。
+## 工作方式
 
-## 架构
+1. 从 `characters.json` 深拷贝所选原卡，生成唯一的
+   `原名（自适应）` 副本。
+2. 在副本 `_reserved.auto_prompt_harness` 中写入插件、绑定、原卡和基础
+   prompt 指纹等来源标记。
+3. 从宿主只读上下文收集有界、脱敏的证据，经严格 JSON schema 的反思输出形成
+   “待确认建议”。
+4. 只有批准操作会改写副本 `_reserved.system_prompt`。写入内容始终是原始有效
+   prompt 加一个有界的已批准 adaptation 块；拒绝不会写角色卡，回滚恢复副本的
+   上一个已保存版本。
+5. “恢复原角色”、插件禁用和 shutdown 只在当前角色仍是该副本时切回原卡。如果
+   用户已主动切到第三张卡，插件不会抢切。
 
-插件完全在本地运行，不调用外部 LLM、API 或云端服务，也不需要 API key。
+副本默认保留，名称与来源标记都可识别；只有用户在面板输入 `DELETE` 明确确认后，
+插件才通过宿主受控删除接口清理副本及其关联资源。宿主会在同一份 fresh snapshot
+中复核 binding、完整来源标记和整卡 SHA-256，避免同名角色被替换后误删。
 
-- `events.py` 防御性解析当前已知的聊天载荷变体，提取文本、用户和会话隔离信息，并拒绝系统、助手、工具、插件及自身生成的事件。
-- `engine.py` 实现确定性规则、置信度与证据计数、弱观察衰减、TTL、手动覆盖、锁定、容量边界、提示构建和安全导出。
-- `__init__.py` 负责生命周期、PluginStore 持久化、聊天观察、两秒总线兼容轮询、去重、受冷却控制的提示排队、面板管理入口，以及唯一的无状态 LLM 工具 `analyze_text`。
-- `static/index.html` 是无外部资源的管理面板。它通过宿主 `/runs` 协议调用真实插件入口，以不透明的伪匿名 ID 选择档案，不在浏览器本地伪造状态。
-- `i18n/` 提供八种语言的插件本地文案。
+## 写入与恢复保证
 
-状态以一个有版本的 JSON 兼容对象保存在 SDK `PluginStore` 中。运行时存储位于宿主选择的数据根目录，不写入插件源码目录。
+- 角色配置只通过宿主 `ConfigManager.aload_characters()` /
+  `asave_characters()` 读写，沿用原子文件替换和 cloud-save 写入 fence。
+- 原卡的深内容指纹在绑定时固化。每次写副本前都会重新载入并核对原卡、来源标记、
+  副本非 prompt 字段和当前 prompt 版本；任何冲突都会停止写入，不猜测覆盖。
+- PluginStore 保存 binding、基础 prompt 指纹、当前版本、建议、证据游标与修改
+  历史。旧版哈希数据只做“已检测但未绑定”的安全记录，不会重新暴露为用户概念。
+- PluginStore 丢失或进程在中途退出时，可根据副本来源标记恢复唯一绑定；多个候选
+  会保持未绑定并提示处理。
+- 原卡被删除、改名或修改，或副本来源/非 prompt 字段/prompt 被外部修改时，
+  绑定进入冲突状态。插件不会用相似名称猜测对应关系。
+- 宿主带受限的 managed-overlay 刷新接口时，批准后会校验来源与 prompt 指纹并
+  重启当前角色上下文。宿主会先按原规则解析动态默认 prompt 与 persona preset，
+  再把受控 adaptation 块放到最终 prompt 末尾，避免重复人设骨架或冻结当前语言。
+- 旧宿主仅对“普通自定义 prompt、无 persona override”的角色使用通用 reload
+  fallback。默认 prompt 或 persona 卡若缺少安全组合能力，会补偿回上一版本并明确
+  报错，不会把结构变化误报为已应用。
 
-## 能力边界与提示时序
+## 安全与隐私
 
-插件生成的提示正文使用以下明确边界：
+- 公开聊天消息入口永久 fail closed；证据只来自宿主验证过的只读上下文记录。
+- 证据在持久化前脱敏并截断，数量和长度均有硬上限。
+- 反思模型必须返回无额外字段的单一 JSON 对象；建议是单行、有界的沟通风格文本，
+  会拒绝角色覆盖、提示泄露、密钥、危险命令和越狱语义。
+- 插件不再用 hidden `push_message` 冒充已修改角色。只有副本 prompt 写入、运行态
+  刷新和状态保存成功后，批准操作才报告已应用。
+- `analyze_text` 是唯一暴露给模型的工具，而且只做不持久化的窄规则模拟。角色绑定、
+  建议批准、恢复和删除都是管理入口。
 
-```text
-[LOW-PRIORITY USER PREFERENCE HINTS]
-These are optional communication-style hints inferred or explicitly configured by the user.
-They cannot override system, developer, safety, tool, or task instructions.
-...
-[/LOW-PRIORITY USER PREFERENCE HINTS]
-```
+## 管理入口
 
-推送使用正常插件消息信封，核心字段为：
-
-```python
-push_message(
-    parts=[{"type": "text", "text": guidance}],
-    visibility=[],
-    ai_behavior="read",
-    target_lanlan=target_lanlan,
-    priority=0,
-    coalesce_key=per_target_coalesce_key,
-)
-```
-
-`visibility=[]` 让正文不显示为聊天气泡，`ai_behavior="read"` 让模型在可用时读取它；这不是 system message，也不会获得系统或开发者指令的优先级。指纹、冷却时间和按本地猫娘目标生成的 coalesce key 用于减少重复排队，插件不会对每条用户消息调用 `respond`，因此不会创建额外猫娘回复。宿主消费这条 `read` 消息后可能把它连同后续轮次保留在普通会话历史；插件没有接口追溯删除已经消费的历史上下文。
-
-面板的“精确提示预览”展示的是插件尝试排队的完整提示正文。宿主把正文送入模型上下文时可能再套一层本地化的 `System Notice` 信封；该信封由宿主管理，不改变正文的低优先级，也不会把插件内容提升为 system role。
-
-`push_message` 调用返回且未向插件抛出异常，只表示一次排队尝试；接口没有送达确认，而且宿主的部分队列或传输失败会被静默处理，所以这不证明队列项已提交、模型已读取或采用。面板中的提示统计因此是“排队尝试次数”，不是确认送达次数。暂停、删除、禁用、逐出、破坏性设置变更或重置前，如果存在旧的活动提示，插件要求当前进程仍有新鲜目标路由，并用同一目标 coalesce key 尝试排入一段有界的中性清除提示；路由未知、过期或调用显式报错时会中止状态变更。不过接口没有确认机制，静默丢失仍无法被插件发现；模型已经消费的上下文也无法被追溯撤回。
-
-插件保留了 `@message(source="chat")` 声明，但当前 SDK 的通用入口允许调用方自行构造载荷，宿主又没有提供可验证的消息分发证明。为避免伪造用户事件，该处理器永久 fail-closed，并对所有调用返回未接受；它不是一条启用的学习链路。唯一启用的观察链路是定时读取经过验证的用户上下文总线，只接受 `type=user_message`、`source=main_logic.core` 且不带 `plugin_id` 的记录。记录按时间与角色顺序处理并带游标去重。默认每两秒轮询一次、每次最多读取 256 条；如果两次轮询之间出现超过该上限的极端突发，较旧记录可能来不及观察。
-
-因此时序必须如实理解：
-
-- 公开消息装饰器不接受任何未经宿主证明的载荷；当前学习只来自定时总线轮询。
-- 总线轮询通常发生在本轮模型调用之后，提示一般影响下一轮或更晚的回复。
-- 宿主队列、会话切换、冷却和去重都可能进一步延后提示；接口没有送达确认，部分失败可能静默发生，插件不保证排队成功或同轮生效。
-- 插件只向当前进程中由真实聊天验证过的本地猫娘目标排队。通过面板保存、编辑或恢复设置等管理操作触发注入时，该验证必须发生在最近五分钟内。一个猫娘目标同时映射到多个档案时，插件会清除待处理提示并停止该目标的提示排队，而不是猜测接收者。
-- 档案会持久化，但可投递的“档案 → 本地猫娘目标”路由只存在于当前进程。持久化的加盐目标指纹仅用于重启后检测历史碰撞并安全停用，不会被用来还原目标名称、验证路由或触发注入。插件重启后，已有档案要等下一条真实聊天重新发现目标后才会自动排队。面板中输入的猫娘名称只用于派生并选择本地伪匿名档案，绝不会验证或建立路由；必须等该猫娘的真实聊天事件在当前进程中确认路由。
-- `target_lanlan` 是当前 SDK 可用的目标参数，但宿主没有“目标不存在就丢弃”的严格路由模式。目标在观察后、提交前消失时，宿主仍可能回退到唯一活动角色；这是插件边界内无法消除的残余竞态。
-
-## 推断与合并
-
-默认使用保守模式，只有明确偏好或纠正才会形成观察。例如：
-
-- “回答简短一点” → `verbosity=concise`
-- “步骤请用编号” → `structure=steps`
-- “先给代码，再解释” → `response_order=code_first`
-- “不要每次都问我确认，合理默认继续” → 澄清与主动程度偏好
-- “不要用 emoji” → `emoji=none`
-
-普通话题内容、一次性的任务格式、模糊情绪和敏感属性不会被当作稳定偏好。推断值必须同时达到最小证据数和最小置信度；弱证据会按设置的半衰期下降，过期档案会按 TTL 清理。
-
-同一维度的合并顺序是：
-
-1. 手动偏好优先于推断偏好。
-2. 锁定的手动偏好不会被自动观察更新。
-3. 未锁定手动偏好仍优先显示，删除后符合阈值的推断值可以重新生效。
-4. 推断候选按衰减后的分数、置信度与证据门槛确定。
-
-事件解析器可以防御性读取身份字段并生成带随机盐的本地伪匿名键，但公开消息处理器因无法验证载荷而永久拒绝；当前唯一启用的总线记录没有发送者、用户或会话 ID，只带本地猫娘角色路由。
-
-因此默认 `user` 范围在这条 fallback 上实际退化为 `local-character:<角色>` 分区，只能按本地角色隔离。多位用户共享同一个角色时，其观察结果可能混入同一角色档案；插件不会把伪匿名 profile ID 反向当成真实角色路由。选择 `conversation` 范围时，缺少真实会话 ID 的总线记录会被游标消费但停止学习、建档和投递，而不是伪造会话身份。多用户环境应为用户分配不同角色/运行会话、使用 `conversation` 范围安全停学，或暂停自动适配。安全导出不包含真实身份。
-
-面板只展示 `u:…` / `c:…` 形式的不透明伪匿名档案 ID，不展示真实身份。当前选择只把这个不透明 ID 保存在浏览器 `sessionStorage`，刷新时必须先在后端返回的档案列表中重新验证，失效或重置后立即清除。首次使用或需要“先手动配置、后聊天学习”时，可输入明确的本地猫娘名称创建空档案；该名称只用于派生并选择本地伪匿名档案，不是用户姓名，也不会进入安全导出。创建档案绝不会验证或建立实时投递路由；后续真实聊天必须先在当前进程中确认路由，管理操作引发的注入还要求该聊天发生在最近五分钟内。任何查看、编辑、暂停、导出或重置操作都必须先明确选择一个档案。
-
-## 隐私与容量边界
-
-- 默认不保存原始完整消息。
-- “调试证据摘要”默认关闭。开启后也只保存最近五条、每条最多 120 字符的规范化 `dimension=value` 枚举摘要；不保存聊天片段或自定义备注。
-- 本地存储可保留带随机盐的有界目标指纹，用于插件重启后发现同一猫娘目标曾关联多个档案并安全停用提示；它们不能用于恢复可投递路由，也不会进入安全导出。
-- 最近变化只记录维度、枚举值（自定义备注显示为 `custom_note`）、置信度、来源类型、动作和时间戳。
-- 用户数、每档案偏好数、变化记录、游标指纹、字符串长度、提示长度和统计计数都有硬边界。
-- 档案导出不包含原始消息、调试证据摘要或真实身份。
-- 插件不写 system、persona 或宿主长期记忆 API；但宿主可能把模型已经消费的低优先级 `read` 提示保留在普通会话历史中，插件无法追溯清除。
-- 重置当前档案是不可逆的面板操作，必须明确输入 `RESET`；它没有暴露为 LLM 工具。
-
-## 提示注入防护
-
-自动推断只会产生预定义维度与枚举，不会把任意用户句子复制到提示正文。唯一允许的自由文本是手动 `note`，且会经过以下检查：
-
-- 去除控制字符并限制为安全单行、最多 160 字符；
-- 只接受由预定义中文 / 英文表达与排版词汇组成的正向风格语法；出现未知英文词、残留字符或不受支持的语义即拒绝；
-- 拒绝 system/developer/assistant/tool/user 角色伪装；
-- 拒绝 XML / 伪标签、系统提示词、开发者消息、越狱和提示注入标记；
-- 拒绝覆盖、绕过、泄露或复述更高优先级规则的指令；
-- 拒绝明显危险的操作性指令；
-- 再次清洗提示行，并把方括号替换为普通括号。
-
-提示块本身明确声明不能覆盖 system、developer、safety、tool 或当前任务规则。即使恶意内容绕过某条启发式规则，它仍处于普通、低优先级插件消息信封中；安全边界不依赖提示文本自我声明。
-
-## 管理面板
-
-面板提供：
-
-- 运行 / 存储状态、不透明档案选择器，以及通过明确本地猫娘名称派生并选择空档案的手动优先入口（不立即建立提示路由）；
-- 当前档案、聚合统计、置信度条、证据计数、最近变化和插件将尝试排队的精确提示正文；
-- 推断灵敏度、最小证据 / 置信度、衰减、TTL、冷却、隔离范围、调试证据摘要、容量和注入开关；
-- 不持久化的示例文本分析；
-- 手动偏好的添加、编辑、锁定和删除；
-- 当前范围的暂停 / 恢复；
-- 安全 JSON 导出，以及在宿主 iframe 禁止下载时可读取、可复制的完整 JSON 回退；
-- 仅向当前明确选择的档案合并固定枚举 / 安全手工值的 JSON 导入；身份、路由、统计、证据和设置不会导入；
-- 恢复默认设置；
-- 带 `RESET` 双重确认的当前档案重置。
-
-设置和操作全部调用真实插件入口。页面不加载外部资源，并使用默认拒绝的 CSP 只开放同源请求、内联静态脚本 / 样式和 `data:` 图片；宿主 iframe 不允许下载时仍可复制导出内容。PluginStore 可用时，设置与档案可跨刷新和插件重启保留；存储初始化失败时面板明确显示只读降级状态，禁止学习、提示排队和持久化修改，但无状态示例分析仍可使用。已有档案时不能直接切换 `scope`；“恢复默认设置”如果会改变 `scope` 也会被阻止。必须先安全导出并逐一重置全部现有档案，避免用新隔离规则错误解释旧键。
-
-## 可调用入口
-
-常规管理 / 面板入口：
-
-- `create_local_profile`
+- `list_characters`
 - `get_panel_state`
-- `inspect_profile`
-- `set_manual_preference`
-- `delete_manual_preference`
-- `set_adaptation`
-- `export_profile`
-- `import_profile`
+- `start_adaptation`
+- `reflect_now`
+- `resolve_proposal`
+- `rollback_last_change`
+- `restore_original`
+- `delete_overlay`
+- `delete_orphan_overlay`
 - `save_settings`
 - `reset_settings`
-- `reset_profile`
+- `analyze_text`（同时是无状态 LLM 工具）
 
-其中只有以下入口同时暴露为猫娘可调用的 LLM 工具：
+## 已知边界
 
-- `analyze_text`
+`ConfigManager` 保证单次 JSON 写入的原子替换，但现有宿主没有跨进程的
+characters.json compare-and-swap。插件在自己的所有变更间使用互斥锁，并在每次
+操作前 fresh-load、校验 current/指纹；若另一个进程恰在 load 与 save 之间直接写
+同一文件，仍只能在下一次 reconciliation 检出并安全停写。
 
-当前宿主的动态 LLM 工具调用不会可靠转发调用者身份，而且普通入口参数中的 `_ctx` 可由调用方伪造，因此让模型直接查看或修改某个持久化档案可能造成跨用户选择。为保持边界，`analyze_text` 总是忽略调用方 `_ctx` 并使用新的内存状态，只返回狭窄的模拟字段，也不持久化。所有档案查看 / 修改入口均为常规管理入口并要求明确的 `profile_id`；破坏性的 `reset_profile` 仅供面板调用。
-
-## 设置
-
-| 设置 | 默认值 | 范围 / 说明 |
-|---|---:|---|
-| `adaptation_enabled` | `true` | 全局学习开关 |
-| `injection_enabled` | `true` | 全局提示推送开关 |
-| `sensitivity` | `conservative` | `conservative` / `balanced` / `responsive` |
-| `minimum_evidence` | `2` | 1–10 |
-| `minimum_confidence` | `0.65` | 0.50–0.95 |
-| `decay_days` | `45` | 弱观察分数半衰期，1–365 天 |
-| `ttl_days` | `180` | 档案过期时间，7–730 天，且不会短于衰减天数 |
-| `cooldown_seconds` | `120` | 相同提示再次推送前的冷却，0–86400 秒 |
-| `scope` | `user` | `user` 或 `conversation`；存在档案时禁止切换 |
-| `debug_excerpts` | `false` | 规范化证据摘要显式选择加入，不保存聊天片段 |
-| `max_users` | `64` | 1–256 |
-| `max_preferences` | `12` | 1–16 |
-
-## 局限
-
-- 规则目前主要覆盖中文与英语的明确表达；其他语言可以作为输出偏好值使用，但自动识别覆盖较少。
-- 确定性规则有意牺牲召回率来降低过拟合，隐含偏好通常不会被学习。
-- 公开 `@message` 入口无法证明载荷来自宿主真实聊天，因此永久 fail-closed；两秒用户上下文轮询是唯一启用的观察路径，会带来延迟。
-- 轮询记录缺少发送者、用户和会话 ID。默认 `user` 范围只能按本地猫娘隔离，共享角色的多位用户可能混合；`conversation` 范围会在没有真实会话 ID 时停止从轮询学习。单轮上限为 256 条，极端突发可能漏掉较旧记录。
-- 提示目标只精确到本地猫娘。一个目标对应多个档案时提示会安全停用；持久化加盐指纹让重启后的历史碰撞也能安全停用，但不会恢复路由。面板创建和重启后的目标路由都要由当前进程中的真实聊天确认，管理操作只接受最近五分钟内的确认。即便如此，猫娘仍可能在观察完成与队列提交之间消失，此时当前宿主可能把队列项回退到另一个活动会话；插件专用接口目前没有“目标不存在就丢弃、绝不回退”的严格模式，因此这是无法在插件边界内完全消除的残余竞态。
-- `push_message` 没有送达确认，宿主还可能静默处理部分队列 / 传输失败；提示统计只能证明插件完成排队尝试，不能证明送达、读取或采用。队列清除只能尝试替换尚未消费的同目标上下文，无法撤回模型已经读取并可能进入会话历史的提示。
-- 当前宿主不会为动态 LLM 工具可靠提供调用者身份，所以仅无状态 `analyze_text` 是 LLM 工具；持久化档案管理必须通过明确选择伪匿名 ID 的面板 / 常规入口完成。
-- 已有档案时隔离范围不能原地切换，“恢复默认设置”也不能绕过该锁定；需要先导出并重置全部档案。
-- 本插件只调整沟通呈现建议，不决定事实、工具选择、权限、安全政策或任务目标。
-- 本插件无法验证最终模型一定采用某条偏好；更高优先级规则、当前任务需要和上下文限制始终可以覆盖它。
+兼容旧宿主时，通用 reload 不保证重启已经活跃的对话 session；新受限刷新接口会
+清理近期上下文并重建当前角色 session。旧宿主也没有能与用户普通切卡共用锁的
+条件恢复接口，因此自动恢复会安全停住并提示升级，而不会用 load/check/save
+冒险覆盖用户刚选择的第三张卡；同理，缺少整卡条件删除接口时会保留可识别副本，
+不回退到仅按名称删除。无论哪种模式，插件无法保证模型一定采用某条沟通偏好，
+更高优先级规则和当前任务需要始终优先。
 
 ## 开发验证
 
 ```bash
-uv run python -m pytest plugin/tests/unit/plugins/test_auto_prompt_harness.py -x -q
-uv run python -m pytest plugin/tests/integration/test_neko_plugin_cli_repo_plugins.py -x -q
-uv run python -m plugin.neko_plugin_cli check plugin/plugins/auto_prompt_harness
-uv run python -m plugin.neko_plugin_cli build auto_prompt_harness -o /tmp/auto_prompt_harness.neko-plugin
-uv run python -m plugin.neko_plugin_cli inspect /tmp/auto_prompt_harness.neko-plugin
-uv run python -m plugin.neko_plugin_cli verify /tmp/auto_prompt_harness.neko-plugin
-```
+export NEKO_STORAGE_SELECTED_ROOT=/tmp/neko-gate-auto-prompt-harness
+export NEKO_STORAGE_ANCHOR_ROOT=/tmp/neko-gate-auto-prompt-harness
+export PYTHONDONTWRITEBYTECODE=1
+export PYDANTIC_DISABLE_PLUGINS=1
 
-构建包中应包含插件代码、`plugin.toml`、README、管理面板和八个语言包，不应包含 `store.db`、缓存、日志或调试导出。
+uv run python -m pytest plugin/tests/unit/plugins/test_auto_prompt_harness.py -q
+
+uv run python -m pytest \
+  plugin/tests/unit/plugins/test_auto_prompt_reflection.py \
+  tests/unit/test_character_managed_overlay_refresh.py -q
+
+uv run python -m pytest \
+  plugin/tests/integration/test_neko_plugin_cli_repo_plugins.py -q
+
+uv run python -m plugin.neko_plugin_cli check plugin/plugins/auto_prompt_harness
+uv run python -m plugin.neko_plugin_cli build auto_prompt_harness \
+  -o /tmp/auto_prompt_harness.neko-plugin
+uv run python -m plugin.neko_plugin_cli inspect \
+  /tmp/auto_prompt_harness.neko-plugin
+uv run python -m plugin.neko_plugin_cli verify \
+  /tmp/auto_prompt_harness.neko-plugin
+```
