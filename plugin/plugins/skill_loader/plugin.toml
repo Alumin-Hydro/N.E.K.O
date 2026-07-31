@@ -1,10 +1,10 @@
 [plugin]
 id = "skill_loader"
 name = "技能库"
-description = "让猫娘加载并使用 SKILL.md 技能：注册技能目录或粘贴技能内容，聊天中按需调用。"
-short_description = "Load SKILL.md skills for the catgirl: register skill directories or paste skill content, callable on demand in chat."
-keywords = ["技能", "skill", "SKILL.md", "prompt", "スキル", "스킬", "habilidad", "навык"]
-version = "0.1.0"
+description = "安全托管完整 Agent Skills 目录，让猫娘按需读取说明与关联文件，并仅在用户逐技能授权后运行受支持的 Python 脚本。"
+short_description = "Manage complete Agent Skills directories, read linked files on demand, and run supported Python scripts only after per-skill authorization."
+keywords = ["技能", "Agent Skills", "SKILL.md", "references", "templates", "assets", "scripts", "スキル", "스킬"]
+version = "0.2.0"
 entry = "plugin.plugins.skill_loader:SkillLoaderPlugin"
 
 [plugin.author]
@@ -18,14 +18,12 @@ supported = ">=0.1.0,<0.3.0"
 default_locale = "zh-CN"
 locales_dir = "i18n"
 
+[plugin.ui]
+enabled = true
+
 [plugin_runtime]
 enabled = true
 auto_start = false
 
 [plugin.store]
 enabled = true
-
-[skills]
-max_skills = 200
-max_content_bytes = 262144
-max_inline_chars = 4000
