@@ -810,7 +810,7 @@ class HapiClient:
             "headers": {
                 "Accept": "application/json",
                 "Accept-Encoding": "identity",
-                "User-Agent": "NEKO-vibe-coding-connector/0.1.0",
+                "User-Agent": "NEKO-vibe-coding-connector/0.2.0",
             },
         }
         if self._transport is not None:

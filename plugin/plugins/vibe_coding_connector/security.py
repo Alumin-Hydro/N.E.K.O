@@ -22,6 +22,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 SUPPORTED_PROVIDERS = frozenset({"claude", "codex", "opencode"})
 SUPPORTED_AUTH_MODES = frozenset({"access_token", "bearer"})
+SUPPORTED_BACKEND_MODES = frozenset(
+    {"managed_hapi", "hapi_external", "local_cli"}
+)
 SUPPORTED_AI_BEHAVIORS = frozenset({"read", "blind"})
 SUPPORTED_VISIBILITY = frozenset({"chat", "hud"})
 SENSITIVE_KEY_PARTS = (
@@ -47,6 +50,8 @@ SENSITIVE_EXACT_KEYS = frozenset(
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 DEFAULT_BASE_URL = "http://127.0.0.1:3006"
 DEFAULT_AUTH_MODE = "access_token"
+DEFAULT_BACKEND_MODE = "managed_hapi"
+DEFAULT_PREFERRED_PORT = 3006
 DEFAULT_PROVIDERS = ("claude", "codex", "opencode")
 DEFAULT_NOTIFICATION_BEHAVIOR = "read"
 DEFAULT_NOTIFICATION_VISIBILITY = ("hud",)
@@ -211,6 +216,11 @@ def _normalize_roots(value: Any) -> tuple[str, ...]:
             raise PolicyError("工作区根目录不存在或无法访问", code="invalid_workspace") from exc
         if not resolved.is_dir():
             raise PolicyError("工作区根目录必须是目录", code="invalid_workspace")
+        if _is_dangerous_workspace_root(resolved):
+            raise PolicyError(
+                "不能把文件系统根目录、用户主目录或系统目录设为工作区",
+                code="invalid_workspace",
+            )
         normalized = str(resolved)
         if normalized not in seen:
             seen.add(normalized)
@@ -218,6 +228,34 @@ def _normalize_roots(value: Any) -> tuple[str, ...]:
     if len(result) > 32:
         raise PolicyError("最多可配置 32 个工作区根目录", code="invalid_settings")
     return tuple(result)
+
+
+def _is_dangerous_workspace_root(path: Path) -> bool:
+    """Reject broad roots that would authorize unrelated user or system data."""
+
+    try:
+        home = Path.home().resolve(strict=True)
+    except (OSError, RuntimeError):
+        home = Path.home().resolve()
+    if path == home or path in home.parents or path == Path(path.anchor):
+        return True
+    normalized = str(path).replace("\\", "/").rstrip("/").casefold()
+    system_roots = {
+        "/applications",
+        "/bin",
+        "/etc",
+        "/library",
+        "/private",
+        "/sbin",
+        "/system",
+        "/usr",
+        "/var",
+        "c:/program files",
+        "c:/program files (x86)",
+        "c:/programdata",
+        "c:/windows",
+    }
+    return normalized in system_roots
 
 
 def canonical_workspace(path_value: str, allowed_roots: Sequence[str]) -> str:
@@ -319,6 +357,19 @@ def redact_sensitive(value: Any, *, max_string: int = 512, depth: int = 0) -> An
     return str(type(value).__name__)
 
 
+def migrate_legacy_settings(
+    raw: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Return a canonical copy of persisted settings from older releases."""
+
+    data = dict(raw or {})
+    if data and "backend_mode" not in data:
+        data["backend_mode"] = "hapi_external"
+    elif data.get("backend_mode") == "hapi_remote":
+        data["backend_mode"] = "hapi_external"
+    return data
+
+
 @dataclass(frozen=True, slots=True)
 class ConnectorSettings:
     """Validated persisted configuration.
@@ -330,7 +381,9 @@ class ConnectorSettings:
     base_url: str = "http://127.0.0.1:3006"
     auth_mode: str = "access_token"
     allow_remote: bool = False
-    backend_mode: str = "local_cli"
+    backend_mode: str = DEFAULT_BACKEND_MODE
+    preferred_port: int = DEFAULT_PREFERRED_PORT
+    allow_runtime_download: bool = False
     cli_command_overrides: Mapping[str, str] = field(default_factory=dict)
     allowed_workspace_roots: tuple[str, ...] = ()
     allowed_providers: tuple[str, ...] = ("claude", "codex", "opencode")
@@ -357,7 +410,7 @@ class ConnectorSettings:
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> "ConnectorSettings":
         if raw is not None and not isinstance(raw, Mapping):
             raise PolicyError("设置必须是对象", code="invalid_settings")
-        data = dict(raw or {})
+        data = migrate_legacy_settings(raw)
         if len(data) > 64:
             raise PolicyError("设置字段过多", code="invalid_settings")
         if any(not isinstance(key, str) or len(key) > 128 for key in data):
@@ -374,9 +427,15 @@ class ConnectorSettings:
             name="allow_remote",
             default=False,
         )
-        backend_mode = data.get("backend_mode", "local_cli")
-        if not isinstance(backend_mode, str) or backend_mode not in {"local_cli", "hapi_remote"}:
-            raise PolicyError("backend_mode 必须是 local_cli 或 hapi_remote", code="invalid_settings")
+        backend_mode = data.get("backend_mode", DEFAULT_BACKEND_MODE)
+        if (
+            not isinstance(backend_mode, str)
+            or backend_mode not in SUPPORTED_BACKEND_MODES
+        ):
+            raise PolicyError(
+                "backend_mode 必须是 managed_hapi、hapi_external 或 local_cli",
+                code="invalid_settings",
+            )
 
         overrides_raw = data.get("cli_command_overrides", {})
         if not isinstance(overrides_raw, Mapping):
@@ -451,6 +510,18 @@ class ConnectorSettings:
             auth_mode=auth_mode,
             allow_remote=allow_remote,
             backend_mode=backend_mode,
+            preferred_port=_bounded_int(
+                data.get("preferred_port"),
+                name="preferred_port",
+                default=DEFAULT_PREFERRED_PORT,
+                minimum=1_024,
+                maximum=65_535,
+            ),
+            allow_runtime_download=_strict_bool(
+                data.get("allow_runtime_download"),
+                name="allow_runtime_download",
+                default=False,
+            ),
             cli_command_overrides=cli_command_overrides,
             allowed_workspace_roots=_normalize_roots(data.get("allowed_workspace_roots")),
             allowed_providers=tuple(providers),

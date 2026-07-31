@@ -38,6 +38,10 @@
             box-sizing: border-box;
         }
 
+        [hidden] {
+            display: none !important;
+        }
+
         html {
             scroll-behavior: smooth;
         }
@@ -258,7 +262,7 @@
 
         .overview {
             display: grid;
-            grid-template-columns: 1.4fr repeat(3, minmax(120px, 0.55fr));
+            grid-template-columns: 1.4fr repeat(4, minmax(105px, 0.55fr));
             gap: 13px;
             margin-bottom: 18px;
         }
@@ -604,6 +608,55 @@
             font-size: 0.75rem;
         }
 
+        .runtime-panel {
+            margin: 15px 0 18px;
+            padding: 15px;
+            background: linear-gradient(135deg, #f7f5ff, #f2fbfb);
+            border: 1px solid #dcd8ee;
+            border-radius: 15px;
+        }
+
+        .runtime-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 9px;
+            margin: 12px 0;
+        }
+
+        .runtime-fact {
+            min-width: 0;
+            padding: 10px 11px;
+            background: rgba(255, 255, 255, 0.78);
+            border: 1px solid #e1e2ed;
+            border-radius: 11px;
+        }
+
+        .runtime-fact span {
+            display: block;
+            color: var(--faint);
+            font-size: 0.67rem;
+            font-weight: 700;
+        }
+
+        .runtime-fact strong {
+            display: block;
+            margin-top: 3px;
+            overflow-wrap: anywhere;
+            font-size: 0.79rem;
+        }
+
+        .runtime-diagnostic {
+            min-height: 18px;
+            margin: 8px 0 0;
+            color: var(--muted);
+            font-size: 0.72rem;
+            overflow-wrap: anywhere;
+        }
+
+        .runtime-diagnostic.error {
+            color: var(--red);
+        }
+
         details.advanced {
             margin-top: 16px;
             border-top: 1px solid #e5e7f0;
@@ -911,7 +964,8 @@
 
             .form-grid,
             .choice-grid,
-            .toggle-grid {
+            .toggle-grid,
+            .runtime-grid {
                 grid-template-columns: 1fr;
             }
 
@@ -949,12 +1003,12 @@
             <p class="eyebrow">N.E.K.O · HAPI execution boundary</p>
             <h1 data-i18n="panel.title">Vibe Coding 连接器</h1>
             <p class="hero-copy" data-i18n="panel.subtitle">
-                让猫娘通过独立运行的 HAPI 安全连接 Claude Code、Codex 与 OpenCode。这里不直接执行任何本机命令。
+                默认由插件启动并监督内置 HAPI；工作区、工具与审批仍由你明确控制。
             </p>
         </div>
         <div class="hero-mark" aria-label="插件版本">
             <strong>HAPI</strong>
-            <span>CONNECTOR · 0.1.0</span>
+            <span>CONNECTOR · 0.2.0</span>
         </div>
     </header>
 
@@ -970,6 +1024,10 @@
                 <span id="healthValue" class="health-value">正在读取…</span>
                 <span id="healthDetail" class="health-detail">尚未执行连接检测</span>
             </div>
+        </div>
+        <div class="metric">
+            <span class="metric-label" data-i18n="panel.runtime.actualPort">实际端口</span>
+            <span id="actualPortMetric" class="metric-value">—</span>
         </div>
         <div class="metric">
             <span class="metric-label">协议版本</span>
@@ -1009,29 +1067,92 @@
                         <div class="field full">
                             <label for="backendMode" data-i18n="panel.field.backendMode">运行模式</label>
                             <select id="backendMode" name="backend_mode">
-                                <option value="local_cli" data-i18n="panel.field.modeLocal">本机 CLI（推荐，无需安装 HAPI）</option>
-                                <option value="hapi_remote" data-i18n="panel.field.modeHapi">HAPI 远程 runner（高级）</option>
+                                <option value="managed_hapi" data-i18n="panel.field.modeManaged">内置 HAPI（推荐，自动启动）</option>
+                                <option value="hapi_external" data-i18n="panel.field.modeExternal">外部 HAPI（高级）</option>
+                                <option value="local_cli" data-i18n="panel.field.modeLocal">本机 CLI（兼容模式）</option>
                             </select>
-                            <p class="hint" data-i18n="panel.field.backendModeHint">本机模式直接使用你已安装的 claude / codex / opencode 命令；HAPI 模式用于管理其他机器上的 runner。</p>
+                            <p class="hint" data-i18n="panel.field.backendModeHint">推荐使用插件监督的锁版 HAPI；外部地址和本机 CLI 只作为高级或兼容选项。</p>
                         </div>
                         <div class="field full" id="localCliStatus">
-                            <span class="label" data-i18n="panel.local.title">本机 CLI 检测</span>
+                            <span class="label" data-i18n="panel.local.title">编程工具检测</span>
                             <div class="actions">
                                 <span class="token-state" id="cliClaude">claude: 检测中</span>
                                 <span class="token-state" id="cliCodex">codex: 检测中</span>
                                 <span class="token-state" id="cliOpencode">opencode: 检测中</span>
                             </div>
+                            <p class="hint" data-i18n="panel.local.providerNote">检测到命令不代表已经登录；内置 HAPI 不包含 Claude、Codex、OpenCode 或其付费服务。</p>
                         </div>
                     </div>
 
+                    <section class="runtime-panel" aria-labelledby="runtimeHeading">
+                        <div class="card-head">
+                            <div>
+                                <h3 id="runtimeHeading" data-i18n="panel.runtime.title">HAPI 服务状态</h3>
+                                <p class="subtle" id="runtimeModeNote">正在读取运行方式与平台支持。</p>
+                            </div>
+                            <div class="actions">
+                                <button id="runtimeStartBtn" class="btn small" type="button" disabled>
+                                    <span data-i18n="panel.action.startRuntime">启动服务</span>
+                                </button>
+                                <button id="runtimeRestartBtn" class="btn small" type="button" disabled>
+                                    <span data-i18n="panel.action.restartRuntime">重启服务</span>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="runtime-grid">
+                            <div class="runtime-fact">
+                                <span data-i18n="panel.runtime.state">服务状态</span>
+                                <strong id="runtimeState">正在读取…</strong>
+                            </div>
+                            <div class="runtime-fact">
+                                <span data-i18n="panel.runtime.actualPort">实际端口</span>
+                                <strong id="runtimeActualPort">—</strong>
+                            </div>
+                            <div class="runtime-fact">
+                                <span data-i18n="panel.runtime.platform">平台</span>
+                                <strong id="runtimePlatform">—</strong>
+                            </div>
+                            <div class="runtime-fact">
+                                <span data-i18n="panel.runtime.bundle">运行包</span>
+                                <strong id="runtimeBundle">—</strong>
+                            </div>
+                            <div class="runtime-fact">
+                                <span data-i18n="panel.runtime.hub">Hub</span>
+                                <strong id="runtimeHub">—</strong>
+                            </div>
+                            <div class="runtime-fact">
+                                <span data-i18n="panel.runtime.runner">Runner</span>
+                                <strong id="runtimeRunner">—</strong>
+                            </div>
+                        </div>
+                        <p id="runtimeDiagnostic" class="runtime-diagnostic"></p>
+                    </section>
+
                     <details class="advanced" id="hapiAdvanced">
-                        <summary data-i18n="panel.hapi.title">HAPI 远程连接（高级设置）</summary>
+                        <summary data-i18n="panel.hapi.title">HAPI 与 CLI 高级设置</summary>
                         <div class="advanced-body">
-                    <div class="form-grid">
+                    <div class="form-grid" id="managedHapiSettings">
+                        <div class="field">
+                            <label for="preferredPort" data-i18n="panel.field.preferredPort">首选 localhost 端口</label>
+                            <input id="preferredPort" name="preferred_port" type="number"
+                                   min="1024" max="65535" step="1" value="3006">
+                            <p class="hint" data-i18n="panel.field.preferredPortHint">若被未知进程占用，插件不会终止它，而会选择空闲端口并显示实际端口。</p>
+                        </div>
+                        <div class="field">
+                            <label class="toggle" for="allowRuntimeDownload">
+                                <input id="allowRuntimeDownload" name="allow_runtime_download" type="checkbox">
+                                <span>
+                                    <strong data-i18n="panel.field.allowRuntimeDownload">允许校验后自动获取当前平台 runtime</strong>
+                                    <span data-i18n="panel.field.allowRuntimeDownloadHint">仅在安装包未内置当前平台时使用；版本与 SHA256 必须匹配清单。</span>
+                                </span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-grid" id="externalHapiSettings">
                         <div class="field">
                             <label for="baseUrl"><span data-i18n="panel.field.baseUrl">HAPI 基础地址</span> <span class="required" aria-hidden="true">*</span></label>
                             <input id="baseUrl" name="base_url" type="url" autocomplete="url"
-                                   placeholder="http://127.0.0.1:3006" required>
+                                   placeholder="http://127.0.0.1:3006">
                             <p class="hint">末尾斜杠会自动规范化。非回环地址必须显式开启远程访问。</p>
                         </div>
                         <div class="field">
@@ -1063,6 +1184,8 @@
                                 </span>
                             </label>
                         </div>
+                    </div>
+                    <div class="form-grid">
                         <div class="field full">
                             <label for="cliOverrides" data-i18n="panel.field.cliOverrides">CLI 路径覆盖（高级）</label>
                             <textarea id="cliOverrides" name="cli_command_overrides"
@@ -1331,6 +1454,11 @@
     const SECRET_ENVELOPE_ALGORITHM = "RSA-OAEP-256+A256GCM";
     const SECRET_ENVELOPE_BINDING_PREFIX =
         "vibe_coding_connector:vibe_coding_save_settings:";
+    const ENVELOPE_RETRY_CODES = new Set([
+        "secret_envelope_expired_or_used",
+        "encrypted_settings_required",
+        "encrypted_settings_invalid"
+    ]);
     const SUPPORTED_LOCALES = ["zh-CN", "zh-TW", "en", "ja", "ko", "es", "pt", "ru"];
     const ALLOWED_PROVIDERS = ["claude", "codex", "opencode"];
     const PROVIDER_LABELS = {
@@ -1349,6 +1477,9 @@
         approvals: [],
         events: [],
         disabledReasons: {},
+        localProviders: {},
+        runtime: {},
+        actualPort: null,
         selectedSessionId: "",
         activity: { status: "", output: "" }
     };
@@ -1398,6 +1529,15 @@
     function safeError(error) {
         const message = error && error.message ? error.message : "未知错误";
         return safeText(message, "未知错误", 500);
+    }
+
+    function canonicalBackendMode(value) {
+        const mode = String(value || "").trim();
+        if (mode === "hapi_remote") return "hapi_external";
+        if (["managed_hapi", "hapi_external", "local_cli"].includes(mode)) {
+            return mode;
+        }
+        return "managed_hapi";
     }
 
     function createElement(tag, className, text) {
@@ -1494,14 +1634,35 @@
         }
     }
 
-    function pluginError(payload) {
+    function pluginErrorDetails(payload) {
         const source = objectValue(payload);
         const error = source.error;
-        if (typeof error === "string") return safeText(error, "插件调用失败");
-        if (error && typeof error === "object") {
-            return safeText(error.message || error.detail || error.code, "插件调用失败");
+        if (typeof error === "string") {
+            return {
+                code: safeText(source.code, "", 120),
+                message: safeText(error, "插件调用失败")
+            };
         }
-        return safeText(source.message, "插件调用失败");
+        if (error && typeof error === "object") {
+            return {
+                code: safeText(error.code || source.code, "", 120),
+                message: safeText(
+                    error.message || error.detail || error.code,
+                    "插件调用失败"
+                )
+            };
+        }
+        return {
+            code: safeText(source.code, "", 120),
+            message: safeText(source.message, "插件调用失败")
+        };
+    }
+
+    function pluginFailure(payload) {
+        const detail = pluginErrorDetails(payload);
+        const error = new Error(detail.message);
+        if (detail.code) error.code = detail.code;
+        return error;
     }
 
     function unwrapPluginPayload(value) {
@@ -1515,8 +1676,8 @@
                 }
             }
             if (!current || typeof current !== "object" || Array.isArray(current)) return current ?? {};
-            if (current.success === false || current.ok === false && current.error) {
-                throw new Error(pluginError(current));
+            if (current.success === false || current.ok === false) {
+                throw pluginFailure(current);
             }
             if (current.success === true && Object.prototype.hasOwnProperty.call(current, "data")) {
                 current = current.data;
@@ -1589,8 +1750,12 @@
                 return exportedPayload(await responseJson(exportResponse));
             }
             if (["failed", "canceled", "cancelled", "timeout", "timed_out"].includes(status)) {
-                const detail = objectValue(run.error).message || run.message || status;
-                throw new Error(safeText(detail, "插件执行失败"));
+                const runError = objectValue(run.error);
+                const detail = runError.message || run.message || status;
+                const error = new Error(safeText(detail, "插件执行失败"));
+                const code = safeText(runError.code || run.code, "", 120);
+                if (code) error.code = code;
+                throw error;
             }
         }
         throw new Error("插件调用超时，请检查 HAPI 是否可访问");
@@ -1710,6 +1875,46 @@
             plaintext.fill(0);
             if (rawContentKey) rawContentKey.fill(0);
         }
+    }
+
+    function retryableEnvelopeError(error) {
+        return Boolean(
+            error
+            && typeof error.code === "string"
+            && ENVELOPE_RETRY_CODES.has(error.code)
+        );
+    }
+
+    async function freshSecretEnvelope(invoke = callPlugin) {
+        const payload = await invoke("vibe_coding_fresh_secret_envelope", {});
+        const envelope = objectValue(
+            objectValue(payload).secret_envelope || payload
+        );
+        if (!envelope.key_id || !envelope.public_key_spki_b64) {
+            const error = new Error("插件未返回有效的一次性设置安全信封");
+            error.code = "secret_envelope_unavailable";
+            throw error;
+        }
+        model.secretEnvelope = envelope;
+        return envelope;
+    }
+
+    async function saveWithFreshEnvelope(
+        savePayload,
+        invoke = callPlugin,
+        encrypt = encryptSavePayload
+    ) {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            await freshSecretEnvelope(invoke);
+            const encryptedArgs = await encrypt(savePayload);
+            try {
+                return await invoke("vibe_coding_save_settings", encryptedArgs);
+            } catch (error) {
+                if (attempt === 0 && retryableEnvelopeError(error)) continue;
+                throw error;
+            }
+        }
+        throw new Error("一次性设置安全信封重试次数已用尽");
     }
 
     function setNotice(message, kind = "loading") {
@@ -1842,9 +2047,143 @@
         return list.filter(item => item && typeof item === "object").slice(-150);
     }
 
+    function normalizeRuntimeStatus(value, actualPort = null) {
+        const source = objectValue(value);
+        const port = numberValue(
+            source.actual_port ?? source.actualPort ?? actualPort,
+            0
+        );
+        const rootCount = numberValue(
+            source.workspace_root_count ?? source.workspaceRootCount,
+            0
+        );
+        return {
+            state: safeText(source.state, "unknown", 40).toLowerCase(),
+            version: safeText(source.version, "", 40),
+            platform: safeText(source.platform, "", 80),
+            bundled: source.bundled === true,
+            downloadEnabled: source.download_enabled === true
+                || source.downloadEnabled === true,
+            actualPort: Number.isInteger(port) && port >= 1 && port <= 65535
+                ? port
+                : null,
+            baseUrl: safeText(source.base_url, "", 260),
+            hubReady: source.hub_ready === true || source.hubReady === true,
+            runnerReady: source.runner_ready === true
+                || source.runnerReady === true,
+            workspaceRootCount: Number.isInteger(rootCount) && rootCount >= 0
+                ? rootCount
+                : 0,
+            restartCount: Math.max(
+                0,
+                numberValue(source.restart_count ?? source.restartCount, 0)
+            ),
+            maxRestarts: Math.max(
+                0,
+                numberValue(source.max_restarts ?? source.maxRestarts, 0)
+            ),
+            lastError: safeText(
+                source.last_error ?? source.lastError,
+                "",
+                400
+            ),
+            providerNote: safeText(
+                source.provider_note ?? source.providerNote,
+                "",
+                360
+            ),
+            license: safeText(source.license, "", 80)
+        };
+    }
+
+    function runtimeView(runtimeValue, backendMode) {
+        const runtime = normalizeRuntimeStatus(runtimeValue);
+        const mode = canonicalBackendMode(backendMode);
+        const stateLabels = {
+            ready: t("panel.runtime.ready", "运行正常"),
+            degraded: t("panel.runtime.degraded", "Hub 已启动，Runner 等待工作目录"),
+            preparing: t("panel.runtime.starting", "正在启动"),
+            starting: t("panel.runtime.starting", "正在启动"),
+            restarting: t("panel.runtime.restarting", "正在有限重启"),
+            failed: t("panel.runtime.failed", "启动失败"),
+            shutdown_failed: t("panel.runtime.failed", "启动失败"),
+            unsupported: t("panel.runtime.platformUnsupported", "当前平台未内置"),
+            busy: t("panel.runtime.starting", "正在启动"),
+            stopped: t("panel.runtime.stopped", "已停止"),
+            external: t("panel.runtime.external", "使用外部 HAPI"),
+            compatibility: t("panel.runtime.compatibility", "本机 CLI 兼容模式"),
+            unknown: t("panel.runtime.unknown", "尚未确认")
+        };
+        const managed = mode === "managed_hapi";
+        let modeNote = t(
+            "panel.runtime.modeManaged",
+            "插件会自动启动并监督锁版 HAPI 服务。"
+        );
+        if (mode === "hapi_external") {
+            modeNote = t(
+                "panel.runtime.modeExternal",
+                "插件不会管理外部 HAPI 的进程或端口。"
+            );
+        } else if (mode === "local_cli") {
+            modeNote = t(
+                "panel.runtime.modeLocal",
+                "兼容模式不启动 HAPI，由插件直接调用已安装的 provider CLI。"
+            );
+        }
+
+        let bundle = t("panel.runtime.notBundled", "当前平台未随包提供");
+        if (runtime.bundled) {
+            bundle = `${t("panel.runtime.bundled", "已内置")} · v${runtime.version || "?"}`;
+        } else if (managed && runtime.downloadEnabled) {
+            bundle = t("panel.runtime.verifiedDownload", "未内置；已允许校验后获取");
+        } else if (!managed) {
+            bundle = t("panel.status.notApplicable", "不适用");
+        }
+
+        const runner = runtime.runnerReady
+            ? t("panel.runtime.ready", "运行正常")
+            : runtime.workspaceRootCount === 0 && managed
+                ? t("panel.runtime.waitingRoots", "等待配置工作目录")
+                : t("panel.status.notReady", "未就绪");
+        const hub = runtime.hubReady
+            ? t("panel.runtime.ready", "运行正常")
+            : t("panel.status.notReady", "未就绪");
+        const restartDetail = runtime.maxRestarts > 0 && runtime.restartCount > 0
+            ? ` (${runtime.restartCount}/${runtime.maxRestarts})`
+            : "";
+        const diagnostic = runtime.lastError
+            || runtime.providerNote
+            || (managed && !runtime.bundled && !runtime.downloadEnabled
+                ? t(
+                    "panel.runtime.platformUnsupported",
+                    "当前平台未随安装包提供，且校验后自动获取未开启。"
+                )
+                : "");
+        return {
+            state: `${stateLabels[runtime.state] || safeText(runtime.state, stateLabels.unknown)}${restartDetail}`,
+            actualPort: runtime.actualPort ? String(runtime.actualPort) : "—",
+            platform: runtime.platform || (mode === "hapi_external"
+                ? t("panel.runtime.external", "使用外部 HAPI")
+                : mode === "local_cli"
+                    ? t("panel.runtime.compatibility", "本机 CLI 兼容模式")
+                    : t("panel.runtime.unknown", "尚未确认")),
+            bundle,
+            hub,
+            runner,
+            modeNote,
+            diagnostic,
+            hasError: Boolean(runtime.lastError),
+            managed,
+            actualPortValue: runtime.actualPort
+        };
+    }
+
     function normalizePanelState(payload) {
         const source = objectValue(payload);
         model.settings = objectValue(source.settings);
+        model.settings.backend_mode = canonicalBackendMode(
+            model.settings.backend_mode || source.backend_mode
+        );
         const token = objectValue(source.token);
         model.token = {
             configured: boolValue(token.configured || source.token_configured)
@@ -1856,6 +2195,8 @@
         model.events = normalizeEvents(source.events || source);
         model.disabledReasons = objectValue(source.disabled_reasons || source.disabledReasons);
         model.localProviders = objectValue(source.local_providers || source.localProviders);
+        model.runtime = normalizeRuntimeStatus(source.runtime, source.actual_port);
+        model.actualPort = model.runtime.actualPort;
         model.loaded = true;
         if (!model.sessions.some(session => sessionId(session) === model.selectedSessionId)) {
             model.selectedSessionId = model.sessions.length ? sessionId(model.sessions[0]) : "";
@@ -1873,7 +2214,9 @@
 
     function applySettingsToForm() {
         const settings = model.settings;
-        setInputValue("backendMode", settings.backend_mode || "local_cli");
+        setInputValue("backendMode", canonicalBackendMode(settings.backend_mode));
+        setInputValue("preferredPort", settings.preferred_port ?? 3006);
+        setChecked("allowRuntimeDownload", settings.allow_runtime_download);
         setInputValue("baseUrl", settings.base_url);
         setInputValue("authMode", settings.auth_mode || "access_token");
         byId("tokenInput").value = "";
@@ -1916,6 +2259,7 @@
         setInputValue("rateLimit", settings.rate_limit_per_minute);
         updateTokenState();
         updateLocalCliStatus();
+        updateModeVisibility();
         updateWorkspaceChoices();
         updateInstructionLimit();
     }
@@ -1933,13 +2277,39 @@
             const info = providers[provider];
             const available = info && info.available === true;
             element.classList.toggle("configured", available);
+            const path = available ? safeText(info.path, "", 180) : "";
             element.textContent = available
-                ? `${provider}: ${t("panel.status.cliAvailable", "可用")}`
+                ? `${provider}: ${t("panel.status.cliAvailable", "已检测到")}${path ? ` · ${path}` : ""}`
                 : `${provider}: ${t("panel.status.cliMissing", "未检测到")}`;
         });
-        const localMode = (model.settings.backend_mode || "local_cli") === "local_cli";
-        const statusBlock = byId("localCliStatus");
-        if (statusBlock) statusBlock.hidden = !localMode;
+    }
+
+    function updateModeVisibility() {
+        const mode = canonicalBackendMode(byId("backendMode").value);
+        model.settings.backend_mode = mode;
+        byId("managedHapiSettings").hidden = mode !== "managed_hapi";
+        byId("externalHapiSettings").hidden = mode !== "hapi_external";
+        byId("baseUrl").required = mode === "hapi_external";
+        if (mode === "hapi_external") byId("hapiAdvanced").open = true;
+        byId("runtimeStartBtn").hidden = mode !== "managed_hapi";
+        byId("runtimeRestartBtn").hidden = mode !== "managed_hapi";
+        updateTokenState();
+        renderRuntime();
+    }
+
+    function renderRuntime() {
+        const view = runtimeView(model.runtime, model.settings.backend_mode);
+        byId("runtimeState").textContent = view.state;
+        byId("runtimeActualPort").textContent = view.actualPort;
+        byId("actualPortMetric").textContent = view.actualPort;
+        byId("runtimePlatform").textContent = view.platform;
+        byId("runtimeBundle").textContent = view.bundle;
+        byId("runtimeHub").textContent = view.hub;
+        byId("runtimeRunner").textContent = view.runner;
+        byId("runtimeModeNote").textContent = view.modeNote;
+        const diagnostic = byId("runtimeDiagnostic");
+        diagnostic.textContent = view.diagnostic;
+        diagnostic.classList.toggle("error", view.hasError);
     }
 
     function updateTokenState() {
@@ -1950,7 +2320,13 @@
         } else {
             element.textContent = t("panel.status.notConfigured", "尚未配置令牌");
         }
-        byId("clearTokenBtn").disabled = !model.loaded || !model.token.configured || activeCalls > 0;
+        const external = canonicalBackendMode(
+            byId("backendMode").value
+        ) === "hapi_external";
+        byId("clearTokenBtn").disabled = !external
+            || !model.loaded
+            || !model.token.configured
+            || activeCalls > 0;
     }
 
     function configuredProviders() {
@@ -2005,7 +2381,9 @@
 
     function readSettingsForm() {
         return {
-            backend_mode: byId("backendMode").value === "hapi_remote" ? "hapi_remote" : "local_cli",
+            backend_mode: canonicalBackendMode(byId("backendMode").value),
+            preferred_port: numberValue(byId("preferredPort").value, 3006),
+            allow_runtime_download: byId("allowRuntimeDownload").checked,
             cli_command_overrides: parseCliOverrides(byId("cliOverrides").value),
             base_url: byId("baseUrl").value.trim(),
             auth_mode: byId("authMode").value,
@@ -2114,7 +2492,18 @@
 
         byId("saveSettingsBtn").disabled = !model.loaded || busy;
         byId("resetSettingsBtn").disabled = !model.loaded || busy;
-        byId("clearTokenBtn").disabled = !model.loaded || !model.token.configured || busy;
+        const managedMode = canonicalBackendMode(
+            byId("backendMode").value
+        ) === "managed_hapi";
+        const externalMode = canonicalBackendMode(
+            byId("backendMode").value
+        ) === "hapi_external";
+        byId("clearTokenBtn").disabled = !externalMode
+            || !model.loaded
+            || !model.token.configured
+            || busy;
+        byId("runtimeStartBtn").disabled = !model.loaded || !managedMode || busy;
+        byId("runtimeRestartBtn").disabled = !model.loaded || !managedMode || busy;
         byId("createSessionBtn").disabled = busy || Boolean(createReason);
         byId("sendInstructionBtn").disabled = busy || Boolean(sendReason);
         byId("readActivityBtn").disabled = busy || !selected || Boolean(readPolicyReason);
@@ -2531,6 +2920,7 @@
 
     function renderAll() {
         applySettingsToForm();
+        renderRuntime();
         renderHealth();
         renderCapabilities();
         renderSessions();
@@ -2540,10 +2930,10 @@
         updateActionAvailability();
     }
 
-    async function loadPanelState(options = {}) {
-        const payload = await callPlugin("vibe_coding_panel_state", {});
+    async function loadPanelState(options = {}, invoke = callPlugin, render = renderAll) {
+        const payload = await invoke("vibe_coding_panel_state", {});
         normalizePanelState(payload);
-        renderAll();
+        if (typeof render === "function") render();
         if (!options.quiet) setNotice("连接器设置与持久化状态已载入。", "success");
         return payload;
     }
@@ -2554,6 +2944,14 @@
             await runAction(button, "正在测试 HAPI 健康状态与认证…", async () => {
                 const payload = await callPlugin("vibe_coding_panel_status", {});
                 model.health = objectValue(payload.health || payload);
+                if (payload.runtime) {
+                    model.runtime = normalizeRuntimeStatus(
+                        payload.runtime,
+                        payload.actual_port
+                    );
+                    model.actualPort = model.runtime.actualPort;
+                    renderRuntime();
+                }
                 renderHealth();
                 renderCapabilities();
                 const summary = safeText(
@@ -2596,6 +2994,34 @@
         });
     }
 
+    async function controlRuntime(action) {
+        const restart = action === "restart";
+        const button = byId(restart ? "runtimeRestartBtn" : "runtimeStartBtn");
+        const entryId = restart
+            ? "vibe_coding_runtime_restart"
+            : "vibe_coding_runtime_start";
+        const loading = restart
+            ? t("panel.message.restartingRuntime", "正在安全重启内置 HAPI…")
+            : t("panel.message.startingRuntime", "正在启动内置 HAPI…");
+        await runAction(button, loading, async () => {
+            const payload = await callPlugin(entryId, {});
+            model.runtime = normalizeRuntimeStatus(
+                objectValue(payload).runtime,
+                objectValue(payload).actual_port
+            );
+            model.actualPort = model.runtime.actualPort;
+            renderRuntime();
+            await loadPanelState({ quiet: true });
+            setNotice(
+                safeText(
+                    objectValue(payload).summary,
+                    restart ? "内置 HAPI 已重启。" : "内置 HAPI 已启动。"
+                ),
+                "success"
+            );
+        });
+    }
+
     async function refreshApprovals() {
         const button = byId("refreshApprovalsBtn");
         await runAction(button, "正在刷新待处理审批…", async () => {
@@ -2611,12 +3037,26 @@
         const form = byId("settingsForm");
         if (!form.reportValidity()) return;
         const settings = readSettingsForm();
-        if (!settings.base_url) {
+        if (settings.backend_mode === "hapi_external" && !settings.base_url) {
             setNotice("请填写 HAPI 基础地址。", "error");
             byId("baseUrl").focus();
             return;
         }
-        if (settings.allow_remote && !isLoopbackUrl(settings.base_url)) {
+        if (
+            settings.backend_mode === "hapi_external"
+            && settings.base_url
+            && !isLoopbackUrl(settings.base_url)
+            && !settings.allow_remote
+        ) {
+            setNotice("外部非本机 HAPI 必须明确开启远程访问。", "error");
+            byId("allowRemote").focus();
+            return;
+        }
+        if (
+            settings.backend_mode === "hapi_external"
+            && settings.allow_remote
+            && !isLoopbackUrl(settings.base_url)
+        ) {
             const confirmed = window.confirm(
                 `${t("panel.reason.remoteOptIn", "远程端点需要明确选择启用。")}\n`
                 + "请确认网络、TLS、远端服务及工作目录映射均可信。继续保存吗？"
@@ -2630,26 +3070,19 @@
         const button = byId("saveSettingsBtn");
         try {
             await runAction(button, "正在安全保存设置…", async () => {
-                let encryptedArgs;
                 try {
-                    encryptedArgs = await encryptSavePayload({
+                    await saveWithFreshEnvelope({
                         settings,
                         token,
                         clear_token: false
                     });
                 } catch (error) {
-                    await loadPanelState({ quiet: true });
-                    throw error;
-                }
-                try {
-                    await callPlugin("vibe_coding_save_settings", encryptedArgs);
-                } catch (saveError) {
                     try {
                         await loadPanelState({ quiet: true });
                     } catch (_) {
-                        // Preserve the original save error while the panel remains usable.
+                        // Preserve the original structured save error.
                     }
-                    throw saveError;
+                    throw error;
                 }
                 await loadPanelState({ quiet: true });
                 let savedMessage = t("panel.message.saved", "设置已保存。");
@@ -2826,11 +3259,23 @@
     function bindEvents() {
         byId("settingsForm").addEventListener("submit", asyncGuard(saveSettings));
         byId("backendMode").addEventListener("change", () => {
-            model.settings.backend_mode = byId("backendMode").value;
+            model.settings.backend_mode = canonicalBackendMode(
+                byId("backendMode").value
+            );
+            updateModeVisibility();
             updateLocalCliStatus();
+            updateActionAvailability();
         });
         byId("resetSettingsBtn").addEventListener("click", asyncGuard(resetSettings));
         byId("clearTokenBtn").addEventListener("click", asyncGuard(clearToken));
+        byId("runtimeStartBtn").addEventListener(
+            "click",
+            asyncGuard(() => controlRuntime("start"))
+        );
+        byId("runtimeRestartBtn").addEventListener(
+            "click",
+            asyncGuard(() => controlRuntime("restart"))
+        );
         byId("testConnectionBtn").addEventListener("click", asyncGuard(testConnection));
         byId("refreshSessionsBtn").addEventListener("click", asyncGuard(() => refreshSessions()));
         byId("refreshApprovalsBtn").addEventListener("click", asyncGuard(refreshApprovals));
@@ -2872,7 +3317,21 @@
         }
     }
 
-    initialize();
+    if (window.__VIBE_CODING_PANEL_TEST_MODE__ === true) {
+        window.__VIBE_CODING_PANEL_TEST__ = Object.freeze({
+            canonicalBackendMode,
+            normalizeRuntimeStatus,
+            runtimeView,
+            unwrapPluginPayload,
+            retryableEnvelopeError,
+            saveWithFreshEnvelope,
+            loadPanelState,
+            normalizePanelState,
+            modelSnapshot: () => JSON.parse(JSON.stringify(model))
+        });
+    } else {
+        initialize();
+    }
 })();
 </script>
 </body>

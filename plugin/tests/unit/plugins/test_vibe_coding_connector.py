@@ -273,7 +273,7 @@ def test_manifest_declares_runtime_store_ui_and_exact_identity() -> None:
     manifest = tomllib.loads((PLUGIN_DIR / "plugin.toml").read_text(encoding="utf-8"))
 
     assert manifest["plugin"]["id"] == "vibe_coding_connector"
-    assert manifest["plugin"]["version"] == "0.1.0"
+    assert manifest["plugin"]["version"] == "0.2.0"
     assert manifest["plugin"]["entry"].endswith(":VibeCodingConnectorPlugin")
     assert manifest["plugin"]["store"]["enabled"] is True
     assert manifest["plugin"]["ui"]["enabled"] is True
@@ -750,6 +750,69 @@ def test_client_reuses_within_loop_but_isolates_clients_between_event_loops() ->
     assert len(created) == 2
     asyncio.run(client.aclose())
     assert all(item.is_closed for item in created)
+
+
+@pytest.mark.asyncio
+async def test_managed_runtime_actual_endpoint_and_token_configure_hapi_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "NEKO_STORAGE_SELECTED_ROOT",
+        str(tmp_path / "runtime"),
+    )
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    plugin._settings = ConnectorSettings.from_mapping(
+        {"backend_mode": "managed_hapi"}
+    )
+    plugin._policy.update(plugin._settings)
+    plugin._loaded = True
+
+    class _Runtime:
+        base_url = "http://127.0.0.1:43123"
+        access_token = "managed-runtime-access-token"
+
+    plugin._managed_runtime = _Runtime()  # type: ignore[assignment]
+
+    async def fake_ensure_managed_runtime(
+        *,
+        force_restart: bool = False,
+        raise_errors: bool = False,
+    ) -> dict[str, object]:
+        assert force_restart is False
+        assert raise_errors is True
+        return {
+            "state": "ready",
+            "actual_port": 43123,
+            "base_url": _Runtime.base_url,
+        }
+
+    monkeypatch.setattr(
+        plugin,
+        "_ensure_managed_runtime",
+        fake_ensure_managed_runtime,
+    )
+    captured: list[HapiClientConfig] = []
+
+    class _Client:
+        def __init__(self, config: HapiClientConfig) -> None:
+            captured.append(config)
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(vibe_coding_module, "HapiClient", _Client)
+
+    try:
+        client = await plugin._get_client()
+        assert isinstance(client, _Client)
+        assert len(captured) == 1
+        assert captured[0].base_url == "http://127.0.0.1:43123"
+        assert captured[0].token == "managed-runtime-access-token"
+        assert captured[0].auth_mode == "access_token"
+        assert captured[0].allow_remote is False
+    finally:
+        await plugin._invalidate_client()
 
 
 @pytest.mark.asyncio
@@ -1834,7 +1897,9 @@ async def test_startup_drops_persisted_records_from_other_or_unknown_connection_
 ) -> None:
     monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
     plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
-    defaults = ConnectorSettings()
+    defaults = ConnectorSettings.from_mapping(
+        {"backend_mode": "hapi_external"}
+    )
     current_url = defaults.base_url
     current_auth = defaults.auth_mode
 
@@ -2548,6 +2613,12 @@ async def test_completed_configuration_transition_rejects_stale_snapshot_permit(
 ) -> None:
     monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
     plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    external_settings = ConnectorSettings.from_mapping(
+        {"backend_mode": "hapi_external"}
+    )
+    assert (
+        await plugin.store.set("settings_v1", external_settings.to_store())
+    ).is_ok()
     await plugin.startup()
 
     try:
@@ -2778,7 +2849,9 @@ async def test_startup_redacts_nested_sensitive_keys_in_persisted_metadata(
     monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
     plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
     secret = "opaque-persisted-secret"
-    defaults = ConnectorSettings()
+    defaults = ConnectorSettings.from_mapping(
+        {"backend_mode": "hapi_external"}
+    )
     assert (await plugin.store.set("settings_v1", defaults.to_store())).is_ok()
     assert (
         await plugin.store.set(
@@ -3636,6 +3709,64 @@ async def test_sse_pushes_are_rate_limited_and_never_request_ai_response(
 
 
 @pytest.mark.asyncio
+async def test_managed_listener_reconnects_when_actual_port_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
+    plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
+    plugin._loaded = True
+    plugin._settings = ConnectorSettings()
+
+    class _Runtime:
+        base_url = "http://127.0.0.1:31001"
+
+    class _EndpointClient:
+        def __init__(self, started: asyncio.Event) -> None:
+            self.started = started
+
+        async def iter_events(
+            self,
+            *,
+            stop_event: asyncio.Event,
+            reconnect: bool,
+        ) -> AsyncIterator[SSEEvent]:
+            assert reconnect is True
+            self.started.set()
+            await stop_event.wait()
+            if False:  # pragma: no cover - keep this an async iterator
+                yield SSEEvent(event="unused", data={})
+
+    runtime = _Runtime()
+    plugin._managed_runtime = runtime  # type: ignore[assignment]
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    clients = [
+        _EndpointClient(first_started),
+        _EndpointClient(second_started),
+    ]
+    calls = 0
+
+    async def get_client() -> _EndpointClient:
+        nonlocal calls
+        client = clients[min(calls, len(clients) - 1)]
+        calls += 1
+        return client
+
+    monkeypatch.setattr(plugin, "_get_client", get_client)
+    listener_stop = asyncio.Event()
+    task = asyncio.create_task(plugin._listener_main(listener_stop))
+    try:
+        await asyncio.wait_for(first_started.wait(), timeout=1.0)
+        runtime.base_url = "http://127.0.0.1:31002"
+        await asyncio.wait_for(second_started.wait(), timeout=2.0)
+        assert calls >= 2
+    finally:
+        listener_stop.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+
+@pytest.mark.asyncio
 async def test_listener_deduplicates_and_pushes_only_important_events_without_feedback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3719,6 +3850,7 @@ def test_static_panel_numeric_constraints_accept_backend_defaults() -> None:
     parser.close()
     defaults = ConnectorSettings()
     inputs_by_setting = {
+        "preferred_port": "preferredPort",
         "timeout_seconds": "timeoutSeconds",
         "sse_reconnect_delay": "reconnectDelay",
         "max_response_size": "maxResponseSize",
@@ -3749,10 +3881,9 @@ def test_settings_save_never_places_plaintext_token_in_run_args() -> None:
         not in html
     )
     assert "async function encryptSavePayload(" in html
-    assert (
-        'callPlugin("vibe_coding_save_settings", encryptedArgs)'
-        in html
-    )
+    assert "async function saveWithFreshEnvelope(" in html
+    assert 'invoke("vibe_coding_fresh_secret_envelope", {})' in html
+    assert 'invoke("vibe_coding_save_settings", encryptedArgs)' in html
 
     meta = getattr(VibeCodingConnectorPlugin.save_settings, EVENT_META_ATTR)
     schema = meta.input_schema
@@ -3763,23 +3894,25 @@ def test_settings_save_never_places_plaintext_token_in_run_args() -> None:
     assert schema["properties"]["encrypted_payload"]["x-sensitive"] is True
 
 
-def test_failed_encrypted_save_refreshes_the_consumed_envelope() -> None:
+def test_encrypted_save_fetches_fresh_envelope_and_retries_only_once() -> None:
     html = (PLUGIN_DIR / "static" / "index.html").read_text(encoding="utf-8")
 
     save_block = re.search(
-        r"async function saveSettings\(event\)(.*?)(?:\n    async function resetSettings)",
+        r"async function saveWithFreshEnvelope\((.*?)(?:\n    function setNotice)",
         html,
         flags=re.DOTALL,
     )
     assert save_block is not None
     source = save_block.group(1)
-    assert re.search(
-        r'await callPlugin\("vibe_coding_save_settings", encryptedArgs\);'
-        r".*?catch \(saveError\).*?await loadPanelState\(\{ quiet: true \}\);"
-        r".*?throw saveError;",
-        source,
-        flags=re.DOTALL,
+    assert "attempt < 2" in source
+    assert source.index("await freshSecretEnvelope(invoke)") < source.index(
+        "const encryptedArgs = await encrypt(savePayload)"
     )
+    assert source.index("const encryptedArgs = await encrypt(savePayload)") < source.index(
+        'invoke("vibe_coding_save_settings", encryptedArgs)'
+    )
+    assert "attempt === 0 && retryableEnvelopeError(error)" in source
+    assert "throw error;" in source
 
 
 def test_save_notice_only_claims_token_was_kept_for_blank_input() -> None:
@@ -3871,28 +4004,35 @@ def test_all_eight_locale_bundles_have_identical_nonempty_key_sets() -> None:
 
 
 def test_source_has_no_local_command_execution_or_auto_approval_path() -> None:
-    python_source = "\n".join(
-        path.read_text(encoding="utf-8")
+    plugin_sources = {
+        path: path.read_text(encoding="utf-8")
         for path in PLUGIN_DIR.rglob("*.py")
         if "__pycache__" not in path.parts
-    )
+    }
+    python_source = "\n".join(plugin_sources.values())
     lowered = python_source.lower()
 
-    # v0.2 adds a local_cli backend: subprocess execution is allowed ONLY
-    # inside local.py, via asyncio.create_subprocess_exec (never a shell).
-    assert "import subprocess" not in lowered
-    assert "from subprocess" not in lowered
+    # Process execution is confined to the explicit compatibility backend and
+    # the managed HAPI supervisor.
+    process_files = {"local.py", "managed_runtime.py"}
+    for path, source in plugin_sources.items():
+        if path.name in process_files:
+            continue
+        source_lower = source.lower()
+        assert "import subprocess" not in source_lower, path
+        assert "from subprocess" not in source_lower, path
+        assert "create_subprocess" not in source_lower, path
+        assert "subprocess.popen" not in source_lower, path
+
     assert "os.system(" not in lowered
-    assert "shell=true" not in lowered
+    assert re.search(
+        r"""["']?shell["']?\s*[:=]\s*true""",
+        lowered,
+    ) is None
     assert '"yolo": true' not in lowered
     assert "'yolo': true' " not in lowered
     assert "auto_approve = true" not in lowered
     assert "--dangerously-skip-permissions" not in lowered
-
-    for path in PLUGIN_DIR.rglob("*.py"):
-        if "__pycache__" in path.parts or path.name == "local.py":
-            continue
-        assert "create_subprocess" not in path.read_text(encoding="utf-8").lower(), path
 
     local_source = (PLUGIN_DIR / "local.py").read_text(encoding="utf-8").lower()
     assert "create_subprocess_exec" in local_source
@@ -3900,3 +4040,15 @@ def test_source_has_no_local_command_execution_or_auto_approval_path() -> None:
     assert "shell=true" not in local_source
     for dangerous in ("--dangerously-skip-permissions", "--yolo", "--full-auto"):
         assert dangerous not in local_source
+
+    managed_source = (PLUGIN_DIR / "managed_runtime.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"shell": False' in managed_source
+    assert "subprocess.Popen(list(argv), **popen_kwargs)" in managed_source
+    assert managed_source.count("subprocess.Popen(") == 1
+    assert re.search(
+        r"def _spawn_owned\([^)]*argv: tuple\[str, \.\.\.\]",
+        managed_source,
+        flags=re.DOTALL,
+    )

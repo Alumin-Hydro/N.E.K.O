@@ -1,13 +1,13 @@
 [plugin]
 id = "vibe_coding_connector"
 name = "Vibe Coding 连接器"
-description = "通过独立运行的 HAPI 安全连接 Claude Code、Codex 与 OpenCode；设计受 AstrBot HAPI Connector 启发。"
-short_description = "Connect N.E.K.O to HAPI-managed coding sessions with explicit workspace and approval controls."
+description = "自带并监督锁版 HAPI 服务，安全连接 Claude Code、Codex 与 OpenCode；支持高级外部 HAPI 模式。"
+short_description = "Run a pinned managed HAPI service with explicit workspace and approval controls."
 keywords = [
     "vibe coding", "HAPI", "Claude Code", "Codex", "OpenCode",
     "编程", "开发", "会话", "审批", "connector"
 ]
-version = "0.1.0"
+version = "0.2.0"
 type = "plugin"
 entry = "plugin.plugins.vibe_coding_connector:VibeCodingConnectorPlugin"
 
@@ -28,6 +28,8 @@ enabled = true
 [plugin_runtime]
 enabled = true
 auto_start = true
+timeout = 120
+startup_failure = "warn"
 
 [plugin.ui]
 enabled = true

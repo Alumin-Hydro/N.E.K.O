@@ -1,4 +1,4 @@
-"""N.E.K.O connector for separately managed HAPI coding sessions."""
+"""N.E.K.O connector for managed or external HAPI coding sessions."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -44,6 +45,11 @@ from .client import (
     SessionInfo,
     extract_permissions,
 )
+from .managed_runtime import (
+    ManagedHapiConfig,
+    ManagedHapiError,
+    ManagedHapiRuntime,
+)
 from .security import (
     ConnectorSettings,
     PolicyError,
@@ -60,6 +66,7 @@ _EVENTS_KEY = "recent_events_v1"
 _SESSIONS_KEY = "recent_sessions_v1"
 _PLUGIN_SOURCE = "vibe_coding_connector"
 _SAVE_SETTINGS_ENTRY_ID = "vibe_coding_save_settings"
+_RUNTIME_BUNDLE_ROOT = Path(__file__).resolve().parent / "runtime"
 _SECRET_ENVELOPE_BINDING_PREFIX = (
     f"{_PLUGIN_SOURCE}:{_SAVE_SETTINGS_ENTRY_ID}:"
 )
@@ -279,7 +286,7 @@ def _error_payload(code: str, message: str) -> dict[str, Any]:
 
 
 def _public_error(exc: BaseException) -> Err[dict[str, Any]]:
-    if isinstance(exc, (PolicyError, HapiClientError)):
+    if isinstance(exc, (PolicyError, HapiClientError, ManagedHapiError)):
         return Err(_error_payload(exc.code, exc.public_message))
     return Err(
         _error_payload(
@@ -463,7 +470,7 @@ def _event_request_id(event: SSEEvent) -> str:
 
 @neko_plugin
 class VibeCodingConnectorPlugin(NekoPluginBase):
-    """Safely mediate N.E.K.O calls to a separately running HAPI service."""
+    """Safely manage HAPI and mediate N.E.K.O coding-session calls."""
 
     def __init__(self, ctx: Any):
         super().__init__(ctx)
@@ -476,6 +483,10 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
         self._client: HapiClient | Any | None = None
         self._client_revision = -1
         self._client_owned = True
+        self._client_connection_key: tuple[Any, ...] | None = None
+        self._managed_runtime: ManagedHapiRuntime | None = None
+        self._managed_runtime_signature: tuple[Any, ...] | None = None
+        self._managed_runtime_guard = threading.RLock()
         self._recent_events: list[dict[str, Any]] = []
         self._recent_sessions: list[dict[str, Any]] = []
         self._recent_approvals: list[dict[str, Any]] = []
@@ -552,10 +563,12 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             ):
                 self.store.enabled = True
             await self._ensure_loaded(force=True)
+            runtime_status = await self._ensure_managed_runtime()
             return Ok(
                 {
                     "status": "ready",
                     "sse_pending": bool(self._settings.sse_enabled),
+                    "runtime": runtime_status,
                 }
             )
         except Exception as exc:
@@ -563,7 +576,31 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
 
     async def _on_command_loop_start(self) -> None:
         await self._ensure_loaded()
+        await self._ensure_managed_runtime()
         await self._restart_listener()
+
+    @lifecycle(id="config_change")
+    async def config_change(self, **_: Any):
+        configuration_claimed = False
+        try:
+            self._claim_configuration_change()
+            configuration_claimed = True
+            await self._ensure_loaded(force=True)
+            runtime_status = await self._ensure_managed_runtime(
+                force_restart=self._settings.backend_mode == "managed_hapi",
+            )
+            await self._restart_listener()
+            return Ok(
+                {
+                    "status": "reconfigured",
+                    "runtime": runtime_status,
+                }
+            )
+        except Exception as exc:
+            return _public_error(exc)
+        finally:
+            if configuration_claimed:
+                self._release_configuration_change()
 
     @lifecycle(id="shutdown")
     async def shutdown(self, **_: Any):
@@ -574,18 +611,25 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
         await self._persist_metadata()
         client = self._client
         self._client = None
+        self._client_connection_key = None
         if client is not None and callable(getattr(client, "aclose", None)):
             try:
                 await client.aclose()
             except Exception:
                 pass
+        runtime_shutdown = await self._stop_managed_runtime()
         try:
             await self.store.close()
         except Exception:
             pass
         return Ok(
             {
-                "status": "shutdown",
+                "status": (
+                    "shutdown"
+                    if runtime_shutdown.get("state") in {"stopped", "absent"}
+                    else "shutdown_incomplete"
+                ),
+                "runtime": runtime_shutdown,
                 "secret_envelopes_discarded": discarded_envelopes,
             }
         )
@@ -674,23 +718,244 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             record_type="session",
             credential=credential_for_redaction,
         )
-        self._recent_events = [
-            item
-            for item in self._recent_events
-            if item.get("base_url") == settings.base_url
-            and item.get("auth_mode") == settings.auth_mode
-        ]
-        self._recent_sessions = [
-            item
-            for item in self._recent_sessions
-            if item.get("base_url") == settings.base_url
-            and item.get("auth_mode") == settings.auth_mode
-        ]
+        if settings.backend_mode == "managed_hapi":
+            self._recent_events = []
+            self._recent_sessions = []
+        else:
+            self._recent_events = [
+                item
+                for item in self._recent_events
+                if item.get("base_url") == settings.base_url
+                and item.get("auth_mode") == settings.auth_mode
+            ]
+            self._recent_sessions = [
+                item
+                for item in self._recent_sessions
+                if item.get("base_url") == settings.base_url
+                and item.get("auth_mode") == settings.auth_mode
+            ]
         self._loaded = True
         self._configuration_quarantined = (
             configuration_read_failed or configuration_cleanup_failed
         )
         self._revision += 1
+
+    def _runtime_signature(
+        self,
+        settings: ConnectorSettings | None = None,
+    ) -> tuple[Any, ...]:
+        effective = settings or self._settings
+        return (
+            effective.preferred_port,
+            tuple(effective.allowed_workspace_roots),
+            effective.allow_runtime_download,
+        )
+
+    def _runtime_placeholder_status(
+        self,
+        settings: ConnectorSettings | None = None,
+    ) -> dict[str, Any]:
+        effective = settings or self._settings
+        mode = effective.backend_mode
+        return {
+            "state": "external" if mode == "hapi_external" else "compatibility",
+            "version": "0.25.1",
+            "platform": "",
+            "bundled": False,
+            "download_enabled": effective.allow_runtime_download,
+            "actual_port": None,
+            "base_url": effective.base_url if mode == "hapi_external" else "",
+            "hub_ready": False,
+            "runner_ready": False,
+            "workspace_root_count": len(
+                effective.allowed_workspace_roots
+            ),
+            "restart_count": 0,
+            "max_restarts": 3,
+            "processes": {},
+            "runtime_dir": "",
+            "log_dir": "",
+            "native_log_dir": "",
+            "last_error": "",
+            "source_url": (
+                "https://github.com/tiann/hapi/tree/"
+                "f0e7e6ad200256550a3cae35b05b9935ed10ad45"
+            ),
+            "release_url": "https://github.com/tiann/hapi/releases/tag/v0.25.1",
+            "archive_sha256": "",
+            "license": "AGPL-3.0-only",
+            "provider_note": (
+                "HAPI 不包含付费编程工具；Claude、Codex、OpenCode "
+                "仍需分别安装并登录。"
+            ),
+        }
+
+    async def _ensure_managed_runtime(
+        self,
+        *,
+        force_restart: bool = False,
+        raise_errors: bool = False,
+    ) -> dict[str, Any]:
+        for _attempt in range(3):
+            settings = self._settings
+            status, old_base_url, new_base_url, error = await asyncio.to_thread(
+                self._ensure_managed_runtime_sync,
+                settings,
+                force_restart,
+            )
+            if old_base_url != new_base_url:
+                await self._invalidate_client()
+                await self._clear_remote_metadata()
+            if settings is not self._settings:
+                force_restart = False
+                continue
+            if error is not None and (
+                raise_errors or error.code == "runtime_shutdown_failed"
+            ):
+                raise error
+            return status
+        raise PolicyError(
+            "连接器设置持续变化，HAPI 服务未启动",
+            code="configuration_changed",
+        )
+
+    def _ensure_managed_runtime_sync(
+        self,
+        settings: ConnectorSettings,
+        force_restart: bool,
+    ) -> tuple[
+        dict[str, Any],
+        str,
+        str,
+        ManagedHapiError | None,
+    ]:
+        with self._managed_runtime_guard:
+            old_runtime = self._managed_runtime
+            old_base_url = old_runtime.base_url if old_runtime is not None else ""
+            if settings.backend_mode != "managed_hapi":
+                if old_runtime is not None:
+                    stopped = old_runtime.stop()
+                    if stopped.get("state") != "stopped":
+                        error = ManagedHapiError(
+                            str(
+                                stopped.get("last_error")
+                                or "HAPI runtime 进程树无法确认已终止"
+                            ),
+                            code="runtime_shutdown_failed",
+                        )
+                        return (
+                            stopped,
+                            old_base_url,
+                            old_runtime.base_url,
+                            error,
+                        )
+                self._managed_runtime = None
+                self._managed_runtime_signature = None
+                return (
+                    self._runtime_placeholder_status(settings),
+                    old_base_url,
+                    "",
+                    None,
+                )
+            signature = self._runtime_signature(settings)
+            if (
+                old_runtime is None
+                or self._managed_runtime_signature != signature
+            ):
+                if old_runtime is not None:
+                    stopped = old_runtime.stop()
+                    if stopped.get("state") != "stopped":
+                        error = ManagedHapiError(
+                            str(
+                                stopped.get("last_error")
+                                or "HAPI runtime 进程树无法确认已终止"
+                            ),
+                            code="runtime_shutdown_failed",
+                        )
+                        return (
+                            stopped,
+                            old_base_url,
+                            old_runtime.base_url,
+                            error,
+                        )
+                runtime = ManagedHapiRuntime(
+                    bundle_root=_RUNTIME_BUNDLE_ROOT,
+                    data_root=Path(self.data_path("managed_hapi")),
+                    config=ManagedHapiConfig(
+                        preferred_port=settings.preferred_port,
+                        workspace_roots=tuple(
+                            settings.allowed_workspace_roots
+                        ),
+                        allow_download=settings.allow_runtime_download,
+                    ),
+                    logger=self.logger,
+                )
+                self._managed_runtime = runtime
+                self._managed_runtime_signature = signature
+            else:
+                runtime = old_runtime
+            error: ManagedHapiError | None = None
+            try:
+                status = runtime.restart() if force_restart else runtime.start()
+            except ManagedHapiError as exc:
+                error = exc
+                status = runtime.status()
+                self.logger.warning(
+                    "Managed HAPI unavailable: {} ({})",
+                    exc.public_message,
+                    exc.code,
+                )
+            return status, old_base_url, runtime.base_url, error
+
+    async def _stop_managed_runtime(self) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(self._stop_managed_runtime_sync)
+        except Exception as exc:
+            self.logger.warning(
+                "Managed HAPI shutdown failed: {}",
+                type(exc).__name__,
+            )
+            runtime = self._managed_runtime
+            return (
+                runtime.status()
+                if runtime is not None
+                else {
+                    "state": "shutdown_failed",
+                    "last_error": (
+                        "HAPI runtime shutdown failed"
+                        f" ({type(exc).__name__})"
+                    ),
+                }
+            )
+
+    def _stop_managed_runtime_sync(self) -> dict[str, Any]:
+        with self._managed_runtime_guard:
+            runtime = self._managed_runtime
+            if runtime is None:
+                return {"state": "absent", "last_error": ""}
+            status = runtime.stop()
+            if status.get("state") != "stopped":
+                return status
+            if self._managed_runtime is runtime:
+                self._managed_runtime = None
+                self._managed_runtime_signature = None
+            return status
+
+    def _connection_identity(
+        self,
+        settings: ConnectorSettings | None = None,
+    ) -> tuple[str, str]:
+        effective = settings or self._settings
+        if effective.backend_mode == "managed_hapi":
+            base_url = (
+                self._managed_runtime.base_url
+                if self._managed_runtime is not None
+                else ""
+            )
+            return (base_url or "managed-hapi:pending", "access_token")
+        if effective.backend_mode == "local_cli":
+            return ("local-cli", "none")
+        return (effective.base_url, effective.auth_mode)
 
     def _sanitize_stored_records(
         self,
@@ -936,6 +1201,7 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
     async def _fail_closed_configuration(self) -> None:
         defaults = ConnectorSettings()
         restored = await self._restore_configuration_store(defaults, None)
+        await self._stop_managed_runtime()
         self._settings = defaults
         self._token = None
         self._policy.update(defaults)
@@ -1006,8 +1272,57 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
         await self._ensure_loaded()
         if self._client is not None and not self._client_owned:
             return self._client
-        if self._client is not None and self._client_revision == self._revision:
+        if self._settings.backend_mode == "local_cli":
+            raise PolicyError(
+                "当前为本机 CLI 兼容模式；HAPI 会话功能未启用",
+                code="wrong_backend",
+            )
+        if self._settings.backend_mode == "managed_hapi":
+            runtime_status = await self._ensure_managed_runtime(
+                raise_errors=True,
+            )
+            runtime = self._managed_runtime
+            base_url = runtime.base_url if runtime is not None else ""
+            token = runtime.access_token if runtime is not None else None
+            auth_mode = "access_token"
+            allow_remote = False
+            if (
+                not base_url
+                or runtime_status.get("state")
+                not in {"ready", "degraded"}
+            ):
+                raise ManagedHapiError(
+                    str(
+                        runtime_status.get("last_error")
+                        or "内置 HAPI 服务尚未就绪"
+                    ),
+                    code="runtime_unavailable",
+                )
+        else:
+            base_url = self._settings.base_url
+            token = self._token
+            auth_mode = self._settings.auth_mode
+            allow_remote = self._settings.allow_remote
+        connection_key = (
+            base_url,
+            hashlib.sha256((token or "").encode("utf-8")).hexdigest(),
+            auth_mode,
+            self._settings.timeout_seconds,
+            self._settings.sse_reconnect_delay,
+            self._settings.max_response_size,
+            allow_remote,
+        )
+        if (
+            self._client is not None
+            and self._client_revision == self._revision
+            and self._client_connection_key == connection_key
+        ):
             return self._client
+        if (
+            self._client_connection_key is not None
+            and self._client_connection_key[0] != connection_key[0]
+        ):
+            await self._clear_remote_metadata()
         previous = self._client
         if previous is not None and callable(getattr(previous, "aclose", None)):
             try:
@@ -1016,16 +1331,17 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
                 pass
         self._client = HapiClient(
             HapiClientConfig(
-                base_url=self._settings.base_url,
-                token=self._token,
-                auth_mode=self._settings.auth_mode,
+                base_url=base_url,
+                token=token,
+                auth_mode=auth_mode,
                 timeout_seconds=self._settings.timeout_seconds,
                 reconnect_delay_seconds=self._settings.sse_reconnect_delay,
                 max_response_bytes=self._settings.max_response_size,
-                allow_remote=self._settings.allow_remote,
+                allow_remote=allow_remote,
             )
         )
         self._client_revision = self._revision
+        self._client_connection_key = connection_key
         self._client_owned = True
         return self._client
 
@@ -1038,6 +1354,7 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
                 pass
             self._client = None
         self._client_revision = -1
+        self._client_connection_key = None
 
     async def _operation_snapshot(
         self,
@@ -1059,8 +1376,13 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             await self._ensure_loaded()
             revision = self._revision
             settings = self._settings
-            credential = self._token
             client = await self._get_client()
+            credential = (
+                self._managed_runtime.access_token
+                if settings.backend_mode == "managed_hapi"
+                and self._managed_runtime is not None
+                else self._token
+            )
             if revision == self._revision and settings is self._settings:
                 return client, settings, SecurityPolicy(settings), credential
         raise PolicyError(
@@ -1102,6 +1424,11 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
 
     def _claim_configuration_change(self) -> None:
         with self._operation_guard:
+            if self._configuration_changing:
+                raise PolicyError(
+                    "连接器设置或 HAPI 服务正在变化，请稍后重试",
+                    code="configuration_busy",
+                )
             if self._active_operations:
                 raise PolicyError(
                     "仍有 HAPI 操作正在进行，请稍后保存设置",
@@ -1477,6 +1804,9 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             )
             if not safe["id"]:
                 continue
+            connection_url, connection_auth = self._connection_identity(
+                settings
+            )
             existing[safe["id"]] = {
                 "id": safe["id"],
                 "provider": safe["provider"],
@@ -1484,8 +1814,8 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
                 "status": safe["status"],
                 "active": safe["active"],
                 "updated_at": safe["updated_at"],
-                "base_url": settings.base_url,
-                "auth_mode": settings.auth_mode,
+                "base_url": connection_url,
+                "auth_mode": connection_auth,
                 "manageable": safe["manageable"],
                 "readable": safe["readable"],
                 "stoppable": safe["stoppable"],
@@ -1526,29 +1856,32 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
         **_: Any,
     ):
         try:
-            _client, settings, operation_policy, _credential = (
-                await self._operation_snapshot()
-            )
+            await self._ensure_loaded()
+            settings = self._settings
             if settings.backend_mode != "local_cli":
                 raise PolicyError(
-                    "当前为 HAPI 远程模式；vibe_coding_ask 仅在本机 CLI 模式可用",
+                    "当前为 HAPI 服务模式；vibe_coding_ask 仅在本机 CLI 兼容模式可用",
                     code="wrong_backend",
                 )
+            operation_policy = SecurityPolicy(settings)
             safe_provider = operation_policy.validate_provider(provider or settings.allowed_providers[0])
             safe_instruction = operation_policy.validate_instruction(instruction)
             safe_workspace = operation_policy.validate_workspace(working_directory)
 
             from . import local
 
-            result = await local.run_local_prompt(
-                provider=safe_provider,
-                prompt=safe_instruction,
-                workspace=safe_workspace,
-                allowed_roots=settings.allowed_workspace_roots,
-                overrides=settings.cli_command_overrides,
-                timeout_seconds=settings.timeout_seconds,
-                max_output_chars=settings.max_output_chars,
-            )
+            async with self._operation_permit(
+                expected_settings=settings,
+            ):
+                result = await local.run_local_prompt(
+                    provider=safe_provider,
+                    prompt=safe_instruction,
+                    workspace=safe_workspace,
+                    allowed_roots=settings.allowed_workspace_roots,
+                    overrides=settings.cli_command_overrides,
+                    timeout_seconds=settings.timeout_seconds,
+                    max_output_chars=settings.max_output_chars,
+                )
             result["output"] = self._redact_output(result.get("output", ""))[: settings.max_output_chars]
             summary = (
                 f"{safe_provider} 已在 {safe_workspace} 完成（exit {result['exit_code']}）。\n"
@@ -1676,7 +2009,10 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
                 "authenticated": False,
                 "summary": (
                     exc.public_message
-                    if isinstance(exc, (PolicyError, HapiClientError))
+                    if isinstance(
+                        exc,
+                        (PolicyError, HapiClientError, ManagedHapiError),
+                    )
                     else "HAPI 连接检查失败"
                 ),
                 "checked_at": int(time.time()),
@@ -2012,8 +2348,8 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
                     "status": "created",
                     "active": True,
                     "updated_at": int(time.time()),
-                    "base_url": settings.base_url,
-                    "auth_mode": settings.auth_mode,
+                    "base_url": self._connection_identity(settings)[0],
+                    "auth_mode": self._connection_identity(settings)[1],
                     "manageable": True,
                     "readable": True,
                     "stoppable": True,
@@ -2623,6 +2959,96 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
     # ------------------------------------------------------------------
 
     @plugin_entry(
+        id="vibe_coding_fresh_secret_envelope",
+        name="获取一次性设置安全信封",
+        description="供管理面板在每次保存前获取新的单次加密公钥。",
+        input_schema=EMPTY_SCHEMA,
+        timeout=15.0,
+    )
+    async def fresh_secret_envelope(self, **_: Any):
+        try:
+            return Ok(
+                {
+                    "summary": "已签发一次性设置安全信封。",
+                    "secret_envelope": await self._issue_secret_envelope(),
+                }
+            )
+        except Exception as exc:
+            return _public_error(exc)
+
+    @plugin_entry(
+        id="vibe_coding_runtime_start",
+        name="启动内置 HAPI 服务",
+        description="供管理面板启动当前锁版的内置 HAPI hub 与受限 runner。",
+        input_schema=EMPTY_SCHEMA,
+        timeout=180.0,
+    )
+    async def runtime_start(self, **_: Any):
+        configuration_claimed = False
+        try:
+            await self._ensure_loaded()
+            if self._settings.backend_mode != "managed_hapi":
+                raise PolicyError(
+                    "只有内置 HAPI 模式可以启动托管服务",
+                    code="wrong_backend",
+                )
+            self._claim_configuration_change()
+            configuration_claimed = True
+            status = await self._ensure_managed_runtime(
+                force_restart=True,
+                raise_errors=True,
+            )
+            await self._restart_listener()
+            return Ok(
+                {
+                    "summary": "内置 HAPI 服务已启动。",
+                    "runtime": status,
+                }
+            )
+        except Exception as exc:
+            return _public_error(exc)
+        finally:
+            if configuration_claimed:
+                self._release_configuration_change()
+
+    @plugin_entry(
+        id="vibe_coding_runtime_restart",
+        name="重启内置 HAPI 服务",
+        description="供管理面板安全重启自己拥有的 HAPI 完整进程树。",
+        input_schema=EMPTY_SCHEMA,
+        timeout=180.0,
+    )
+    async def runtime_restart(self, **_: Any):
+        configuration_claimed = False
+        try:
+            await self._ensure_loaded()
+            if self._settings.backend_mode != "managed_hapi":
+                raise PolicyError(
+                    "只有内置 HAPI 模式可以重启托管服务",
+                    code="wrong_backend",
+                )
+            self._claim_configuration_change()
+            configuration_claimed = True
+            await self._stop_listener()
+            await self._invalidate_client()
+            status = await self._ensure_managed_runtime(
+                force_restart=True,
+                raise_errors=True,
+            )
+            await self._restart_listener()
+            return Ok(
+                {
+                    "summary": "内置 HAPI 服务已安全重启。",
+                    "runtime": status,
+                }
+            )
+        except Exception as exc:
+            return _public_error(exc)
+        finally:
+            if configuration_claimed:
+                self._release_configuration_change()
+
+    @plugin_entry(
         id="vibe_coding_save_settings",
         name="保存 Vibe Coding 设置",
         description=(
@@ -2630,7 +3056,7 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             "空 token 保留原值。"
         ),
         input_schema=SAVE_SETTINGS_SCHEMA,
-        timeout=30.0,
+        timeout=180.0,
     )
     async def save_settings(
         self,
@@ -2704,6 +3130,23 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             await self._clear_remote_metadata(strict=True)
             await self._stop_listener()
             await self._invalidate_client()
+            if (
+                old_settings.backend_mode == "managed_hapi"
+                and (
+                    new_settings.backend_mode != "managed_hapi"
+                    or self._runtime_signature(old_settings)
+                    != self._runtime_signature(new_settings)
+                )
+            ):
+                stopped = await self._stop_managed_runtime()
+                if stopped.get("state") not in {"stopped", "absent"}:
+                    raise ManagedHapiError(
+                        str(
+                            stopped.get("last_error")
+                            or "HAPI runtime 进程树无法确认已终止"
+                        ),
+                        code="runtime_shutdown_failed",
+                    )
             try:
                 if clear_token is True or cleaned_token:
                     await self._store_delete(_TOKEN_KEY)
@@ -2729,12 +3172,14 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             self._loaded = True
             self._configuration_quarantined = False
             await self._clear_remote_metadata()
+            runtime_status = await self._ensure_managed_runtime()
             await self._restart_listener()
             return Ok(
                 {
                     "summary": "Vibe Coding 连接器设置已保存。",
                     "settings": self._settings.to_public(),
                     "token": self._token_state(),
+                    "runtime": runtime_status,
                 }
             )
         except Exception as exc:
@@ -2749,7 +3194,7 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
         name="重置 Vibe Coding 设置",
         description="恢复安全默认设置；保留现有 token。",
         input_schema=EMPTY_SCHEMA,
-        timeout=30.0,
+        timeout=180.0,
     )
     async def reset_settings(self, **_: Any):
         if not self._settings_update_guard.acquire(blocking=False):
@@ -2775,6 +3220,20 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             await self._clear_remote_metadata(strict=True)
             await self._stop_listener()
             await self._invalidate_client()
+            if (
+                old_settings.backend_mode == "managed_hapi"
+                and self._runtime_signature(old_settings)
+                != self._runtime_signature(defaults)
+            ):
+                stopped = await self._stop_managed_runtime()
+                if stopped.get("state") not in {"stopped", "absent"}:
+                    raise ManagedHapiError(
+                        str(
+                            stopped.get("last_error")
+                            or "HAPI runtime 进程树无法确认已终止"
+                        ),
+                        code="runtime_shutdown_failed",
+                    )
             try:
                 await self._store_set(_SETTINGS_KEY, defaults.to_store())
             except Exception as store_exc:
@@ -2795,12 +3254,14 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             self._loaded = True
             self._configuration_quarantined = False
             await self._clear_remote_metadata()
+            runtime_status = await self._ensure_managed_runtime()
             await self._restart_listener()
             return Ok(
                 {
                     "summary": "设置已重置为安全默认值；token 已保留。",
                     "settings": defaults.to_public(),
                     "token": self._token_state(),
+                    "runtime": runtime_status,
                 }
             )
         except Exception as exc:
@@ -2911,21 +3372,36 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
         except PolicyError:
             secret_envelope = None
             reasons["settings"] = "浏览器设置加密组件不可用"
-        local_providers: dict[str, Any] = {}
-        if self._settings.backend_mode == "local_cli":
-            from . import local
+        from . import local
 
-            local_providers = local.detect_local_providers(
-                self._settings.cli_command_overrides
+        local_providers = local.detect_local_providers(
+            (
+                {}
+                if self._settings.backend_mode == "managed_hapi"
+                else self._settings.cli_command_overrides
             )
-            for provider, info in local_providers.items():
-                if provider in self._settings.allowed_providers and not info.get("available"):
-                    reasons[f"cli_{provider}"] = f"未在 PATH 检测到 {provider} CLI"
+        )
+        for provider, info in local_providers.items():
+            if (
+                provider in self._settings.allowed_providers
+                and not info.get("available")
+            ):
+                reasons[f"cli_{provider}"] = (
+                    f"未在 PATH 检测到 {provider} CLI；"
+                    "内置 HAPI 不包含该编程工具"
+                )
+        runtime_status = (
+            self._managed_runtime.status()
+            if self._managed_runtime is not None
+            else self._runtime_placeholder_status()
+        )
         return {
             "summary": "已读取脱敏的 Vibe Coding 管理状态。",
             "settings": self._settings.to_public(),
             "backend_mode": self._settings.backend_mode,
             "local_providers": local_providers,
+            "runtime": runtime_status,
+            "actual_port": runtime_status.get("actual_port"),
             "token": self._token_state(),
             "secret_envelope": secret_envelope,
             "health": dict(self._health),
@@ -2952,8 +3428,15 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
 
     async def _restart_listener(self) -> None:
         await self._stop_listener()
-        if not self._settings.sse_enabled:
+        if (
+            not self._settings.sse_enabled
+            or self._settings.backend_mode == "local_cli"
+        ):
             return
+        if self._settings.backend_mode == "managed_hapi":
+            status = await self._ensure_managed_runtime()
+            if status.get("state") not in {"ready", "degraded"}:
+                return
         loop = asyncio.get_running_loop()
         self._listener_stop = asyncio.Event()
         self._listener_loop = weakref.ref(loop)
@@ -3013,24 +3496,72 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
 
     async def _listener_main(self, stop_event: asyncio.Event) -> None:
         try:
-            client = await self._get_client()
-            async for event in client.iter_events(stop_event=stop_event, reconnect=True):
-                if stop_event.is_set():
-                    return
+            while not stop_event.is_set():
+                client = await self._get_client()
+                managed = self._settings.backend_mode == "managed_hapi"
+                endpoint = self._connection_identity()[0]
+                connection_stop = asyncio.Event() if managed else stop_event
+                endpoint_watcher: asyncio.Task[None] | None = None
+                if managed:
+                    endpoint_watcher = asyncio.create_task(
+                        self._watch_managed_endpoint(
+                            expected_base_url=endpoint,
+                            connection_stop=connection_stop,
+                            listener_stop=stop_event,
+                        ),
+                        name="vibe-coding-hapi-endpoint-watch",
+                    )
                 try:
-                    await self._handle_sse_event(event)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    # A malformed event or a failed notification must not
-                    # terminate the reconnecting listener.
-                    continue
+                    async for event in client.iter_events(
+                        stop_event=connection_stop,
+                        reconnect=True,
+                    ):
+                        if stop_event.is_set():
+                            return
+                        try:
+                            await self._handle_sse_event(event)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            # A malformed event or a failed notification must
+                            # not terminate the reconnecting listener.
+                            continue
+                finally:
+                    if endpoint_watcher is not None:
+                        endpoint_watcher.cancel()
+                        await asyncio.gather(
+                            endpoint_watcher,
+                            return_exceptions=True,
+                        )
+                if stop_event.is_set() or not managed:
+                    return
+                await self._invalidate_client()
         except asyncio.CancelledError:
             raise
         except Exception:
             # The client normally reconnects internally; this is the final
             # safety boundary for injected clients and unexpected failures.
             return
+
+    async def _watch_managed_endpoint(
+        self,
+        *,
+        expected_base_url: str,
+        connection_stop: asyncio.Event,
+        listener_stop: asyncio.Event,
+    ) -> None:
+        while not listener_stop.is_set() and not connection_stop.is_set():
+            try:
+                await asyncio.wait_for(listener_stop.wait(), timeout=0.25)
+                connection_stop.set()
+                return
+            except asyncio.TimeoutError:
+                pass
+            runtime = self._managed_runtime
+            current_base_url = runtime.base_url if runtime is not None else ""
+            if current_base_url != expected_base_url:
+                connection_stop.set()
+                return
 
     def _event_fingerprint(self, event: SSEEvent) -> str:
         if event.event_id:
@@ -3130,6 +3661,7 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             request_id=request_id,
             status=status,
         )
+        connection_url, connection_auth = self._connection_identity()
         record = {
             "type": event_type,
             "session_id": session_id,
@@ -3137,8 +3669,8 @@ class VibeCodingConnectorPlugin(NekoPluginBase):
             "status": status,
             "summary": summary,
             "timestamp": int(time.time()),
-            "base_url": self._settings.base_url,
-            "auth_mode": self._settings.auth_mode,
+            "base_url": connection_url,
+            "auth_mode": connection_auth,
         }
         self._recent_events.append(record)
         self._recent_events = self._recent_events[

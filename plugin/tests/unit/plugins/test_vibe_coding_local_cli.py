@@ -6,18 +6,90 @@ from pathlib import Path
 
 import pytest
 
-from plugin.plugins.vibe_coding_connector.security import ConnectorSettings, PolicyError
+from plugin.plugins.vibe_coding_connector.security import (
+    ConnectorSettings,
+    PolicyError,
+    migrate_legacy_settings,
+)
 
 
-def test_backend_mode_defaults_to_local_cli_and_hapi_is_advanced() -> None:
+def test_backend_mode_defaults_to_managed_hapi_and_accepts_canonical_modes() -> None:
     settings = ConnectorSettings.from_mapping({})
-    assert settings.backend_mode == "local_cli"
+    assert settings.backend_mode == "managed_hapi"
 
-    hapi = ConnectorSettings.from_mapping({"backend_mode": "hapi_remote"})
-    assert hapi.backend_mode == "hapi_remote"
+    external = ConnectorSettings.from_mapping({"backend_mode": "hapi_external"})
+    assert external.backend_mode == "hapi_external"
+
+    local = ConnectorSettings.from_mapping({"backend_mode": "local_cli"})
+    assert local.backend_mode == "local_cli"
 
     with pytest.raises(PolicyError):
         ConnectorSettings.from_mapping({"backend_mode": "yolo"})
+
+
+def test_backend_mode_migrates_legacy_settings_without_mutating_input() -> None:
+    legacy = {"base_url": "http://127.0.0.1:4555"}
+    migrated = migrate_legacy_settings(legacy)
+
+    assert migrated["backend_mode"] == "hapi_external"
+    assert "backend_mode" not in legacy
+    assert ConnectorSettings.from_mapping(legacy).backend_mode == "hapi_external"
+    assert (
+        ConnectorSettings.from_mapping({"backend_mode": "hapi_remote"}).backend_mode
+        == "hapi_external"
+    )
+    assert migrate_legacy_settings({}) == {}
+    assert migrate_legacy_settings(None) == {}
+
+
+def test_managed_runtime_settings_are_strict_and_bounded() -> None:
+    defaults = ConnectorSettings.from_mapping({})
+    assert defaults.preferred_port == 3006
+    assert defaults.allow_runtime_download is False
+
+    for port in (1024, 65535):
+        settings = ConnectorSettings.from_mapping(
+            {
+                "backend_mode": "managed_hapi",
+                "preferred_port": port,
+                "allow_runtime_download": True,
+            }
+        )
+        assert settings.preferred_port == port
+        assert settings.allow_runtime_download is True
+
+    for invalid_port in (1023, 65536, True, "3006"):
+        with pytest.raises(PolicyError):
+            ConnectorSettings.from_mapping(
+                {
+                    "backend_mode": "managed_hapi",
+                    "preferred_port": invalid_port,
+                }
+            )
+
+    with pytest.raises(PolicyError):
+        ConnectorSettings.from_mapping(
+            {
+                "backend_mode": "managed_hapi",
+                "allow_runtime_download": "true",
+            }
+        )
+
+    with pytest.raises(PolicyError):
+        ConnectorSettings.from_mapping(
+            {
+                "backend_mode": "managed_hapi",
+                "unknown_runtime_field": True,
+            }
+        )
+
+
+def test_workspace_roots_reject_filesystem_root_and_user_home() -> None:
+    for dangerous in (Path(Path.cwd().anchor), Path.home().resolve()):
+        with pytest.raises(PolicyError, match="(?i)(root|主目录|系统目录|工作区)"):
+            ConnectorSettings.from_mapping(
+                {"allowed_workspace_roots": [str(dangerous)]}
+            )
 
 
 def test_local_cli_command_overrides_are_validated() -> None:
