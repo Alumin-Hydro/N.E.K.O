@@ -22,15 +22,22 @@ from plugin.plugins.auto_prompt_harness.bindings import (
     ADAPTATION_END,
     ADAPTATION_START,
     LEGACY_STATE_KEY,
+    PROMPT_STORAGE_DYNAMIC_DEFAULT,
+    PROMPT_STORAGE_SYSTEM,
     PROVENANCE_KEY,
     STATE_KEY,
     build_overlay,
     card_fingerprint,
     is_managed_overlay,
     normalize_adaptation_text,
+    prompt_storage_mode,
     provenance_fingerprint,
     provenance_for,
     stored_prompt,
+)
+from utils.config_manager.persona_payload import (
+    _append_persona_guidance_to_prompt,
+    _resolve_effective_character_prompt,
 )
 from plugin.plugins.auto_prompt_harness.reflection import (
     collect_evidence,
@@ -99,6 +106,7 @@ class TemporaryConfigManager:
     def __init__(self, path: Path, initial: Mapping[str, Any]) -> None:
         self.path = path
         self.save_calls = 0
+        self.after_next_save_mutation = None
         self._lock = threading.Lock()
         self._write(dict(initial))
 
@@ -129,6 +137,12 @@ class TemporaryConfigManager:
             with self._lock:
                 self._write(snapshot)
                 self.save_calls += 1
+                mutation = self.after_next_save_mutation
+                self.after_next_save_mutation = None
+                if callable(mutation):
+                    changed = copy.deepcopy(snapshot)
+                    mutation(changed)
+                    self._write(changed)
 
         await asyncio.to_thread(save)
 
@@ -139,6 +153,22 @@ class FakeHost:
     def __init__(self, manager: TemporaryConfigManager) -> None:
         self.manager = manager
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.runtime_current = ""
+        self.runtime_prompt = ""
+
+    async def _refresh_runtime(self) -> None:
+        characters = await self.manager.aload_characters()
+        current = str(characters.get("当前猫娘") or "")
+        card = characters.get("猫娘", {}).get(current)
+        self.runtime_current = current
+        if isinstance(card, dict):
+            resolved = _resolve_effective_character_prompt(card)
+            self.runtime_prompt = _append_persona_guidance_to_prompt(
+                resolved,
+                card,
+            )
+        else:
+            self.runtime_prompt = ""
 
     async def __call__(
         self,
@@ -153,6 +183,7 @@ class FakeHost:
         if method != "POST":
             return 405, {"success": False, "message": "method"}
         if path == "/api/characters/reload":
+            await self._refresh_runtime()
             return 200, {"success": True}
         if path == "/api/characters/current_catgirl":
             name = str(body.get("catgirl_name") or "")
@@ -160,6 +191,7 @@ class FakeHost:
                 return 404, {"success": False, "code": "missing"}
             characters["当前猫娘"] = name
             await self.manager.asave_characters(characters)
+            await self._refresh_runtime()
             return 200, {"success": True, "current_catgirl": name}
         if path == "/api/characters/managed-overlay/refresh-prompt":
             name = str(body.get("character_name") or "")
@@ -174,6 +206,7 @@ class FakeHost:
                     "code": "provenance_mismatch",
                     "error": {"message": "来源标记不匹配"},
                 }
+            await self._refresh_runtime()
             return 200, {"success": True, "refreshed": True}
         if path == "/api/characters/managed-overlay/restore-original":
             overlay = str(body.get("overlay_name") or "")
@@ -198,6 +231,7 @@ class FakeHost:
             if switched:
                 characters["当前猫娘"] = original
                 await self.manager.asave_characters(characters)
+                await self._refresh_runtime()
             return 200, {
                 "success": True,
                 "switched": switched,
@@ -473,6 +507,8 @@ async def test_start_deep_copies_original_and_marks_unique_overlay(
         "original_card_fingerprint": card_fingerprint(original_snapshot),
         "base_prompt_fingerprint": started["base_prompt_fingerprint"],
         "managed_prompt_composition_required": False,
+        "prompt_storage_mode": PROMPT_STORAGE_SYSTEM,
+        "persona_materialized": True,
         "created_at": provenance["created_at"],
     }
     assert re.fullmatch(r"[a-f0-9]{24}", provenance["binding_id"])
@@ -741,6 +777,68 @@ async def test_manual_restore_and_shutdown_restore_preserve_overlay(
 
 
 @pytest.mark.asyncio
+async def test_shutdown_restores_durably_when_host_http_is_already_gone(
+    tmp_path: Path,
+) -> None:
+    plugin, _store, manager, _host, started = await start_plugin(tmp_path)
+
+    async def unavailable_host(
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None,
+    ) -> tuple[int, dict[str, Any]]:
+        del method, path, payload
+        raise OSError("host is closing")
+
+    from plugin.plugins.auto_prompt_harness.bindings import CharacterConfigBridge
+
+    plugin._character_bridge = CharacterConfigBridge(
+        manager,
+        request_handler=unavailable_host,
+    )
+
+    shutdown = ok_value(await plugin.shutdown())
+    after = await manager.aload_characters()
+
+    assert shutdown["restored_original"] is True
+    assert shutdown["restore_error"] == ""
+    assert after["当前猫娘"] == "小白"
+    assert started["overlay_name"] in after["猫娘"]
+
+
+@pytest.mark.asyncio
+async def test_manual_restore_does_not_report_runtime_reload_failure_as_success(
+    tmp_path: Path,
+) -> None:
+    plugin, _store, manager, host, started = await start_plugin(tmp_path)
+
+    async def failing_reload_host(
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None,
+    ) -> tuple[int, dict[str, Any]]:
+        if path == "/api/characters/managed-overlay/restore-original":
+            return 404, {"detail": "Not Found"}
+        if path == "/api/characters/reload":
+            return 500, {"success": False, "message": "reload failed"}
+        return await host(method, path, payload)
+
+    from plugin.plugins.auto_prompt_harness.bindings import CharacterConfigBridge
+
+    plugin._character_bridge = CharacterConfigBridge(
+        manager,
+        request_handler=failing_reload_host,
+    )
+
+    restored = await plugin.restore_original()
+    after = await manager.aload_characters()
+
+    assert error_code(restored) == "runtime_refresh_failed_after_restore"
+    assert after["当前猫娘"] == "小白"
+    assert started["overlay_name"] in after["猫娘"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["restore", "shutdown"])
 async def test_user_selected_third_card_is_never_stolen(
     tmp_path: Path,
@@ -762,7 +860,80 @@ async def test_user_selected_third_card_is_never_stolen(
 
 
 @pytest.mark.asyncio
-async def test_unstructured_404_uses_safe_legacy_refresh_but_restore_fails_closed(
+async def test_legacy_restore_reloads_after_404_and_skips_new_user_choice(
+    tmp_path: Path,
+) -> None:
+    plugin, _store, manager, host, _started = await start_plugin(tmp_path)
+    saves_before = manager.save_calls
+    route_calls = 0
+
+    async def racing_legacy_host(
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None,
+    ) -> tuple[int, dict[str, Any]]:
+        nonlocal route_calls
+        if path == "/api/characters/managed-overlay/restore-original":
+            route_calls += 1
+            await mutate_characters(
+                manager,
+                lambda value: value.__setitem__(
+                    "当前猫娘",
+                    "第三张卡",
+                ),
+            )
+            return 404, {"detail": "Not Found"}
+        return await host(method, path, payload)
+
+    from plugin.plugins.auto_prompt_harness.bindings import CharacterConfigBridge
+
+    plugin._character_bridge = CharacterConfigBridge(
+        manager,
+        request_handler=racing_legacy_host,
+    )
+
+    restored = ok_value(await plugin.restore_original())
+
+    assert route_calls == 1
+    assert restored["switched"] is False
+    assert restored["preserved_user_choice"] is True
+    assert (await manager.aload_characters())["当前猫娘"] == "第三张卡"
+    assert manager.save_calls == saves_before + 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_restore_post_save_verification_never_reports_success(
+    tmp_path: Path,
+) -> None:
+    plugin, _store, manager, host, _started = await start_plugin(tmp_path)
+
+    async def legacy_host(
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None,
+    ) -> tuple[int, dict[str, Any]]:
+        if path == "/api/characters/managed-overlay/restore-original":
+            return 404, {"detail": "Not Found"}
+        return await host(method, path, payload)
+
+    from plugin.plugins.auto_prompt_harness.bindings import CharacterConfigBridge
+
+    plugin._character_bridge = CharacterConfigBridge(
+        manager,
+        request_handler=legacy_host,
+    )
+    manager.after_next_save_mutation = (
+        lambda value: value.__setitem__("当前猫娘", "第三张卡")
+    )
+
+    restored = await plugin.restore_original()
+
+    assert error_code(restored) == "character_restore_verification_failed"
+    assert (await manager.aload_characters())["当前猫娘"] == "第三张卡"
+
+
+@pytest.mark.asyncio
+async def test_unstructured_404_uses_package_refresh_and_conditional_restore(
     tmp_path: Path,
 ) -> None:
     plugin, _store, manager, host, started = await start_plugin(tmp_path)
@@ -803,10 +974,11 @@ async def test_unstructured_404_uses_safe_legacy_refresh_but_restore_fails_close
     ) == reloads_before + 1
     assert (await manager.aload_characters())["当前猫娘"] == overlay_name
 
-    restored = await plugin.restore_original()
+    restored = ok_value(await plugin.restore_original())
     characters = await manager.aload_characters()
-    assert error_code(restored) == "conditional_restore_unsupported"
-    assert characters["当前猫娘"] == overlay_name
+    assert restored["switched"] is True
+    assert restored["preserved_user_choice"] is False
+    assert characters["当前猫娘"] == "小白"
     assert overlay_name in characters["猫娘"]
     assert [path for path, _payload in legacy_calls] == [
         "/api/characters/managed-overlay/refresh-prompt",
@@ -815,8 +987,9 @@ async def test_unstructured_404_uses_safe_legacy_refresh_but_restore_fails_close
 
 
 @pytest.mark.asyncio
-async def test_legacy_host_default_prompt_approval_fails_closed_and_compensates(
+async def test_legacy_host_default_prompt_stays_dynamic_and_approves(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plugin, _store, manager, host = make_plugin(tmp_path)
     await mutate_characters(
@@ -853,17 +1026,40 @@ async def test_legacy_host_default_prompt_approval_fails_closed_and_compensates(
         manager,
         request_handler=legacy_host,
     )
+    dynamic_prompt = "DYNAMIC CURRENT LANGUAGE DEFAULT PROMPT"
+    monkeypatch.setattr(
+        "utils.config_manager.persona_payload.get_lanlan_prompt",
+        lambda: dynamic_prompt,
+    )
     add_proposal(plugin, "proposal-default-legacy", "回答保持简洁。")
 
-    result = await plugin.resolve_proposal(
-        "proposal-default-legacy",
-        "approve",
+    result = ok_value(
+        await plugin.resolve_proposal(
+            "proposal-default-legacy",
+            "approve",
+        )
     )
     after = await manager.aload_characters()
+    overlay = after["猫娘"][overlay_name]
+    resolved = _resolve_effective_character_prompt(overlay)
+    runtime_prompt = _append_persona_guidance_to_prompt(
+        resolved,
+        overlay,
+    )
 
-    assert error_code(result) == "managed_prompt_composition_unsupported"
-    assert stored_prompt(after["猫娘"][overlay_name]) == prompt_before
-    assert refresh_attempts == 2
+    assert result["applied"] is True
+    assert result["runtime_refresh_mode"] == "compat_reload"
+    assert prompt_storage_mode(overlay) == PROMPT_STORAGE_DYNAMIC_DEFAULT
+    assert stored_prompt(overlay) != prompt_before
+    assert resolved == dynamic_prompt
+    assert runtime_prompt.startswith(
+        f"{dynamic_prompt}\n\nAdditional role guidance: "
+    )
+    assert "回答保持简洁。" in runtime_prompt
+    assert runtime_prompt.count(ADAPTATION_START) == 1
+    assert runtime_prompt.endswith(ADAPTATION_END)
+    assert host.runtime_prompt == runtime_prompt
+    assert refresh_attempts == 0
     assert len(
         [call for call in host.calls if call[1] == "/api/characters/reload"]
     ) == reloads_before + 1
@@ -874,9 +1070,14 @@ async def test_legacy_host_default_prompt_approval_fails_closed_and_compensates(
             for item in plugin._state["proposals"]
             if item["id"] == "proposal-default-legacy"
         )
-    assert binding["managed_prompt_composition_required"] is True
-    assert binding["active_version"] == 0
-    assert proposal["status"] == "pending"
+    assert binding["managed_prompt_composition_required"] is False
+    assert binding["prompt_storage_mode"] == PROMPT_STORAGE_DYNAMIC_DEFAULT
+    assert binding["active_version"] == 1
+    assert proposal["status"] == "approved"
+
+    rolled_back = ok_value(await plugin.rollback_last_change())
+    assert rolled_back["version"] == 0
+    assert host.runtime_prompt == dynamic_prompt
 
 
 @pytest.mark.asyncio
@@ -907,7 +1108,7 @@ async def test_default_prompt_binding_stays_healthy_when_runtime_locale_changes(
 
 
 @pytest.mark.asyncio
-async def test_persona_override_recovery_keeps_managed_composition_gate(
+async def test_persona_overlay_materializes_and_recovers_on_legacy_host(
     tmp_path: Path,
 ) -> None:
     first, shared, manager, host = make_plugin(tmp_path)
@@ -923,16 +1124,25 @@ async def test_persona_override_recovery_keeps_managed_composition_gate(
         ),
     )
     ok_value(await first.startup())
+    original_before = copy.deepcopy(
+        (await manager.aload_characters())["猫娘"]["小白"]
+    )
     started = ok_value(await first.start_adaptation("小白"))
     overlay_name = started["overlay_name"]
     before = await manager.aload_characters()
-    prompt_before = stored_prompt(before["猫娘"][overlay_name])
-    assert (
-        provenance_for(before["猫娘"][overlay_name])[
-            "managed_prompt_composition_required"
-        ]
-        is True
-    )
+    overlay_before = before["猫娘"][overlay_name]
+    prompt_before = stored_prompt(overlay_before)
+    provenance = provenance_for(overlay_before) or {}
+    assert provenance["managed_prompt_composition_required"] is False
+    assert provenance["prompt_storage_mode"] == PROMPT_STORAGE_SYSTEM
+    assert provenance["persona_materialized"] is True
+    assert "persona_override" not in overlay_before["_reserved"]
+    assert overlay_before["性格"] == "元气而温柔"
+    assert before["猫娘"]["小白"] == original_before
+    assert _append_persona_guidance_to_prompt(
+        _resolve_effective_character_prompt(overlay_before),
+        overlay_before,
+    ) == prompt_before
     del shared.data[STATE_KEY]
 
     recovered = AutoPromptHarnessPlugin(FakeContext())
@@ -958,32 +1168,220 @@ async def test_persona_override_recovery_keeps_managed_composition_gate(
     ok_value(await recovered.startup())
     with recovered._state_lock:
         recovered_binding = copy.deepcopy(recovered._state["binding"])
-    assert recovered_binding["managed_prompt_composition_required"] is True
+    assert recovered_binding["managed_prompt_composition_required"] is False
+    assert recovered_binding["prompt_storage_mode"] == PROMPT_STORAGE_SYSTEM
 
     add_proposal(recovered, "proposal-persona-legacy", "回答保持简洁。")
-    result = await recovered.resolve_proposal(
-        "proposal-persona-legacy",
-        "approve",
+    result = ok_value(
+        await recovered.resolve_proposal(
+            "proposal-persona-legacy",
+            "approve",
+        )
     )
     after = await manager.aload_characters()
-
-    assert error_code(result) == "managed_prompt_composition_unsupported"
-    assert stored_prompt(after["猫娘"][overlay_name]) == prompt_before
-    assert len(refresh_payloads) == 2
-    assert refresh_payloads[1]["prompt_fingerprint"] == (
-        recovered_binding["base_prompt_fingerprint"]
+    overlay_after = after["猫娘"][overlay_name]
+    runtime_prompt = _append_persona_guidance_to_prompt(
+        _resolve_effective_character_prompt(overlay_after),
+        overlay_after,
     )
+
+    assert result["applied"] is True
+    assert result["runtime_refresh_mode"] == "compat_reload"
+    assert stored_prompt(overlay_after).startswith(prompt_before)
+    assert runtime_prompt == stored_prompt(overlay_after)
+    assert runtime_prompt.count(ADAPTATION_START) == 1
+    assert runtime_prompt.endswith(ADAPTATION_END)
+    assert after["猫娘"]["小白"] == original_before
+    assert len(refresh_payloads) == 1
     with recovered._state_lock:
         proposal = next(
             item
             for item in recovered._state["proposals"]
             if item["id"] == "proposal-persona-legacy"
         )
-    assert proposal["status"] == "pending"
+    assert proposal["status"] == "approved"
 
 
 @pytest.mark.asyncio
-async def test_binding_cannot_downgrade_provenance_composition_requirement(
+async def test_default_prompt_with_persona_is_materialized_once_on_legacy_host(
+    tmp_path: Path,
+) -> None:
+    plugin, _store, manager, host = make_plugin(tmp_path)
+
+    def configure_persona(value: dict[str, Any]) -> None:
+        reserved = value["猫娘"]["小白"]["_reserved"]
+        reserved.pop("system_prompt", None)
+        reserved["persona_override"] = {
+            "preset_id": "classic_genki",
+            "prompt_guidance": "stale serialized guidance",
+            "profile": {"性格": "元气而温柔"},
+        }
+
+    await mutate_characters(manager, configure_persona)
+    original = copy.deepcopy(
+        (await manager.aload_characters())["猫娘"]["小白"]
+    )
+    expected_base = _append_persona_guidance_to_prompt(
+        _resolve_effective_character_prompt(original),
+        original,
+    )
+    ok_value(await plugin.startup())
+    started = ok_value(await plugin.start_adaptation("小白"))
+    overlay_name = started["overlay_name"]
+    created = await manager.aload_characters()
+    overlay = created["猫娘"][overlay_name]
+
+    assert created["猫娘"]["小白"] == original
+    assert prompt_storage_mode(overlay) == PROMPT_STORAGE_SYSTEM
+    assert "persona_override" not in overlay["_reserved"]
+    assert overlay["性格"] == "元气而温柔"
+    assert stored_prompt(overlay) == expected_base
+    assert _append_persona_guidance_to_prompt(
+        _resolve_effective_character_prompt(overlay),
+        overlay,
+    ) == expected_base
+
+    async def legacy_host(
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None,
+    ) -> tuple[int, dict[str, Any]]:
+        if path == "/api/characters/managed-overlay/refresh-prompt":
+            return 404, {"detail": "Not Found"}
+        return await host(method, path, payload)
+
+    from plugin.plugins.auto_prompt_harness.bindings import CharacterConfigBridge
+
+    plugin._character_bridge = CharacterConfigBridge(
+        manager,
+        request_handler=legacy_host,
+    )
+    add_proposal(plugin, "default-persona", "回答保持简洁。")
+    approved = ok_value(
+        await plugin.resolve_proposal("default-persona", "approve")
+    )
+    final = await manager.aload_characters()
+    final_prompt = stored_prompt(final["猫娘"][overlay_name])
+
+    assert approved["runtime_refresh_mode"] == "compat_reload"
+    assert final_prompt.startswith(expected_base)
+    assert final_prompt.count(expected_base) == 1
+    assert final_prompt.count(ADAPTATION_START) == 1
+    assert final_prompt.endswith(ADAPTATION_END)
+    assert host.runtime_prompt == final_prompt
+    assert final["猫娘"]["小白"] == original
+
+
+@pytest.mark.asyncio
+async def test_package_only_legacy_host_full_binding_lifecycle(
+    tmp_path: Path,
+) -> None:
+    first, shared, manager, host = make_plugin(tmp_path)
+    await mutate_characters(
+        manager,
+        lambda value: value["猫娘"]["小白"]["_reserved"].__setitem__(
+            "persona_override",
+            {
+                "preset_id": "classic_genki",
+                "prompt_guidance": "stale serialized guidance",
+                "profile": {
+                    "性格": "元气但可靠",
+                    "口癖": "只在自然语境偶尔说喵",
+                },
+            },
+        ),
+    )
+    original = copy.deepcopy(
+        (await manager.aload_characters())["猫娘"]["小白"]
+    )
+    managed_calls: list[str] = []
+
+    async def legacy_host(
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None,
+    ) -> tuple[int, dict[str, Any]]:
+        if path.startswith("/api/characters/managed-overlay/"):
+            managed_calls.append(path)
+            return 404, {"detail": "Not Found"}
+        return await host(method, path, payload)
+
+    from plugin.plugins.auto_prompt_harness.bindings import CharacterConfigBridge
+
+    first._character_bridge = CharacterConfigBridge(
+        manager,
+        request_handler=legacy_host,
+    )
+    ok_value(await first.startup())
+    listed = ok_value(await first.list_characters())
+    assert "小白" in {item["name"] for item in listed["characters"]}
+
+    started = ok_value(await first.start_adaptation("小白"))
+    overlay_name = started["overlay_name"]
+    after_start = await manager.aload_characters()
+    overlay = after_start["猫娘"][overlay_name]
+    base_prompt = stored_prompt(overlay)
+    assert after_start["猫娘"]["小白"] == original
+    assert prompt_storage_mode(overlay) == PROMPT_STORAGE_SYSTEM
+    assert "persona_override" not in overlay["_reserved"]
+    assert overlay["性格"] == "元气但可靠"
+    assert overlay["口癖"] == "只在自然语境偶尔说喵"
+    assert base_prompt.count("Additional role guidance:") == 1
+    assert host.runtime_current == overlay_name
+    assert host.runtime_prompt == base_prompt
+
+    add_proposal(first, "legacy-e2e", "回答先给结论，再补充必要细节。")
+    approved = ok_value(
+        await first.resolve_proposal("legacy-e2e", "approve")
+    )
+    after_approve = await manager.aload_characters()
+    approved_overlay = after_approve["猫娘"][overlay_name]
+    approved_prompt = stored_prompt(approved_overlay)
+    assert approved["runtime_refresh_mode"] == "compat_reload"
+    assert host.runtime_prompt == approved_prompt
+    assert approved_prompt.count("Additional role guidance:") == 1
+    assert approved_prompt.count(ADAPTATION_START) == 1
+    assert approved_prompt.endswith(ADAPTATION_END)
+    assert after_approve["猫娘"]["小白"] == original
+
+    rolled_back = ok_value(await first.rollback_last_change())
+    assert rolled_back["version"] == 0
+    assert host.runtime_prompt == base_prompt
+    assert (await manager.aload_characters())["猫娘"]["小白"] == original
+
+    shutdown = ok_value(await first.shutdown())
+    assert shutdown["restored_original"] is True
+    assert (await manager.aload_characters())["当前猫娘"] == "小白"
+
+    second = AutoPromptHarnessPlugin(FakeContext())
+    second.store = FakeStore(shared.data)
+    second._character_bridge = CharacterConfigBridge(
+        manager,
+        request_handler=legacy_host,
+    )
+    ok_value(await second.startup())
+    deleted = ok_value(await second.delete_overlay("DELETE"))
+    final = await manager.aload_characters()
+
+    assert deleted == {"deleted": True, "overlay_name": overlay_name}
+    assert overlay_name not in final["猫娘"]
+    assert final["猫娘"]["小白"] == original
+    assert {
+        "/api/characters/managed-overlay/refresh-prompt",
+        "/api/characters/managed-overlay/restore-original",
+        "/api/characters/managed-overlay/delete",
+    }.issubset(set(managed_calls))
+    persona_source = inspect.getsource(
+        __import__(
+            "utils.config_manager.persona_payload",
+            fromlist=["_resolve_effective_character_prompt"],
+        )
+    )
+    assert "_AUTO_PROMPT_HARNESS_ADAPTATION_START" not in persona_source
+
+
+@pytest.mark.asyncio
+async def test_binding_cannot_change_provenance_prompt_storage_mode(
     tmp_path: Path,
 ) -> None:
     plugin, _store, manager, _host = make_plugin(tmp_path)
@@ -1000,9 +1398,9 @@ async def test_binding_cannot_downgrade_provenance_composition_requirement(
     ok_value(await plugin.startup())
     ok_value(await plugin.start_adaptation("小白"))
     with plugin._state_lock:
-        plugin._state["binding"][
-            "managed_prompt_composition_required"
-        ] = False
+        plugin._state["binding"]["prompt_storage_mode"] = (
+            PROMPT_STORAGE_DYNAMIC_DEFAULT
+        )
 
     panel = ok_value(await plugin.get_panel_state())
 
@@ -1266,6 +1664,50 @@ async def test_external_overlay_changes_fail_closed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutation_kind", "expected_code"),
+    [
+        ("base", "overlay_changed"),
+        ("container", "overlay_changed"),
+        ("guidance", "overlay_prompt_changed"),
+    ],
+)
+async def test_dynamic_default_owned_fields_fail_closed_on_external_change(
+    tmp_path: Path,
+    mutation_kind: str,
+    expected_code: str,
+) -> None:
+    plugin, _store, manager, _host = make_plugin(tmp_path)
+    await mutate_characters(
+        manager,
+        lambda value: value["猫娘"]["小白"]["_reserved"].pop(
+            "system_prompt",
+            None,
+        ),
+    )
+    ok_value(await plugin.startup())
+    started = ok_value(await plugin.start_adaptation("小白"))
+    overlay_name = started["overlay_name"]
+
+    def mutate(value: dict[str, Any]) -> None:
+        reserved = value["猫娘"][overlay_name]["_reserved"]
+        if mutation_kind == "base":
+            reserved["system_prompt"] = "外部写入的自定义基础提示词"
+        elif mutation_kind == "container":
+            reserved["persona_override"]["source"] = "external"
+        else:
+            reserved["persona_override"]["prompt_guidance"] = (
+                "外部非受控 guidance"
+            )
+
+    await mutate_characters(manager, mutate)
+    panel = ok_value(await plugin.get_panel_state())
+
+    assert panel["binding"]["healthy"] is False
+    assert panel["binding"]["conflict_code"] == expected_code
+
+
+@pytest.mark.asyncio
 async def test_manual_delete_restores_then_removes_only_managed_overlay(
     tmp_path: Path,
 ) -> None:
@@ -1312,13 +1754,14 @@ async def test_managed_delete_never_deletes_same_name_replacement(
         "_reserved": {"system_prompt": "绝不能被插件删除。"},
     }
     delete_attempts = 0
+    saves_after_replacement = 0
 
     async def replacing_host(
         method: str,
         path: str,
         payload: Mapping[str, Any] | None,
     ) -> tuple[int, dict[str, Any]]:
-        nonlocal delete_attempts
+        nonlocal delete_attempts, saves_after_replacement
         if path == "/api/characters/managed-overlay/delete":
             delete_attempts += 1
             await mutate_characters(
@@ -1328,6 +1771,8 @@ async def test_managed_delete_never_deletes_same_name_replacement(
                     copy.deepcopy(replacement),
                 ),
             )
+            saves_after_replacement = manager.save_calls
+            return 404, {"detail": "Not Found"}
         return await host(method, path, payload)
 
     from plugin.plugins.auto_prompt_harness.bindings import CharacterConfigBridge
@@ -1339,8 +1784,9 @@ async def test_managed_delete_never_deletes_same_name_replacement(
     result = await plugin.delete_overlay("DELETE")
     after = await manager.aload_characters()
 
-    assert error_code(result) == "MANAGED_OVERLAY_PROVENANCE_MISMATCH"
+    assert error_code(result) == "overlay_provenance_changed"
     assert delete_attempts == 1
+    assert manager.save_calls == saves_after_replacement
     assert after["当前猫娘"] == "小白"
     assert after["猫娘"][overlay_name] == replacement
     assert not any(
@@ -1350,7 +1796,7 @@ async def test_managed_delete_never_deletes_same_name_replacement(
 
 
 @pytest.mark.asyncio
-async def test_legacy_host_delete_fails_closed_without_name_only_fallback(
+async def test_legacy_host_deletes_exact_overlay_without_name_only_route(
     tmp_path: Path,
 ) -> None:
     plugin, _store, manager, host, started = await start_plugin(tmp_path)
@@ -1371,13 +1817,12 @@ async def test_legacy_host_delete_fails_closed_without_name_only_fallback(
         manager,
         request_handler=legacy_host,
     )
-    result = await plugin.delete_overlay("DELETE")
+    result = ok_value(await plugin.delete_overlay("DELETE"))
     after = await manager.aload_characters()
 
-    assert error_code(result) == "managed_overlay_delete_unsupported"
+    assert result == {"deleted": True, "overlay_name": overlay_name}
     assert after["当前猫娘"] == "小白"
-    assert overlay_name in after["猫娘"]
-    assert is_managed_overlay(after["猫娘"][overlay_name])
+    assert overlay_name not in after["猫娘"]
     assert not any(
         path == "/api/characters/catgirl/delete"
         for _, path, _body in host.calls

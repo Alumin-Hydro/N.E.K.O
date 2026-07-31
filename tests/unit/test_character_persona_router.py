@@ -9,55 +9,16 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from config.prompts.prompts_chara import get_lanlan_prompt
 from main_routers.shared_state import init_shared_state
-from utils.config_manager import ConfigManager
-from utils.config_manager.persona_payload import (
-    _append_persona_guidance_to_prompt,
-    _resolve_effective_character_prompt,
-)
-from utils.cloudsave_runtime import MaintenanceModeError, bootstrap_local_cloudsave_environment
 from utils.file_utils import atomic_write_json
-from utils.persona_presets import get_persona_prompt_guidance
+from utils.config_manager import ConfigManager
+from utils.cloudsave_runtime import MaintenanceModeError, bootstrap_local_cloudsave_environment
 
 
 @pytest.fixture(scope="session", autouse=True)
 def mock_memory_server():
     """These unit tests do not need the repo-level mock memory server."""
     yield
-
-
-_AUTO_PROMPT_HARNESS_ADAPTATION_BLOCK = (
-    "<NEKO_AUTO_PROMPT_HARNESS_ADAPTATION>\n"
-    "Approved communication-style adaptations for this character copy only.\n"
-    "- Prefer shorter acknowledgements when the request is straightforward.\n"
-    "</NEKO_AUTO_PROMPT_HARNESS_ADAPTATION>"
-)
-
-
-def _managed_overlay_payload(
-    base_prompt: str,
-    *,
-    persona_override: dict | None = None,
-    provenance: dict | None = None,
-) -> dict:
-    reserved = {
-        "system_prompt": (
-            f"{base_prompt}\n\n{_AUTO_PROMPT_HARNESS_ADAPTATION_BLOCK}"
-        ),
-    }
-    if provenance is None:
-        provenance = {
-            "plugin_id": "auto_prompt_harness",
-            "kind": "adaptive_overlay",
-            "schema_version": 2,
-            "binding_id": "0123456789abcdef01234567",
-        }
-    if provenance:
-        reserved["auto_prompt_harness"] = provenance
-    if persona_override is not None:
-        reserved["persona_override"] = persona_override
-    return {"_reserved": reserved}
 
 
 def _make_config_manager(tmp_root: Path) -> ConfigManager:
@@ -79,177 +40,6 @@ def _make_config_manager(tmp_root: Path) -> ConfigManager:
     config_manager.get_legacy_app_root_candidates = lambda: []
     config_manager.project_memory_dir = tmp_root / "memory" / "store"
     return config_manager
-
-
-@pytest.mark.unit
-def test_managed_overlay_default_prompt_relocalizes_and_keeps_exact_terminal_adaptation(
-    monkeypatch,
-):
-    english_default = get_lanlan_prompt("en")
-    japanese_default = get_lanlan_prompt("ja")
-    payload = _managed_overlay_payload(english_default)
-
-    monkeypatch.setattr(
-        "utils.config_manager.persona_payload.get_lanlan_prompt",
-        lambda: japanese_default,
-    )
-
-    effective_prompt = _resolve_effective_character_prompt(payload)
-
-    assert effective_prompt == (
-        f"{japanese_default}\n\n{_AUTO_PROMPT_HARNESS_ADAPTATION_BLOCK}"
-    )
-    assert "相手から言い出さない限り" in effective_prompt
-
-
-@pytest.mark.unit
-def test_managed_overlay_default_with_preset_replaces_base_without_duplicate_skeleton(
-    monkeypatch,
-):
-    english_default = get_lanlan_prompt("en")
-    japanese_default = get_lanlan_prompt("ja")
-    japanese_guidance = get_persona_prompt_guidance("classic_genki", "ja")
-    payload = _managed_overlay_payload(
-        english_default,
-        persona_override={
-            "preset_id": "classic_genki",
-            "prompt_guidance": "stale persisted guidance",
-        },
-    )
-
-    monkeypatch.setattr(
-        "utils.config_manager.persona_payload.get_lanlan_prompt",
-        lambda: japanese_default,
-    )
-    monkeypatch.setattr(
-        "utils.persona_presets.get_persona_prompt_guidance",
-        lambda preset_id: japanese_guidance,
-    )
-
-    resolved_prompt = _resolve_effective_character_prompt(payload)
-    effective_prompt = _append_persona_guidance_to_prompt(
-        resolved_prompt,
-        payload,
-    )
-
-    assert effective_prompt == (
-        f"{japanese_guidance}\n\n{_AUTO_PROMPT_HARNESS_ADAPTATION_BLOCK}"
-    )
-    assert effective_prompt.count("<Context Awareness>") == 1
-    assert "決まり文句は台詞集" in effective_prompt
-
-
-@pytest.mark.unit
-def test_managed_overlay_custom_prompt_appends_persona_before_terminal_adaptation(
-    monkeypatch,
-):
-    custom_prompt = "You are a reserved fox spirit who speaks softly."
-    dynamic_guidance = "Use warm but energetic phrasing."
-    payload = _managed_overlay_payload(
-        custom_prompt,
-        persona_override={
-            "preset_id": "classic_genki",
-            "prompt_guidance": "stale persisted guidance",
-        },
-    )
-    monkeypatch.setattr(
-        "utils.persona_presets.get_persona_prompt_guidance",
-        lambda preset_id: dynamic_guidance,
-    )
-
-    resolved_prompt = _resolve_effective_character_prompt(payload)
-    effective_prompt = _append_persona_guidance_to_prompt(
-        resolved_prompt,
-        payload,
-    )
-
-    assert effective_prompt == (
-        f"{custom_prompt}\n\n"
-        f"Additional role guidance: {dynamic_guidance}\n\n"
-        f"{_AUTO_PROMPT_HARNESS_ADAPTATION_BLOCK}"
-    )
-
-
-@pytest.mark.unit
-def test_managed_overlay_legacy_persona_block_is_removed_before_adaptation():
-    payload = _managed_overlay_payload(
-        "You are a reserved fox spirit.\n\n"
-        "<NEKO_PERSONA_SELECTION>\n"
-        "- 当前人格名称：旧人格\n"
-        "</NEKO_PERSONA_SELECTION>\n\n"
-        "Always speak softly."
-    )
-
-    effective_prompt = _resolve_effective_character_prompt(payload)
-
-    assert effective_prompt == (
-        "You are a reserved fox spirit.\n\n"
-        "Always speak softly.\n\n"
-        f"{_AUTO_PROMPT_HARNESS_ADAPTATION_BLOCK}"
-    )
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "provenance",
-    [
-        {},
-        {
-            "plugin_id": "another_plugin",
-            "kind": "adaptive_overlay",
-            "schema_version": 2,
-            "binding_id": "0123456789abcdef01234567",
-        },
-        {
-            "plugin_id": "auto_prompt_harness",
-            "kind": "other",
-            "schema_version": 2,
-            "binding_id": "0123456789abcdef01234567",
-        },
-        {
-            "plugin_id": "auto_prompt_harness",
-            "kind": "adaptive_overlay",
-            "schema_version": True,
-            "binding_id": "0123456789abcdef01234567",
-        },
-        {
-            "plugin_id": "auto_prompt_harness",
-            "kind": "adaptive_overlay",
-            "schema_version": 2,
-            "binding_id": "not-a-valid-id",
-        },
-    ],
-)
-def test_adaptation_marker_without_strict_provenance_keeps_legacy_behavior(
-    monkeypatch,
-    provenance,
-):
-    english_default = get_lanlan_prompt("en")
-    dynamic_guidance = "Use live persona guidance."
-    payload = _managed_overlay_payload(
-        english_default,
-        provenance=provenance,
-        persona_override={
-            "preset_id": "classic_genki",
-            "prompt_guidance": "stale persisted guidance",
-        },
-    )
-    stored_prompt = payload["_reserved"]["system_prompt"]
-    monkeypatch.setattr(
-        "utils.persona_presets.get_persona_prompt_guidance",
-        lambda preset_id: dynamic_guidance,
-    )
-
-    resolved_prompt = _resolve_effective_character_prompt(payload)
-    effective_prompt = _append_persona_guidance_to_prompt(
-        resolved_prompt,
-        payload,
-    )
-
-    assert resolved_prompt == stored_prompt
-    assert effective_prompt == (
-        f"{stored_prompt}\n\nAdditional role guidance: {dynamic_guidance}"
-    )
 
 
 class _DummyRequest:

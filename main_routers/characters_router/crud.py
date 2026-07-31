@@ -33,14 +33,11 @@ from .notify import notify_memory_server_reload, release_memory_server_character
 from .voice_registry import _is_current_catgirl_voice_session_starting, _voice_session_starting_response
 
 import json
-import hashlib
 import shutil
 import asyncio
 import copy
 import tempfile
-import re
 from datetime import datetime, timezone
-from dataclasses import dataclass
 from pathlib import Path
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -76,30 +73,6 @@ from utils.cloudsave_runtime import MaintenanceModeError, assert_cloudsave_writa
 
 
 DEFAULT_NEW_CATGIRL_FREE_VOICE_ID = "voice-tone-PGLiyZt65w"
-MANAGED_OVERLAY_PLUGIN_ID = "auto_prompt_harness"
-MANAGED_OVERLAY_KIND = "adaptive_overlay"
-MANAGED_OVERLAY_SCHEMA_VERSION = 2
-_MANAGED_OVERLAY_BINDING_ID_RE = re.compile(r"^[a-f0-9]{16,32}$")
-_MANAGED_OVERLAY_PROMPT_FINGERPRINT_RE = re.compile(r"^[a-f0-9]{64}$")
-_MANAGED_OVERLAY_CARD_FINGERPRINT_RE = re.compile(r"^[a-f0-9]{64}$")
-_current_catgirl_switch_lock = asyncio.Lock()
-
-
-@dataclass(frozen=True)
-class _ManagedOverlayDeleteExpectation:
-    binding_id: str
-    expected_card_fingerprint: str
-
-
-def _managed_overlay_card_fingerprint(card: dict) -> str:
-    canonical = json.dumps(
-        card,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _get_new_catgirl_default_voice_id() -> str:
@@ -266,192 +239,6 @@ async def _refresh_catgirl_context_after_profile_change(
     init_one_catgirl = get_init_one_catgirl()
     await init_one_catgirl(name, is_new=is_new)
     return result
-
-
-def _managed_overlay_refresh_error(code: str, message: str, status_code: int) -> JSONResponse:
-    return JSONResponse(
-        {
-            "success": False,
-            "code": code,
-            "error": message,
-        },
-        status_code=status_code,
-    )
-
-
-@router.post('/managed-overlay/refresh-prompt')
-async def refresh_managed_overlay_prompt(request: Request):
-    """Refresh runtime prompt state only for a verified plugin-owned overlay.
-
-    The plugin persists the prompt through ``ConfigManager`` before calling
-    this endpoint.  This route never writes ``characters.json``: it verifies
-    the fresh stored card and then reuses the existing session/context refresh
-    lifecycle.
-    """
-
-    try:
-        data = await request.json()
-    except Exception:
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_JSON",
-            "请求体必须是合法的 JSON 对象",
-            400,
-        )
-    if not isinstance(data, dict):
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_REQUEST",
-            "请求体必须是 JSON 对象",
-            400,
-        )
-
-    expected_fields = {
-        "character_name",
-        "plugin_id",
-        "binding_id",
-        "prompt_fingerprint",
-    }
-    if set(data) != expected_fields:
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_REQUEST",
-            "请求字段不完整或包含未允许字段",
-            400,
-        )
-
-    plugin_id = data.get("plugin_id")
-    if plugin_id != MANAGED_OVERLAY_PLUGIN_ID:
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_PLUGIN_FORBIDDEN",
-            "该刷新接口仅允许 auto_prompt_harness 使用",
-            403,
-        )
-
-    character_name = data.get("character_name")
-    if (
-        not isinstance(character_name, str)
-        or not character_name
-        or _validate_existing_character_path_name(character_name)
-    ):
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_CHARACTER",
-            "角色名称无效",
-            400,
-        )
-
-    binding_id = data.get("binding_id")
-    if (
-        not isinstance(binding_id, str)
-        or not _MANAGED_OVERLAY_BINDING_ID_RE.fullmatch(binding_id)
-    ):
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_BINDING",
-            "binding_id 格式无效",
-            400,
-        )
-
-    expected_prompt_fingerprint = data.get("prompt_fingerprint")
-    if (
-        not isinstance(expected_prompt_fingerprint, str)
-        or not _MANAGED_OVERLAY_PROMPT_FINGERPRINT_RE.fullmatch(
-            expected_prompt_fingerprint
-        )
-    ):
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_FINGERPRINT",
-            "prompt_fingerprint 格式无效",
-            400,
-        )
-
-    config_manager = get_config_manager()
-    characters = await config_manager.aload_characters()
-    cards = characters.get("猫娘") if isinstance(characters, dict) else None
-    card = cards.get(character_name) if isinstance(cards, dict) else None
-    if not isinstance(card, dict):
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_CHARACTER_NOT_FOUND",
-            "指定的自适应副本不存在",
-            404,
-        )
-
-    provenance = get_reserved(
-        card,
-        "auto_prompt_harness",
-        default=None,
-    )
-    if (
-        not isinstance(provenance, dict)
-        or provenance.get("plugin_id") != MANAGED_OVERLAY_PLUGIN_ID
-        or provenance.get("kind") != MANAGED_OVERLAY_KIND
-        or type(provenance.get("schema_version")) is not int
-        or provenance.get("schema_version") != MANAGED_OVERLAY_SCHEMA_VERSION
-        or provenance.get("binding_id") != binding_id
-    ):
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_PROVENANCE_MISMATCH",
-            "角色卡不是该绑定拥有的自适应副本",
-            409,
-        )
-
-    prompt = get_reserved(
-        card,
-        "system_prompt",
-        default=None,
-        legacy_keys=("system_prompt",),
-    )
-    if not isinstance(prompt, str):
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_PROMPT_MISSING",
-            "自适应副本缺少明确的 system_prompt",
-            409,
-        )
-    actual_prompt_fingerprint = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-    if actual_prompt_fingerprint != expected_prompt_fingerprint:
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_PROMPT_MISMATCH",
-            "system_prompt 已变化，拒绝刷新过期版本",
-            409,
-        )
-
-    try:
-        refresh_result = await _refresh_catgirl_context_after_profile_change(
-            config_manager,
-            character_name,
-            characters,
-            reload_message="自适应角色提示词已更新，页面即将刷新",
-        )
-    except MaintenanceModeError:
-        raise
-    except Exception as exc:
-        logger.exception(
-            "刷新自适应副本运行态失败: name=%s error=%s",
-            character_name,
-            exc,
-        )
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_CONTEXT_REFRESH_FAILED",
-            "自适应副本已校验，但运行态刷新失败",
-            500,
-        )
-
-    if not isinstance(refresh_result, dict) or refresh_result.get("success") is False:
-        message = (
-            refresh_result.get("error")
-            if isinstance(refresh_result, dict)
-            and isinstance(refresh_result.get("error"), str)
-            else "自适应副本已校验，但运行态刷新未完成"
-        )
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_CONTEXT_REFRESH_FAILED",
-            message,
-            500,
-        )
-
-    return {
-        **refresh_result,
-        "success": True,
-        "character_name": character_name,
-        "binding_id": binding_id,
-        "prompt_fingerprint": actual_prompt_fingerprint,
-    }
 
 
 def _filter_mutable_catgirl_fields(data: dict) -> dict:
@@ -930,298 +717,6 @@ async def rename_catgirl(old_name: str, request: Request):
     return result
 
 
-async def _apply_current_catgirl_switch_side_effects(
-    old_catgirl: str,
-    catgirl_name: str,
-    session_manager,
-) -> None:
-    """Apply runtime side effects after the current-card write is committed."""
-
-    switch_current_catgirl_fast = get_switch_current_catgirl_fast()
-    await switch_current_catgirl_fast()
-
-    if old_catgirl != catgirl_name:
-        await force_disable_agent_for_character_switch(catgirl_name, old_catgirl)
-
-    if old_catgirl and old_catgirl != catgirl_name:
-        try:
-            from main_routers.game_router import finalize_game_routes_for_character
-
-            finalized = await finalize_game_routes_for_character(old_catgirl)
-            if finalized:
-                logger.info(
-                    "角色切换：已收尾 %d 个旧角色 %s 的游戏路由",
-                    finalized,
-                    old_catgirl,
-                )
-        except Exception as exc:
-            logger.warning("角色切换游戏路由收尾失败: lanlan=%s err=%s", old_catgirl, exc)
-
-    logger.info(f"开始通知WebSocket客户端：猫娘从 {old_catgirl} 切换到 {catgirl_name}")
-    message = json.dumps({
-        "type": "catgirl_switched",
-        "new_catgirl": catgirl_name,
-        "old_catgirl": old_catgirl
-    })
-    snapshot = list(session_manager.items())
-    for lanlan_name, mgr in snapshot:
-        logger.info(f"检查 {lanlan_name} 的WebSocket: websocket存在={mgr.websocket is not None}")
-
-    async def _notify_one(lanlan_name, mgr):
-        ws = mgr.websocket
-        if not ws:
-            return False
-        try:
-            await ws.send_text(message)
-            logger.info(f"✅ 已通过WebSocket通知 {lanlan_name} 的连接：猫娘已从 {old_catgirl} 切换到 {catgirl_name}")
-            return True
-        except Exception as exc:
-            logger.warning(f"❌ 通知 {lanlan_name} 的连接失败: {exc}")
-            if mgr.websocket == ws:
-                mgr.websocket = None
-            return False
-
-    notify_results = await asyncio.gather(
-        *(_notify_one(name, mgr) for name, mgr in snapshot),
-        return_exceptions=True,
-    )
-    notification_count = sum(1 for result in notify_results if result is True)
-    if notification_count > 0:
-        logger.info(f"✅ 已通过WebSocket通知 {notification_count} 个连接的客户端：猫娘已从 {old_catgirl} 切换到 {catgirl_name}")
-    else:
-        logger.warning("⚠️ 没有找到任何活跃的WebSocket连接来通知猫娘切换")
-        logger.warning("提示：请确保前端页面已打开并建立了WebSocket连接，且已调用start_session")
-
-
-@router.post('/managed-overlay/restore-original')
-async def restore_managed_overlay_original(request: Request):
-    """Atomically restore a verified overlay without overriding user choice."""
-
-    try:
-        data = await request.json()
-    except Exception:
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_JSON",
-            "请求体必须是合法的 JSON 对象",
-            400,
-        )
-    if not isinstance(data, dict):
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_REQUEST",
-            "请求体必须是 JSON 对象",
-            400,
-        )
-
-    expected_fields = {
-        "plugin_id",
-        "binding_id",
-        "overlay_name",
-        "original_name",
-    }
-    if set(data) != expected_fields:
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_REQUEST",
-            "请求字段不完整或包含未允许字段",
-            400,
-        )
-    if data.get("plugin_id") != MANAGED_OVERLAY_PLUGIN_ID:
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_PLUGIN_FORBIDDEN",
-            "该恢复接口仅允许 auto_prompt_harness 使用",
-            403,
-        )
-
-    binding_id = data.get("binding_id")
-    if (
-        not isinstance(binding_id, str)
-        or not _MANAGED_OVERLAY_BINDING_ID_RE.fullmatch(binding_id)
-    ):
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_BINDING",
-            "binding_id 格式无效",
-            400,
-        )
-
-    overlay_name = data.get("overlay_name")
-    original_name = data.get("original_name")
-    if (
-        not isinstance(overlay_name, str)
-        or not overlay_name
-        or _validate_existing_character_path_name(overlay_name)
-        or not isinstance(original_name, str)
-        or not original_name
-        or _validate_existing_character_path_name(original_name)
-        or overlay_name == original_name
-    ):
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_CHARACTER",
-            "原角色或自适应副本名称无效",
-            400,
-        )
-
-    config_manager = get_config_manager()
-    session_manager = get_session_manager()
-    async with _current_catgirl_switch_lock:
-        characters = await config_manager.aload_characters()
-        cards = characters.get("猫娘") if isinstance(characters, dict) else None
-        overlay = cards.get(overlay_name) if isinstance(cards, dict) else None
-        if not isinstance(overlay, dict):
-            return _managed_overlay_refresh_error(
-                "MANAGED_OVERLAY_CHARACTER_NOT_FOUND",
-                "指定的自适应副本不存在",
-                404,
-            )
-
-        provenance = get_reserved(
-            overlay,
-            "auto_prompt_harness",
-            default=None,
-        )
-        if (
-            not isinstance(provenance, dict)
-            or provenance.get("plugin_id") != MANAGED_OVERLAY_PLUGIN_ID
-            or provenance.get("kind") != MANAGED_OVERLAY_KIND
-            or type(provenance.get("schema_version")) is not int
-            or provenance.get("schema_version") != MANAGED_OVERLAY_SCHEMA_VERSION
-            or provenance.get("binding_id") != binding_id
-            or provenance.get("original_name") != original_name
-        ):
-            return _managed_overlay_refresh_error(
-                "MANAGED_OVERLAY_PROVENANCE_MISMATCH",
-                "角色卡不是该绑定拥有的自适应副本",
-                409,
-            )
-
-        original = cards.get(original_name) if isinstance(cards, dict) else None
-        if not isinstance(original, dict):
-            return _managed_overlay_refresh_error(
-                "MANAGED_OVERLAY_ORIGINAL_NOT_FOUND",
-                "绑定的原角色不存在，未执行切换",
-                409,
-            )
-
-        current_catgirl = characters.get("当前猫娘", "")
-        if current_catgirl != overlay_name:
-            return {
-                "success": True,
-                "switched": False,
-                "preserved_user_choice": bool(
-                    current_catgirl
-                    and current_catgirl not in {original_name, overlay_name}
-                ),
-                "current_catgirl": current_catgirl,
-                "original_name": original_name,
-                "overlay_name": overlay_name,
-            }
-
-        characters["当前猫娘"] = original_name
-        await config_manager.asave_characters(characters)
-        await _apply_current_catgirl_switch_side_effects(
-            overlay_name,
-            original_name,
-            session_manager,
-        )
-    return {
-        "success": True,
-        "switched": True,
-        "preserved_user_choice": False,
-        "current_catgirl": original_name,
-        "original_name": original_name,
-        "overlay_name": overlay_name,
-    }
-
-
-@router.post('/managed-overlay/delete')
-async def delete_managed_overlay(request: Request):
-    """Conditionally delete one exact plugin-owned overlay.
-
-    Authorization is revalidated inside the host deletion transaction against
-    the same fresh character snapshot used by the destructive operation.  This
-    prevents a plugin-side name check from authorizing deletion of a different
-    card that later appears under the same name.
-    """
-
-    try:
-        data = await request.json()
-    except Exception:
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_JSON",
-            "请求体必须是合法的 JSON 对象",
-            400,
-        )
-    if not isinstance(data, dict):
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_REQUEST",
-            "请求体必须是 JSON 对象",
-            400,
-        )
-
-    expected_fields = {
-        "plugin_id",
-        "binding_id",
-        "overlay_name",
-        "expected_card_fingerprint",
-    }
-    if set(data) != expected_fields:
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_REQUEST",
-            "请求字段不完整或包含未允许字段",
-            400,
-        )
-    if data.get("plugin_id") != MANAGED_OVERLAY_PLUGIN_ID:
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_PLUGIN",
-            "该删除接口仅允许 auto_prompt_harness 使用",
-            400,
-        )
-
-    binding_id = data.get("binding_id")
-    if (
-        not isinstance(binding_id, str)
-        or not _MANAGED_OVERLAY_BINDING_ID_RE.fullmatch(binding_id)
-    ):
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_BINDING",
-            "binding_id 格式无效",
-            400,
-        )
-
-    overlay_name = data.get("overlay_name")
-    if (
-        not isinstance(overlay_name, str)
-        or not overlay_name
-        or _validate_existing_character_path_name(overlay_name)
-    ):
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_CHARACTER",
-            "自适应副本名称无效",
-            400,
-        )
-
-    expected_card_fingerprint = data.get("expected_card_fingerprint")
-    if (
-        not isinstance(expected_card_fingerprint, str)
-        or not _MANAGED_OVERLAY_CARD_FINGERPRINT_RE.fullmatch(
-            expected_card_fingerprint
-        )
-    ):
-        return _managed_overlay_refresh_error(
-            "MANAGED_OVERLAY_INVALID_FINGERPRINT",
-            "expected_card_fingerprint 格式无效",
-            400,
-        )
-
-    expectation = _ManagedOverlayDeleteExpectation(
-        binding_id=binding_id,
-        expected_card_fingerprint=expected_card_fingerprint,
-    )
-    async with _current_catgirl_switch_lock:
-        return await _delete_catgirl_by_name(
-            overlay_name,
-            managed_expectation=expectation,
-        )
-
-
 @router.get('/current_catgirl')
 async def get_current_catgirl():
     """Get the name of the currently active catgirl."""
@@ -1244,33 +739,101 @@ async def set_current_catgirl(request: Request):
 
     _config_manager = get_config_manager()
     session_manager = get_session_manager()
-    async with _current_catgirl_switch_lock:
-        characters = await _config_manager.aload_characters()
-        if catgirl_name not in characters.get('猫娘', {}):
-            return JSONResponse({'success': False, 'error': '指定的猫娘不存在'}, status_code=404)
+    characters = await _config_manager.aload_characters()
+    if catgirl_name not in characters.get('猫娘', {}):
+        return JSONResponse({'success': False, 'error': '指定的猫娘不存在'}, status_code=404)
 
-        old_catgirl = characters.get('当前猫娘', '')
+    old_catgirl = characters.get('当前猫娘', '')
 
-        # 检查当前角色是否有活跃的语音session
-        if old_catgirl and old_catgirl in session_manager:
-            mgr = session_manager[old_catgirl]
-            if mgr.is_active:
-                # 检查是否是语音模式（通过session类型判断）
-                from main_logic.omni_realtime_client import OmniRealtimeClient
-                is_voice_mode = mgr.session and isinstance(mgr.session, OmniRealtimeClient)
+    # 检查当前角色是否有活跃的语音session
+    if old_catgirl and old_catgirl in session_manager:
+        mgr = session_manager[old_catgirl]
+        if mgr.is_active:
+            # 检查是否是语音模式（通过session类型判断）
+            from main_logic.omni_realtime_client import OmniRealtimeClient
+            is_voice_mode = mgr.session and isinstance(mgr.session, OmniRealtimeClient)
 
-                if is_voice_mode:
-                    return JSONResponse({
-                        'success': False,
-                        'error': '语音状态下无法切换角色，请先停止语音对话后再切换'
-                    }, status_code=400)
-        characters['当前猫娘'] = catgirl_name
-        await _config_manager.asave_characters(characters)
-        await _apply_current_catgirl_switch_side_effects(
-            old_catgirl,
-            catgirl_name,
-            session_manager,
-        )
+            if is_voice_mode:
+                return JSONResponse({
+                    'success': False,
+                    'error': '语音状态下无法切换角色，请先停止语音对话后再切换'
+                }, status_code=400)
+    characters['当前猫娘'] = catgirl_name
+    await _config_manager.asave_characters(characters)
+    # Fast path：切换只改变 `当前猫娘` 字段，per-k 的 prompt / voice_id / thread 都不变，
+    # 只需刷新 globals 即可。N=20 只猫娘时从 O(N) 降到 O(1)。
+    switch_current_catgirl_fast = get_switch_current_catgirl_fast()
+    await switch_current_catgirl_fast()
+
+    # 角色卡切换会复用同一个前端猫爪面板和工具服务全局状态。
+    # 这里先把旧状态归零，避免新角色刷新后继承上一张卡的开关状态。
+    if old_catgirl != catgirl_name:
+        await force_disable_agent_for_character_switch(catgirl_name, old_catgirl)
+
+    # B8: if the previous character had an active game route, finalize it
+    # immediately. Otherwise the heartbeat-based timeout (10-60s) would
+    # leave a stale ``OmniOfflineClient`` consuming game events under the
+    # outgoing character's name and keep the SessionManager takeover
+    # muting the incoming character's ordinary chat output.
+    if old_catgirl and old_catgirl != catgirl_name:
+        try:
+            from main_routers.game_router import finalize_game_routes_for_character
+            finalized = await finalize_game_routes_for_character(old_catgirl)
+            if finalized:
+                logger.info(
+                    "角色切换：已收尾 %d 个旧角色 %s 的游戏路由",
+                    finalized,
+                    old_catgirl,
+                )
+        except Exception as exc:
+            # Swallow — character switch must not fail because of
+            # game-route cleanup; the heartbeat sweep will eventually
+            # clean up if this hook misses.
+            logger.warning("角色切换游戏路由收尾失败: lanlan=%s err=%s", old_catgirl, exc)
+
+    # 通过WebSocket通知所有连接的客户端
+    # 使用session_manager中的websocket，但需要确保websocket已设置
+    notification_count = 0
+    logger.info(f"开始通知WebSocket客户端：猫娘从 {old_catgirl} 切换到 {catgirl_name}")
+
+    message = json.dumps({
+        "type": "catgirl_switched",
+        "new_catgirl": catgirl_name,
+        "old_catgirl": old_catgirl
+    })
+
+    # 并行通知所有 session_manager —— 每个 send_text 独立，per-mgr 失败时只清自己的 ws，
+    # 串行版本里一个慢/卡的 ws 会拖累后面的通知。
+    snapshot = list(session_manager.items())
+    for lanlan_name, mgr in snapshot:
+        logger.info(f"检查 {lanlan_name} 的WebSocket: websocket存在={mgr.websocket is not None}")
+
+    async def _notify_one(lanlan_name, mgr):
+        ws = mgr.websocket
+        if not ws:
+            return False
+        try:
+            await ws.send_text(message)
+            logger.info(f"✅ 已通过WebSocket通知 {lanlan_name} 的连接：猫娘已从 {old_catgirl} 切换到 {catgirl_name}")
+            return True
+        except Exception as e:
+            logger.warning(f"❌ 通知 {lanlan_name} 的连接失败: {e}")
+            # 如果发送失败，可能是连接已断开，清空websocket引用
+            if mgr.websocket == ws:
+                mgr.websocket = None
+            return False
+
+    _notify_results = await asyncio.gather(
+        *(_notify_one(n, m) for n, m in snapshot),
+        return_exceptions=True,
+    )
+    notification_count = sum(1 for r in _notify_results if r is True)
+
+    if notification_count > 0:
+        logger.info(f"✅ 已通过WebSocket通知 {notification_count} 个连接的客户端：猫娘已从 {old_catgirl} 切换到 {catgirl_name}")
+    else:
+        logger.warning("⚠️ 没有找到任何活跃的WebSocket连接来通知猫娘切换")
+        logger.warning("提示：请确保前端页面已打开并建立了WebSocket连接，且已调用start_session")
 
     return {"success": True}
 
@@ -1636,62 +1199,10 @@ async def delete_catgirl(name: str):
     return await _delete_catgirl_by_name(name)
 
 
-async def _delete_catgirl_by_name(
-    name: str,
-    *,
-    managed_expectation: _ManagedOverlayDeleteExpectation | None = None,
-):
+async def _delete_catgirl_by_name(name: str):
     _config_manager = get_config_manager()
     characters = await _config_manager.aload_characters()
-    cards = characters.get('猫娘', {})
-    candidate = cards.get(name) if isinstance(cards, dict) else None
-
-    if managed_expectation is not None:
-        provenance = (
-            get_reserved(
-                candidate,
-                "auto_prompt_harness",
-                default=None,
-            )
-            if isinstance(candidate, dict)
-            else None
-        )
-        if (
-            not isinstance(provenance, dict)
-            or provenance.get("plugin_id") != MANAGED_OVERLAY_PLUGIN_ID
-            or provenance.get("kind") != MANAGED_OVERLAY_KIND
-            or type(provenance.get("schema_version")) is not int
-            or provenance.get("schema_version")
-            != MANAGED_OVERLAY_SCHEMA_VERSION
-            or provenance.get("binding_id")
-            != managed_expectation.binding_id
-        ):
-            return _managed_overlay_refresh_error(
-                "MANAGED_OVERLAY_PROVENANCE_MISMATCH",
-                "角色卡不是该绑定拥有的自适应副本",
-                409,
-            )
-        try:
-            actual_card_fingerprint = _managed_overlay_card_fingerprint(candidate)
-        except (TypeError, ValueError):
-            actual_card_fingerprint = ""
-        if (
-            actual_card_fingerprint
-            != managed_expectation.expected_card_fingerprint
-        ):
-            return _managed_overlay_refresh_error(
-                "MANAGED_OVERLAY_CARD_MISMATCH",
-                "角色卡内容已变化，拒绝删除过期版本",
-                409,
-            )
-        if name == characters.get('当前猫娘', ''):
-            return _managed_overlay_refresh_error(
-                "MANAGED_OVERLAY_CURRENT_CHARACTER",
-                "自适应副本当前正在使用，未执行删除",
-                409,
-            )
-
-    if name not in cards:
+    if name not in characters.get('猫娘', {}):
         return JSONResponse({'success': False, 'error': '猫娘不存在'}, status_code=404)
 
     # 检查是否是当前正在使用的猫娘

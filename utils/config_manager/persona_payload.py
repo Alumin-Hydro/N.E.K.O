@@ -33,13 +33,6 @@ from .reserved_schema import get_reserved, set_reserved
 
 DEFAULT_YUI_LIVE2D_MODEL_PATH = "yui-origin/yui-origin.model3.json"
 
-_AUTO_PROMPT_HARNESS_PLUGIN_ID = "auto_prompt_harness"
-_AUTO_PROMPT_HARNESS_PROVENANCE_KIND = "adaptive_overlay"
-_AUTO_PROMPT_HARNESS_SCHEMA_VERSION = 2
-_AUTO_PROMPT_HARNESS_ADAPTATION_START = "<NEKO_AUTO_PROMPT_HARNESS_ADAPTATION>"
-_AUTO_PROMPT_HARNESS_ADAPTATION_END = "</NEKO_AUTO_PROMPT_HARNESS_ADAPTATION>"
-_AUTO_PROMPT_HARNESS_BINDING_ID_RE = re.compile(r"^[a-f0-9]{16,32}$")
-
 
 def _normalize_live2d_model_path(value) -> str:
     model_path = str(value or "").strip().replace("\\", "/").lower()
@@ -196,72 +189,6 @@ def _get_persona_override(character_payload: dict) -> dict | None:
     return override
 
 
-def _has_auto_prompt_harness_provenance(character_payload: dict) -> bool:
-    """Return whether a card has the plugin's strict managed-overlay marker."""
-    if not isinstance(character_payload, dict):
-        return False
-
-    reserved = character_payload.get("_reserved")
-    if not isinstance(reserved, dict):
-        return False
-
-    provenance = reserved.get(_AUTO_PROMPT_HARNESS_PLUGIN_ID)
-    if not isinstance(provenance, dict):
-        return False
-
-    binding_id = provenance.get("binding_id")
-    return bool(
-        provenance.get("plugin_id") == _AUTO_PROMPT_HARNESS_PLUGIN_ID
-        and provenance.get("kind") == _AUTO_PROMPT_HARNESS_PROVENANCE_KIND
-        and type(provenance.get("schema_version")) is int
-        and provenance.get("schema_version") == _AUTO_PROMPT_HARNESS_SCHEMA_VERSION
-        and isinstance(binding_id, str)
-        and _AUTO_PROMPT_HARNESS_BINDING_ID_RE.fullmatch(binding_id)
-    )
-
-
-def _split_auto_prompt_harness_adaptation(
-    prompt_text: object,
-    character_payload: dict,
-) -> tuple[object, str | None]:
-    """Split a terminal managed block only from a provenance-marked overlay.
-
-    The plugin writes exactly two newlines between the immutable base prompt
-    and its managed block. Requiring that separator, a terminal closing marker,
-    and strict provenance prevents ordinary character prompts that happen to
-    contain the marker text from gaining special semantics.
-    """
-    if not isinstance(prompt_text, str) or not _has_auto_prompt_harness_provenance(
-        character_payload
-    ):
-        return prompt_text, None
-
-    start = prompt_text.rfind(_AUTO_PROMPT_HARNESS_ADAPTATION_START)
-    if start < 0:
-        return prompt_text, None
-    end = prompt_text.find(_AUTO_PROMPT_HARNESS_ADAPTATION_END, start)
-    if end < start:
-        return prompt_text, None
-
-    block_end = end + len(_AUTO_PROMPT_HARNESS_ADAPTATION_END)
-    if prompt_text[block_end:].strip():
-        return prompt_text, None
-
-    prefix = prompt_text[:start]
-    if not prefix.endswith("\n\n"):
-        return prompt_text, None
-    return prefix[:-2], prompt_text[start:]
-
-
-def _reattach_auto_prompt_harness_adaptation(
-    prompt_text: str,
-    adaptation_block: str | None,
-) -> str:
-    if adaptation_block is None:
-        return prompt_text
-    return f"{prompt_text}\n\n{adaptation_block}"
-
-
 def _build_effective_character_payload(character_payload: dict, entity: str = "neko") -> dict:
     if not isinstance(character_payload, dict):
         return {}
@@ -290,18 +217,9 @@ def _build_effective_character_payload(character_payload: dict, entity: str = "n
 
 
 def _append_persona_guidance_to_prompt(prompt_text: str, character_payload: dict) -> str:
-    base_prompt, adaptation_block = _split_auto_prompt_harness_adaptation(
-        prompt_text,
-        character_payload,
-    )
-    prompt_text = str(base_prompt)
-
     override = _get_persona_override(character_payload)
     if not isinstance(override, dict):
-        return _reattach_auto_prompt_harness_adaptation(
-            prompt_text,
-            adaptation_block,
-        )
+        return prompt_text
 
     guidance = ""
     from_preset = False
@@ -320,10 +238,7 @@ def _append_persona_guidance_to_prompt(prompt_text: str, character_payload: dict
         guidance = str(override.get("prompt_guidance") or "").strip()
 
     if not guidance:
-        return _reattach_auto_prompt_harness_adaptation(
-            prompt_text,
-            adaptation_block,
-        )
+        return prompt_text
 
     # preset 的 guidance 是一份**完整独立**的人设 prompt，骨架（fictional-character
     # 前言 + <Context Awareness> + <WARNING> + <IMPORTANT>）与默认 base 逐字相同。
@@ -332,14 +247,9 @@ def _append_persona_guidance_to_prompt(prompt_text: str, character_payload: dict
     # 当 base 仍是默认 prompt 时，preset 本身就是完整人设 → 用它替换 base，避免重复；
     # 仅当用户写过自定义 system_prompt（非默认）时才退回 append 以保留其自定义内容。
     if from_preset and is_default_prompt(prompt_text):
-        effective_prompt = guidance
-    else:
-        effective_prompt = f"{prompt_text}\n\nAdditional role guidance: {guidance}"
+        return guidance
 
-    return _reattach_auto_prompt_harness_adaptation(
-        effective_prompt,
-        adaptation_block,
-    )
+    return f"{prompt_text}\n\nAdditional role guidance: {guidance}"
 
 
 _AI_CONTEXT_RENAME_EVENT_FIELD = "__ai_context.profile_rename_events"
@@ -459,22 +369,13 @@ def _resolve_effective_character_prompt(character_payload: dict) -> str:
         default=None,
         legacy_keys=("system_prompt",),
     )
-    base_prompt, adaptation_block = _split_auto_prompt_harness_adaptation(
-        stored_prompt,
-        character_payload,
-    )
-    if base_prompt is None or is_default_prompt(base_prompt):
-        effective_prompt = get_lanlan_prompt()
+    if stored_prompt is None or is_default_prompt(stored_prompt):
+        return get_lanlan_prompt()
 
     # 旧版人格功能会把整段模板化人格 prompt 直接写进 system_prompt。
     # 不论当前是否仍保留 persona_override，这类历史片段都不应继续直接喂给模型。
-    elif _has_generated_persona_selection_prompt(base_prompt):
-        cleaned_prompt = strip_generated_persona_selection_prompt(base_prompt)
-        effective_prompt = cleaned_prompt or get_lanlan_prompt()
-    else:
-        effective_prompt = str(base_prompt)
+    if _has_generated_persona_selection_prompt(stored_prompt):
+        cleaned_prompt = strip_generated_persona_selection_prompt(stored_prompt)
+        return cleaned_prompt or get_lanlan_prompt()
 
-    return _reattach_auto_prompt_harness_adaptation(
-        effective_prompt,
-        adaptation_block,
-    )
+    return stored_prompt

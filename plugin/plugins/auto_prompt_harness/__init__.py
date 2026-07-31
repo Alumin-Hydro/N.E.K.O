@@ -30,7 +30,6 @@ from plugin.sdk.plugin import (
 )
 
 from .bindings import (
-    ADAPTATION_START,
     DEFAULT_SETTINGS,
     LEGACY_STATE_KEY,
     MAX_ACTIVE_ADAPTATIONS,
@@ -39,6 +38,7 @@ from .bindings import (
     MAX_PROPOSALS,
     MAX_VERSIONS,
     PLUGIN_ID,
+    PROMPT_STORAGE_DYNAMIC_DEFAULT,
     STATE_KEY,
     CharacterConfigBridge,
     CharacterOperationError,
@@ -755,6 +755,7 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
                             restore_result = (
                                 await self._bridge().restore_original_if_overlay(
                                     binding=binding,
+                                    allow_runtime_unavailable=True,
                                 )
                             )
                             restored = restore_result["switched"]
@@ -1139,12 +1140,9 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
                 overlay_name=overlay_name,
                 binding_id=str(binding["binding_id"]),
                 prompt_fingerprint=text_fingerprint(restore_prompt),
-                allow_compat_fallback=bool(
-                    not binding.get(
-                        "managed_prompt_composition_required",
-                        True,
-                    )
-                    or ADAPTATION_START not in restore_prompt
+                prefer_managed_route=(
+                    binding.get("prompt_storage_mode")
+                    != PROMPT_STORAGE_DYNAMIC_DEFAULT
                 ),
             )
             return True
@@ -1221,11 +1219,9 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
                 overlay_name=overlay_name,
                 binding_id=str(binding["binding_id"]),
                 prompt_fingerprint=text_fingerprint(new_prompt),
-                allow_compat_fallback=not bool(
-                    binding.get(
-                        "managed_prompt_composition_required",
-                        True,
-                    )
+                prefer_managed_route=(
+                    binding.get("prompt_storage_mode")
+                    != PROMPT_STORAGE_DYNAMIC_DEFAULT
                 ),
             )
         except Exception as exc:
@@ -1713,6 +1709,9 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
             await self._bridge().delete_character(
                 name=overlay_name,
                 binding_id=binding_id,
+                expected_provenance_fingerprint=provenance_fingerprint(
+                    candidate
+                ),
                 expected_card_fingerprint=expected_card_fingerprint,
             )
             return True
@@ -2018,7 +2017,7 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
     @plugin_entry(
         id="delete_overlay",
         name="删除自适应副本",
-        description="先安全恢复，再通过宿主删除副本、记忆目录和云存档墓碑。",
+        description="先安全恢复，再按来源标记与完整卡片指纹精确删除副本。",
         input_schema=DELETE_OVERLAY_SCHEMA,
         timeout=30.0,
     )
@@ -2074,6 +2073,9 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
             await self._bridge().delete_character(
                 name=overlay,
                 binding_id=str(binding["binding_id"]),
+                expected_provenance_fingerprint=str(
+                    binding.get("provenance_fingerprint") or ""
+                ),
                 expected_card_fingerprint=card_fingerprint(candidate),
             )
             checkpoint = self._checkpoint()
@@ -2142,6 +2144,9 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
             await self._bridge().delete_character(
                 name=overlay_name,
                 binding_id=str(provenance.get("binding_id") or ""),
+                expected_provenance_fingerprint=provenance_fingerprint(
+                    candidate
+                ),
                 expected_card_fingerprint=card_fingerprint(candidate),
             )
             await self._reconcile_locked()
