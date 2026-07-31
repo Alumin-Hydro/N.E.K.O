@@ -26,6 +26,8 @@ from plugin.plugins.vibe_coding_connector.managed_runtime import (
 
 pytestmark = pytest.mark.plugin_unit
 
+PLUGIN_DIR = Path(__file__).resolve().parents[3] / "plugins" / "vibe_coding_connector"
+
 _FAKE_HAPI = r"""#!/usr/bin/env python3
 import http.server
 import json
@@ -72,19 +74,19 @@ if role == "runner":
         for index, value in enumerate(args[:-1])
         if value == "--workspace-root"
     ]
-    ready_file.write_text(json.dumps({
-        "pid": os.getpid(),
-        "roots": roots,
-    }), encoding="utf-8")
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        start_new_session=(os.name != "nt"),
     )
     with Path(os.environ["FAKE_CHILD_PIDS"]).open("a", encoding="ascii") as handle:
         handle.write(str(child.pid) + "\n")
+    ready_file.write_text(json.dumps({
+        "pid": os.getpid(),
+        "roots": roots,
+    }), encoding="utf-8")
     while not stop.wait(0.05):
         pass
     try:
@@ -175,6 +177,40 @@ server.server_close()
 """
 
 
+class _WindowsPythonFakeHapiRuntime(ManagedHapiRuntime):
+    """Adapt only the fake script to an explicit interpreter on Windows.
+
+    CreateProcess cannot execute a shebang-only file. Keeping Python as the
+    tracked executable lets the production spawn, Job Object, identity, and
+    ownership-marker paths run unchanged.
+    """
+
+    _fake_hapi_script: Path | None = None
+
+    def _prepare_locked(self) -> Path:
+        fake_hapi_script = super()._prepare_locked()
+        self._fake_hapi_script = fake_hapi_script
+        self._executable = Path(sys.executable).resolve()
+        return self._executable
+
+    def _expected_argv(
+        self,
+        role: str,
+        *,
+        port: int,
+        workspace_roots: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        fake_hapi_script = self._fake_hapi_script
+        if fake_hapi_script is None:
+            raise AssertionError("fake HAPI must be prepared before argv construction")
+        base = super()._expected_argv(
+            role,
+            port=port,
+            workspace_roots=workspace_roots,
+        )
+        return (base[0], str(fake_hapi_script), *base[1:])
+
+
 class _Fixture:
     def __init__(self, root: Path, *, corrupt_checksum: bool = False) -> None:
         self.bundle_root = root / "bundle"
@@ -235,7 +271,12 @@ class _Fixture:
         roots = workspace_roots
         if roots is None:
             roots = (str(self.workspace.resolve()),)
-        return ManagedHapiRuntime(
+        runtime_type = (
+            _WindowsPythonFakeHapiRuntime
+            if os.name == "nt"
+            else ManagedHapiRuntime
+        )
+        return runtime_type(
             bundle_root=self.bundle_root,
             data_root=self.data_root,
             config=ManagedHapiConfig(
@@ -593,6 +634,59 @@ def test_runtime_rejects_checksum_mismatch_before_execution(tmp_path: Path) -> N
         runtime.start()
     assert caught.value.code == "checksum_mismatch"
     assert not fixture.argv_log.exists()
+
+
+def test_bundled_windows_runtime_uses_absolute_hapi_exe_and_exact_argv(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = ManagedHapiRuntime(
+        bundle_root=PLUGIN_DIR / "runtime",
+        data_root=tmp_path / "data",
+        config=ManagedHapiConfig(
+            preferred_port=3006,
+            workspace_roots=(str(workspace.resolve()),),
+        ),
+        platform_key="win32-x64",
+    )
+
+    executable = runtime.prepare()
+
+    assert executable.is_absolute()
+    assert executable.name == "hapi.exe"
+    assert executable == (
+        tmp_path
+        / "data"
+        / "versions"
+        / "0.25.1"
+        / "win32-x64"
+        / "hapi.exe"
+    ).resolve()
+    assert runtime._expected_argv(
+        "hub",
+        port=3006,
+        workspace_roots=runtime._config.workspace_roots,
+    ) == (
+        str(executable),
+        "hub",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "3006",
+        "--no-relay",
+    )
+    assert runtime._expected_argv(
+        "runner",
+        port=3006,
+        workspace_roots=runtime._config.workspace_roots,
+    ) == (
+        str(executable),
+        "runner",
+        "start-sync",
+        "--workspace-root",
+        str(workspace.resolve()),
+    )
 
 
 def test_runtime_without_workspace_starts_hub_but_not_runner(tmp_path: Path) -> None:

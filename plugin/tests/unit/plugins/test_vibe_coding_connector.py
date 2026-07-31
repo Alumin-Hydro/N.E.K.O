@@ -2227,8 +2227,9 @@ async def test_startup_detects_credential_in_structured_public_settings_before_j
 ) -> None:
     monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
     public_secret_path = tmp_path / "credential\\segment"
-    public_secret_path.mkdir()
+    public_secret_path.mkdir(parents=True)
     secret = str(public_secret_path.resolve())
+    assert "\\" in secret
     plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
     compromised_settings = {
         **ConnectorSettings().to_store(),
@@ -2313,8 +2314,9 @@ async def test_encrypted_save_rejects_credential_in_structured_public_settings(
 ) -> None:
     monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(tmp_path / "runtime"))
     public_secret_path = tmp_path / "credential\\segment"
-    public_secret_path.mkdir()
+    public_secret_path.mkdir(parents=True)
     secret = str(public_secret_path.resolve())
+    assert "\\" in secret
     plugin = VibeCodingConnectorPlugin(_Context(PLUGIN_DIR))
     await plugin.startup()
 

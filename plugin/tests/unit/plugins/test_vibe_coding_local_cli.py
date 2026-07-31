@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -113,10 +115,15 @@ def test_detect_local_providers_reports_availability(monkeypatch, tmp_path: Path
 
     fake = tmp_path / "bin"
     fake.mkdir()
-    for name in ("claude", "codex"):
-        exe = fake / name
-        exe.write_text("#!/bin/sh\n", encoding="utf-8")
-        exe.chmod(0o755)
+    if sys.platform == "win32":
+        monkeypatch.setenv("PATHEXT", ".EXE")
+        for name in ("claude", "codex"):
+            shutil.copy2(sys.executable, fake / f"{name}.exe")
+    else:
+        for name in ("claude", "codex"):
+            exe = fake / name
+            exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            exe.chmod(0o755)
     monkeypatch.setenv("PATH", str(fake))
 
     detected = local.detect_local_providers({})
