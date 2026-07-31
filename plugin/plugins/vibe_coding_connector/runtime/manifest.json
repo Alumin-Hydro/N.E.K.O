@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "version": "0.25.1",
+  "source_commit": "f0e7e6ad200256550a3cae35b05b9935ed10ad45",
+  "release_url": "https://github.com/tiann/hapi/releases/tag/v0.25.1",
+  "source_url": "https://github.com/tiann/hapi/tree/f0e7e6ad200256550a3cae35b05b9935ed10ad45",
+  "checksums_url": "https://github.com/tiann/hapi/releases/download/v0.25.1/checksums.txt",
+  "license": "AGPL-3.0-only",
+  "bundles": {
+    "win32-x64": {
+      "asset_name": "hapi-win32-x64.zip",
+      "archive_path": "bundles/hapi-v0.25.1-win32-x64.zip",
+      "download_url": "https://github.com/tiann/hapi/releases/download/v0.25.1/hapi-win32-x64.zip",
+      "archive_format": "zip",
+      "executable": "hapi.exe",
+      "size": 68793339,
+      "sha256": "dfef0e27ecee40a18b59ae6e946cf7d177362f2f188d81703cc931f681550698",
+      "executable_sha256": "f68c1ae3672d69f2aa31f969fa5cbc3a3173f847458e4a04d0a8f5cd09dcc99c"
+    },
+    "darwin-arm64": {
+      "asset_name": "hapi-darwin-arm64.tar.gz",
+      "archive_path": "bundles/hapi-v0.25.1-darwin-arm64.tar.gz",
+      "download_url": "https://github.com/tiann/hapi/releases/download/v0.25.1/hapi-darwin-arm64.tar.gz",
+      "archive_format": "tar.gz",
+      "executable": "hapi",
+      "size": 48049488,
+      "sha256": "00e8382d0feaabffaafcb579a3a3458a2681d176d14df4f4c4917102655655c1",
+      "executable_sha256": "8798f050d0bc9424ab03045b05a0204020d3ccc3cd4baded71f32ad4730452b1"
+    },
+    "darwin-x64": {
+      "asset_name": "hapi-darwin-x64.tar.gz",
+      "archive_path": "bundles/hapi-v0.25.1-darwin-x64.tar.gz",
+      "download_url": "https://github.com/tiann/hapi/releases/download/v0.25.1/hapi-darwin-x64.tar.gz",
+      "archive_format": "tar.gz",
+      "executable": "hapi",
+      "size": 50348058,
+      "sha256": "5c0a46296d3601d69cdb80cf0063cd467edcdca2a17231314c44b7e8fbf565b3"
+    },
+    "linux-arm64": {
+      "asset_name": "hapi-linux-arm64.tar.gz",
+      "archive_path": "bundles/hapi-v0.25.1-linux-arm64.tar.gz",
+      "download_url": "https://github.com/tiann/hapi/releases/download/v0.25.1/hapi-linux-arm64.tar.gz",
+      "archive_format": "tar.gz",
+      "executable": "hapi",
+      "size": 64341468,
+      "sha256": "08a05d66505f5b4acbb39127ce2f60701f202ecfce413cba23b54da538396d01"
+    },
+    "linux-x64-baseline": {
+      "asset_name": "hapi-linux-x64-baseline.tar.gz",
+      "archive_path": "bundles/hapi-v0.25.1-linux-x64-baseline.tar.gz",
+      "download_url": "https://github.com/tiann/hapi/releases/download/v0.25.1/hapi-linux-x64-baseline.tar.gz",
+      "archive_format": "tar.gz",
+      "executable": "hapi",
+      "size": 65343492,
+      "sha256": "c22787eb1e2c791e98015432258d197dcaed5d387eb3a53d6d8cbfe369c3d64d"
+    }
+  }
+}

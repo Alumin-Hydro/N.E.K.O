@@ -1,0 +1,42 @@
+[plugin]
+id = "vibe_coding_connector"
+name = "Vibe Coding 连接器"
+description = "自带并监督锁版 HAPI 服务，安全连接 Claude Code、Codex 与 OpenCode；支持高级外部 HAPI 模式。"
+short_description = "Run a pinned managed HAPI service with explicit workspace and approval controls."
+keywords = [
+    "vibe coding", "HAPI", "Claude Code", "Codex", "OpenCode",
+    "编程", "开发", "会话", "审批", "connector"
+]
+version = "0.2.0"
+type = "plugin"
+entry = "plugin.plugins.vibe_coding_connector:VibeCodingConnectorPlugin"
+
+[plugin.author]
+name = "N.E.K.O Team"
+
+[plugin.sdk]
+recommended = ">=0.1.0,<0.2.0"
+supported = ">=0.1.0,<0.3.0"
+
+[plugin.i18n]
+default_locale = "zh-CN"
+locales_dir = "i18n"
+
+[plugin.store]
+enabled = true
+
+[plugin_runtime]
+enabled = true
+auto_start = true
+timeout = 120
+startup_failure = "warn"
+
+[plugin.ui]
+enabled = true
+
+[[plugin.ui.panel]]
+id = "main"
+title = "Vibe Coding 连接器"
+entry = "static/index.html"
+context = "dashboard"
+permissions = ["state:read", "action:call"]

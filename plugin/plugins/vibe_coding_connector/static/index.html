@@ -1,0 +1,3338 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta
+        http-equiv="Content-Security-Policy"
+        content="default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'"
+    >
+    <title>N.E.K.O Vibe Coding 连接器</title>
+    <style>
+        :root {
+            --ink: #182239;
+            --muted: #66708a;
+            --faint: #929ab0;
+            --line: #dfe3f0;
+            --panel: rgba(255, 255, 255, 0.92);
+            --panel-solid: #ffffff;
+            --brand: #7357df;
+            --brand-deep: #5538c2;
+            --brand-soft: #eeeaff;
+            --cyan: #0c8e9d;
+            --cyan-soft: #e2f7f8;
+            --green: #197c58;
+            --green-soft: #e7f7ef;
+            --amber: #a05a09;
+            --amber-soft: #fff5df;
+            --red: #b33b50;
+            --red-soft: #ffedf0;
+            --shadow: 0 18px 48px rgba(37, 42, 73, 0.09);
+            --radius-xl: 24px;
+            --radius-lg: 17px;
+            --radius-md: 12px;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        [hidden] {
+            display: none !important;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            min-height: 100vh;
+            margin: 0;
+            color: var(--ink);
+            background:
+                radial-gradient(circle at 8% 2%, rgba(116, 87, 223, 0.16), transparent 26rem),
+                radial-gradient(circle at 95% 8%, rgba(25, 179, 182, 0.13), transparent 25rem),
+                linear-gradient(180deg, #f8f7fd 0%, #f3f5fa 54%, #f7f8fb 100%);
+            font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+                "PingFang SC", "Microsoft YaHei", sans-serif;
+            line-height: 1.5;
+        }
+
+        button,
+        input,
+        textarea,
+        select {
+            font: inherit;
+        }
+
+        button,
+        select,
+        input[type="checkbox"] {
+            cursor: pointer;
+        }
+
+        button:disabled,
+        select:disabled,
+        input:disabled,
+        textarea:disabled {
+            cursor: not-allowed;
+        }
+
+        :focus-visible {
+            outline: 3px solid rgba(115, 87, 223, 0.3);
+            outline-offset: 2px;
+        }
+
+        .skip-link {
+            position: fixed;
+            z-index: 100;
+            top: 10px;
+            left: 10px;
+            padding: 9px 13px;
+            color: #fff;
+            background: var(--brand-deep);
+            border-radius: 9px;
+            transform: translateY(-150%);
+        }
+
+        .skip-link:focus {
+            transform: translateY(0);
+        }
+
+        .shell {
+            width: min(1180px, calc(100% - 34px));
+            margin: 0 auto;
+            padding: 28px 0 56px;
+        }
+
+        .hero {
+            position: relative;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 28px;
+            align-items: end;
+            overflow: hidden;
+            padding: 30px 32px;
+            color: #fff;
+            background:
+                linear-gradient(125deg, rgba(18, 28, 58, 0.98), rgba(58, 43, 121, 0.96) 62%, rgba(16, 109, 124, 0.92));
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 28px;
+            box-shadow: 0 24px 64px rgba(39, 35, 84, 0.2);
+        }
+
+        .hero::after {
+            position: absolute;
+            top: -86px;
+            right: 6%;
+            width: 240px;
+            height: 240px;
+            content: "";
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            border-radius: 50%;
+            box-shadow:
+                0 0 0 38px rgba(255, 255, 255, 0.035),
+                0 0 0 76px rgba(255, 255, 255, 0.025);
+            pointer-events: none;
+        }
+
+        .eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 9px;
+            margin: 0 0 13px;
+            color: #d9d3ff;
+            font-size: 0.78rem;
+            font-weight: 750;
+            letter-spacing: 0.13em;
+            text-transform: uppercase;
+        }
+
+        .eyebrow::before {
+            width: 8px;
+            height: 8px;
+            content: "";
+            background: #62dfdc;
+            border-radius: 50%;
+            box-shadow: 0 0 0 5px rgba(98, 223, 220, 0.12);
+        }
+
+        h1,
+        h2,
+        h3,
+        p {
+            margin-top: 0;
+        }
+
+        .hero h1 {
+            position: relative;
+            z-index: 1;
+            max-width: 760px;
+            margin-bottom: 10px;
+            font-size: clamp(2rem, 5vw, 3.65rem);
+            font-weight: 780;
+            line-height: 1.05;
+            letter-spacing: -0.045em;
+        }
+
+        .hero-copy {
+            position: relative;
+            z-index: 1;
+            max-width: 760px;
+            margin: 0;
+            color: rgba(239, 241, 255, 0.78);
+            font-size: 0.96rem;
+        }
+
+        .hero-mark {
+            position: relative;
+            z-index: 1;
+            min-width: 132px;
+            padding: 18px;
+            text-align: center;
+            background: rgba(255, 255, 255, 0.09);
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            border-radius: 20px;
+            backdrop-filter: blur(8px);
+        }
+
+        .hero-mark strong {
+            display: block;
+            color: #fff;
+            font-size: 1.42rem;
+            letter-spacing: 0.06em;
+        }
+
+        .hero-mark span {
+            display: block;
+            margin-top: 3px;
+            color: #c9cbe0;
+            font-size: 0.72rem;
+        }
+
+        .notice {
+            display: flex;
+            gap: 11px;
+            align-items: flex-start;
+            min-height: 48px;
+            margin: 16px 0;
+            padding: 12px 15px;
+            color: var(--muted);
+            background: rgba(255, 255, 255, 0.8);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            box-shadow: 0 8px 24px rgba(42, 48, 84, 0.05);
+        }
+
+        .notice::before {
+            flex: 0 0 auto;
+            width: 9px;
+            height: 9px;
+            margin-top: 7px;
+            content: "";
+            background: var(--amber);
+            border-radius: 50%;
+        }
+
+        .notice.success {
+            color: var(--green);
+            background: var(--green-soft);
+            border-color: #bee9d4;
+        }
+
+        .notice.success::before {
+            background: var(--green);
+        }
+
+        .notice.error {
+            color: var(--red);
+            background: var(--red-soft);
+            border-color: #f3c4cd;
+        }
+
+        .notice.error::before {
+            background: var(--red);
+        }
+
+        .notice.loading::before {
+            background: var(--brand);
+            animation: pulse 1s ease-in-out infinite;
+        }
+
+        .overview {
+            display: grid;
+            grid-template-columns: 1.4fr repeat(4, minmax(105px, 0.55fr));
+            gap: 13px;
+            margin-bottom: 18px;
+        }
+
+        .health-card,
+        .metric {
+            min-width: 0;
+            padding: 18px;
+            background: var(--panel);
+            border: 1px solid rgba(217, 221, 235, 0.9);
+            border-radius: var(--radius-lg);
+            box-shadow: 0 8px 26px rgba(36, 44, 77, 0.055);
+        }
+
+        .health-card {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .health-orb {
+            position: relative;
+            flex: 0 0 auto;
+            width: 42px;
+            height: 42px;
+            background: #e9ebf2;
+            border: 7px solid #f5f6f9;
+            border-radius: 50%;
+        }
+
+        .health-orb.online {
+            background: #48c594;
+            border-color: #dff6ec;
+            box-shadow: 0 0 0 4px rgba(72, 197, 148, 0.11);
+        }
+
+        .health-orb.offline {
+            background: #da6377;
+            border-color: #fbe6ea;
+        }
+
+        .health-label,
+        .metric-label {
+            display: block;
+            margin-bottom: 3px;
+            color: var(--faint);
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.07em;
+            text-transform: uppercase;
+        }
+
+        .health-value,
+        .metric-value {
+            display: block;
+            overflow: hidden;
+            color: var(--ink);
+            font-size: 1rem;
+            font-weight: 720;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .health-detail {
+            display: block;
+            min-width: 0;
+            margin-top: 2px;
+            overflow: hidden;
+            color: var(--muted);
+            font-size: 0.76rem;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .metric-value {
+            margin-top: 7px;
+            color: var(--brand-deep);
+            font-size: 1.42rem;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1.14fr) minmax(310px, 0.86fr);
+            gap: 18px;
+            align-items: start;
+        }
+
+        .stack {
+            display: grid;
+            gap: 18px;
+            min-width: 0;
+        }
+
+        .card {
+            min-width: 0;
+            padding: 23px;
+            background: var(--panel);
+            border: 1px solid rgba(217, 221, 235, 0.92);
+            border-radius: var(--radius-xl);
+            box-shadow: var(--shadow);
+        }
+
+        .card-head {
+            display: flex;
+            gap: 16px;
+            align-items: flex-start;
+            justify-content: space-between;
+            margin-bottom: 20px;
+        }
+
+        .card h2 {
+            margin-bottom: 4px;
+            font-size: 1.16rem;
+            letter-spacing: -0.015em;
+        }
+
+        .card h3 {
+            margin-bottom: 12px;
+            font-size: 0.91rem;
+        }
+
+        .subtle {
+            margin: 0;
+            color: var(--muted);
+            font-size: 0.82rem;
+        }
+
+        .actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 9px;
+            align-items: center;
+        }
+
+        .btn {
+            display: inline-flex;
+            gap: 7px;
+            align-items: center;
+            justify-content: center;
+            min-height: 39px;
+            padding: 9px 14px;
+            color: var(--ink);
+            background: #fff;
+            border: 1px solid #d8ddec;
+            border-radius: 11px;
+            font-size: 0.82rem;
+            font-weight: 680;
+            transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+        }
+
+        .btn:hover:not(:disabled) {
+            border-color: #aaa0da;
+            transform: translateY(-1px);
+        }
+
+        .btn:disabled {
+            opacity: 0.48;
+        }
+
+        .btn.primary {
+            color: #fff;
+            background: linear-gradient(135deg, var(--brand), var(--brand-deep));
+            border-color: transparent;
+            box-shadow: 0 7px 18px rgba(87, 57, 193, 0.2);
+        }
+
+        .btn.danger {
+            color: var(--red);
+            background: var(--red-soft);
+            border-color: #f2c7cf;
+        }
+
+        .btn.approve {
+            color: var(--green);
+            background: var(--green-soft);
+            border-color: #bfe7d3;
+        }
+
+        .btn.small {
+            min-height: 33px;
+            padding: 6px 10px;
+            font-size: 0.76rem;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 15px;
+        }
+
+        .field {
+            min-width: 0;
+        }
+
+        .field.full {
+            grid-column: 1 / -1;
+        }
+
+        .field > label,
+        .field > .label {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            margin-bottom: 7px;
+            color: #414b66;
+            font-size: 0.79rem;
+            font-weight: 680;
+        }
+
+        .required {
+            color: var(--red);
+        }
+
+        input[type="text"],
+        input[type="password"],
+        input[type="url"],
+        input[type="number"],
+        textarea,
+        select {
+            width: 100%;
+            min-height: 42px;
+            padding: 9px 11px;
+            color: var(--ink);
+            background: rgba(255, 255, 255, 0.93);
+            border: 1px solid #d8ddeb;
+            border-radius: 10px;
+        }
+
+        textarea {
+            min-height: 94px;
+            resize: vertical;
+        }
+
+        input:hover,
+        textarea:hover,
+        select:hover {
+            border-color: #b9bfd2;
+        }
+
+        input:focus,
+        textarea:focus,
+        select:focus {
+            border-color: var(--brand);
+            outline: 3px solid rgba(115, 87, 223, 0.12);
+        }
+
+        .hint {
+            margin: 6px 0 0;
+            color: var(--faint);
+            font-size: 0.72rem;
+        }
+
+        .token-line {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 9px;
+        }
+
+        .token-state {
+            display: inline-flex;
+            gap: 7px;
+            align-items: center;
+            margin-top: 7px;
+            color: var(--muted);
+            font-size: 0.73rem;
+        }
+
+        .token-state::before {
+            width: 7px;
+            height: 7px;
+            content: "";
+            background: #b4b9c8;
+            border-radius: 50%;
+        }
+
+        .token-state.configured::before {
+            background: var(--green);
+        }
+
+        .choice-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 9px;
+        }
+
+        .choice,
+        .toggle {
+            position: relative;
+            display: flex;
+            gap: 10px;
+            align-items: flex-start;
+            min-width: 0;
+            padding: 11px;
+            color: #414b66;
+            background: #fafafe;
+            border: 1px solid #e1e4ee;
+            border-radius: 11px;
+        }
+
+        .choice:hover,
+        .toggle:hover {
+            border-color: #bbb1e3;
+        }
+
+        .choice input,
+        .toggle input {
+            flex: 0 0 auto;
+            width: 17px;
+            height: 17px;
+            margin: 2px 0 0;
+            accent-color: var(--brand);
+        }
+
+        .choice strong,
+        .toggle strong {
+            display: block;
+            overflow: hidden;
+            font-size: 0.8rem;
+            text-overflow: ellipsis;
+        }
+
+        .choice span,
+        .toggle span {
+            display: block;
+            margin-top: 2px;
+            color: var(--faint);
+            font-size: 0.69rem;
+        }
+
+        .toggle-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 9px;
+        }
+
+        .warning-box {
+            margin: 4px 0 0;
+            padding: 11px 13px;
+            color: #7c530e;
+            background: var(--amber-soft);
+            border: 1px solid #f2d9a7;
+            border-radius: 11px;
+            font-size: 0.75rem;
+        }
+
+        .runtime-panel {
+            margin: 15px 0 18px;
+            padding: 15px;
+            background: linear-gradient(135deg, #f7f5ff, #f2fbfb);
+            border: 1px solid #dcd8ee;
+            border-radius: 15px;
+        }
+
+        .runtime-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 9px;
+            margin: 12px 0;
+        }
+
+        .runtime-fact {
+            min-width: 0;
+            padding: 10px 11px;
+            background: rgba(255, 255, 255, 0.78);
+            border: 1px solid #e1e2ed;
+            border-radius: 11px;
+        }
+
+        .runtime-fact span {
+            display: block;
+            color: var(--faint);
+            font-size: 0.67rem;
+            font-weight: 700;
+        }
+
+        .runtime-fact strong {
+            display: block;
+            margin-top: 3px;
+            overflow-wrap: anywhere;
+            font-size: 0.79rem;
+        }
+
+        .runtime-diagnostic {
+            min-height: 18px;
+            margin: 8px 0 0;
+            color: var(--muted);
+            font-size: 0.72rem;
+            overflow-wrap: anywhere;
+        }
+
+        .runtime-diagnostic.error {
+            color: var(--red);
+        }
+
+        details.advanced {
+            margin-top: 16px;
+            border-top: 1px solid #e5e7f0;
+        }
+
+        details.advanced summary {
+            padding: 15px 0 3px;
+            color: #4b5570;
+            font-size: 0.82rem;
+            font-weight: 720;
+            cursor: pointer;
+        }
+
+        .advanced-body {
+            padding-top: 13px;
+        }
+
+        .divider {
+            height: 1px;
+            margin: 19px 0;
+            background: #e7e9f1;
+        }
+
+        .section-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 9px;
+            align-items: center;
+            justify-content: space-between;
+            margin-top: 18px;
+        }
+
+        .disabled-reason {
+            min-height: 18px;
+            margin: 8px 0 0;
+            color: var(--amber);
+            font-size: 0.72rem;
+        }
+
+        .session-list,
+        .approval-list,
+        .event-list {
+            display: grid;
+            gap: 9px;
+        }
+
+        .session-list {
+            max-height: 420px;
+            overflow: auto;
+            padding-right: 3px;
+        }
+
+        .session {
+            width: 100%;
+            padding: 13px;
+            text-align: left;
+            color: inherit;
+            background: #fbfbfe;
+            border: 1px solid #e1e4ee;
+            border-radius: 13px;
+            cursor: pointer;
+        }
+
+        .session:hover {
+            border-color: #b8addf;
+        }
+
+        .session.selected {
+            background: var(--brand-soft);
+            border-color: #9f91df;
+            box-shadow: inset 3px 0 0 var(--brand);
+        }
+
+        .session-top,
+        .approval-top,
+        .event-top {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .session-name,
+        .approval-title {
+            min-width: 0;
+            overflow: hidden;
+            font-size: 0.83rem;
+            font-weight: 720;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .session-meta,
+        .approval-meta,
+        .event-meta {
+            margin-top: 5px;
+            overflow-wrap: anywhere;
+            color: var(--muted);
+            font-size: 0.72rem;
+        }
+
+        .tag {
+            display: inline-flex;
+            flex: 0 0 auto;
+            align-items: center;
+            max-width: 60%;
+            min-height: 23px;
+            overflow: hidden;
+            padding: 3px 8px;
+            color: #5f557e;
+            background: #f0edfb;
+            border-radius: 99px;
+            font-size: 0.67rem;
+            font-weight: 700;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .tag.online {
+            color: var(--green);
+            background: var(--green-soft);
+        }
+
+        .tag.pending {
+            color: var(--amber);
+            background: var(--amber-soft);
+        }
+
+        .empty {
+            padding: 25px 16px;
+            color: var(--faint);
+            text-align: center;
+            background: #fafafe;
+            border: 1px dashed #d7dbe8;
+            border-radius: 13px;
+            font-size: 0.78rem;
+        }
+
+        .activity-head {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 9px;
+            align-items: end;
+        }
+
+        .output {
+            min-height: 86px;
+            max-height: 260px;
+            margin: 13px 0 0;
+            overflow: auto;
+            padding: 13px;
+            color: #dce4fb;
+            background: #172038;
+            border: 1px solid #2d3856;
+            border-radius: 12px;
+            font: 0.75rem/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+
+        .output.empty-output {
+            color: #8e99b7;
+        }
+
+        .activity-output {
+            max-width: 100%;
+            overflow: auto;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+
+        .approval {
+            padding: 13px;
+            background: #fffdfa;
+            border: 1px solid #eadfc8;
+            border-radius: 13px;
+        }
+
+        .approval-summary {
+            margin: 8px 0 0;
+            color: #505a72;
+            font-size: 0.76rem;
+            overflow-wrap: anywhere;
+        }
+
+        .approval .actions {
+            margin-top: 11px;
+        }
+
+        .event-list {
+            max-height: 360px;
+            overflow: auto;
+        }
+
+        .event {
+            position: relative;
+            padding: 11px 11px 11px 17px;
+            background: #fbfbfd;
+            border: 1px solid #e5e7ef;
+            border-radius: 11px;
+        }
+
+        .event::before {
+            position: absolute;
+            top: 14px;
+            left: 7px;
+            width: 4px;
+            height: 4px;
+            content: "";
+            background: var(--brand);
+            border-radius: 50%;
+        }
+
+        .event-type {
+            min-width: 0;
+            color: #46506a;
+            font-size: 0.75rem;
+            font-weight: 720;
+            overflow-wrap: anywhere;
+        }
+
+        .event-summary {
+            margin: 5px 0 0;
+            color: var(--muted);
+            font-size: 0.72rem;
+            overflow-wrap: anywhere;
+        }
+
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
+        @keyframes pulse {
+            0%,
+            100% {
+                opacity: 0.35;
+                transform: scale(0.8);
+            }
+            50% {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+
+        @media (max-width: 940px) {
+            .overview {
+                grid-template-columns: 1fr 1fr 1fr;
+            }
+
+            .health-card {
+                grid-column: 1 / -1;
+            }
+
+            .layout {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 680px) {
+            .shell {
+                width: min(100% - 22px, 1180px);
+                padding-top: 11px;
+            }
+
+            .hero {
+                grid-template-columns: 1fr;
+                gap: 20px;
+                padding: 25px 22px;
+                border-radius: 22px;
+            }
+
+            .hero-mark {
+                width: fit-content;
+                min-width: 122px;
+                text-align: left;
+            }
+
+            .overview {
+                grid-template-columns: 1fr;
+            }
+
+            .health-card,
+            .metric {
+                grid-column: auto;
+            }
+
+            .card {
+                padding: 18px;
+                border-radius: 19px;
+            }
+
+            .card-head,
+            .section-actions {
+                align-items: stretch;
+                flex-direction: column;
+            }
+
+            .form-grid,
+            .choice-grid,
+            .toggle-grid,
+            .runtime-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .field.full {
+                grid-column: auto;
+            }
+
+            .token-line,
+            .activity-head {
+                grid-template-columns: 1fr;
+            }
+
+            .actions > .btn {
+                flex: 1 1 auto;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                scroll-behavior: auto !important;
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+        }
+    </style>
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+<div class="shell">
+    <header class="hero">
+        <div>
+            <p class="eyebrow">N.E.K.O · HAPI execution boundary</p>
+            <h1 data-i18n="panel.title">Vibe Coding 连接器</h1>
+            <p class="hero-copy" data-i18n="panel.subtitle">
+                默认由插件启动并监督内置 HAPI；工作区、工具与审批仍由你明确控制。
+            </p>
+        </div>
+        <div class="hero-mark" aria-label="插件版本">
+            <strong>HAPI</strong>
+            <span>CONNECTOR · 0.2.0</span>
+        </div>
+    </header>
+
+    <div id="statusMessage" class="notice loading" role="status" aria-live="polite" aria-atomic="true">
+        <span data-i18n="panel.status.loading">正在读取连接器状态…</span>
+    </div>
+
+    <section class="overview" aria-label="连接概览">
+        <div class="health-card">
+            <span id="healthOrb" class="health-orb" aria-hidden="true"></span>
+            <div>
+                <span class="health-label" data-i18n="panel.connection.health">服务健康</span>
+                <span id="healthValue" class="health-value">正在读取…</span>
+                <span id="healthDetail" class="health-detail">尚未执行连接检测</span>
+            </div>
+        </div>
+        <div class="metric">
+            <span class="metric-label" data-i18n="panel.runtime.actualPort">实际端口</span>
+            <span id="actualPortMetric" class="metric-value">—</span>
+        </div>
+        <div class="metric">
+            <span class="metric-label">协议版本</span>
+            <span id="protocolMetric" class="metric-value">—</span>
+        </div>
+        <div class="metric">
+            <span class="metric-label">活动 / 最近会话</span>
+            <span id="sessionMetric" class="metric-value">—</span>
+        </div>
+        <div class="metric">
+            <span class="metric-label">待处理审批</span>
+            <span id="approvalMetric" class="metric-value">—</span>
+        </div>
+    </section>
+
+    <main id="main" class="layout">
+        <div class="stack">
+            <section class="card" aria-labelledby="connectionHeading">
+                <div class="card-head">
+                    <div>
+                        <h2 id="connectionHeading" data-i18n="panel.connection.title">连接与安全边界</h2>
+                        <p class="subtle">令牌只写入插件存储；面板仅显示是否已配置，不展示任何令牌片段。</p>
+                    </div>
+                    <div class="actions">
+                        <button id="testConnectionBtn" class="btn" type="button">
+                            <span data-i18n="panel.action.testConnection">测试连接</span>
+                        </button>
+                        <button id="refreshSessionsBtn" class="btn" type="button">
+                            <span data-i18n="panel.action.refresh">刷新会话</span>
+                        </button>
+                    </div>
+                </div>
+
+                <form id="settingsForm" novalidate>
+                    <h3 data-i18n="panel.settings.title">运行模式</h3>
+                    <div class="form-grid">
+                        <div class="field full">
+                            <label for="backendMode" data-i18n="panel.field.backendMode">运行模式</label>
+                            <select id="backendMode" name="backend_mode">
+                                <option value="managed_hapi" data-i18n="panel.field.modeManaged">内置 HAPI（推荐，自动启动）</option>
+                                <option value="hapi_external" data-i18n="panel.field.modeExternal">外部 HAPI（高级）</option>
+                                <option value="local_cli" data-i18n="panel.field.modeLocal">本机 CLI（兼容模式）</option>
+                            </select>
+                            <p class="hint" data-i18n="panel.field.backendModeHint">推荐使用插件监督的锁版 HAPI；外部地址和本机 CLI 只作为高级或兼容选项。</p>
+                        </div>
+                        <div class="field full" id="localCliStatus">
+                            <span class="label" data-i18n="panel.local.title">编程工具检测</span>
+                            <div class="actions">
+                                <span class="token-state" id="cliClaude">claude: 检测中</span>
+                                <span class="token-state" id="cliCodex">codex: 检测中</span>
+                                <span class="token-state" id="cliOpencode">opencode: 检测中</span>
+                            </div>
+                            <p class="hint" data-i18n="panel.local.providerNote">检测到命令不代表已经登录；内置 HAPI 不包含 Claude、Codex、OpenCode 或其付费服务。</p>
+                        </div>
+                    </div>
+
+                    <section class="runtime-panel" aria-labelledby="runtimeHeading">
+                        <div class="card-head">
+                            <div>
+                                <h3 id="runtimeHeading" data-i18n="panel.runtime.title">HAPI 服务状态</h3>
+                                <p class="subtle" id="runtimeModeNote">正在读取运行方式与平台支持。</p>
+                            </div>
+                            <div class="actions">
+                                <button id="runtimeStartBtn" class="btn small" type="button" disabled>
+                                    <span data-i18n="panel.action.startRuntime">启动服务</span>
+                                </button>
+                                <button id="runtimeRestartBtn" class="btn small" type="button" disabled>
+                                    <span data-i18n="panel.action.restartRuntime">重启服务</span>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="runtime-grid">
+                            <div class="runtime-fact">
+                                <span data-i18n="panel.runtime.state">服务状态</span>
+                                <strong id="runtimeState">正在读取…</strong>
+                            </div>
+                            <div class="runtime-fact">
+                                <span data-i18n="panel.runtime.actualPort">实际端口</span>
+                                <strong id="runtimeActualPort">—</strong>
+                            </div>
+                            <div class="runtime-fact">
+                                <span data-i18n="panel.runtime.platform">平台</span>
+                                <strong id="runtimePlatform">—</strong>
+                            </div>
+                            <div class="runtime-fact">
+                                <span data-i18n="panel.runtime.bundle">运行包</span>
+                                <strong id="runtimeBundle">—</strong>
+                            </div>
+                            <div class="runtime-fact">
+                                <span data-i18n="panel.runtime.hub">Hub</span>
+                                <strong id="runtimeHub">—</strong>
+                            </div>
+                            <div class="runtime-fact">
+                                <span data-i18n="panel.runtime.runner">Runner</span>
+                                <strong id="runtimeRunner">—</strong>
+                            </div>
+                        </div>
+                        <p id="runtimeDiagnostic" class="runtime-diagnostic"></p>
+                    </section>
+
+                    <details class="advanced" id="hapiAdvanced">
+                        <summary data-i18n="panel.hapi.title">HAPI 与 CLI 高级设置</summary>
+                        <div class="advanced-body">
+                    <div class="form-grid" id="managedHapiSettings">
+                        <div class="field">
+                            <label for="preferredPort" data-i18n="panel.field.preferredPort">首选 localhost 端口</label>
+                            <input id="preferredPort" name="preferred_port" type="number"
+                                   min="1024" max="65535" step="1" value="3006">
+                            <p class="hint" data-i18n="panel.field.preferredPortHint">若被未知进程占用，插件不会终止它，而会选择空闲端口并显示实际端口。</p>
+                        </div>
+                        <div class="field">
+                            <label class="toggle" for="allowRuntimeDownload">
+                                <input id="allowRuntimeDownload" name="allow_runtime_download" type="checkbox">
+                                <span>
+                                    <strong data-i18n="panel.field.allowRuntimeDownload">允许校验后自动获取当前平台 runtime</strong>
+                                    <span data-i18n="panel.field.allowRuntimeDownloadHint">仅在安装包未内置当前平台时使用；版本与 SHA256 必须匹配清单。</span>
+                                </span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-grid" id="externalHapiSettings">
+                        <div class="field">
+                            <label for="baseUrl"><span data-i18n="panel.field.baseUrl">HAPI 基础地址</span> <span class="required" aria-hidden="true">*</span></label>
+                            <input id="baseUrl" name="base_url" type="url" autocomplete="url"
+                                   placeholder="http://127.0.0.1:3006">
+                            <p class="hint">末尾斜杠会自动规范化。非回环地址必须显式开启远程访问。</p>
+                        </div>
+                        <div class="field">
+                            <label for="authMode">认证方式</label>
+                            <select id="authMode" name="auth_mode">
+                                <option value="access_token">HAPI access/API token（推荐）</option>
+                                <option value="bearer">已签发的 Bearer JWT</option>
+                            </select>
+                            <p class="hint">access token 会通过 /api/auth 交换；Bearer 模式直接使用现有 JWT。</p>
+                        </div>
+                        <div class="field full">
+                            <label for="tokenInput" data-i18n="panel.field.token">访问令牌</label>
+                            <div class="token-line">
+                                <input id="tokenInput" name="token" type="password" autocomplete="new-password"
+                                       spellcheck="false" placeholder="留空以保留已有令牌"
+                                       data-i18n-placeholder="panel.field.tokenPlaceholder">
+                                <button id="clearTokenBtn" class="btn danger" type="button" disabled>
+                                    <span data-i18n="panel.action.clearToken">清除令牌</span>
+                                </button>
+                            </div>
+                            <span id="tokenState" class="token-state">尚未读取令牌状态</span>
+                        </div>
+                        <div class="field full">
+                            <label class="toggle" for="allowRemote">
+                                <input id="allowRemote" name="allow_remote" type="checkbox">
+                                <span>
+                                    <strong data-i18n="panel.field.allowRemote">允许连接非本机 HAPI</strong>
+                                    <span>仅在你信任远端网络、TLS 与工作目录映射时开启。</span>
+                                </span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="field full">
+                            <label for="cliOverrides" data-i18n="panel.field.cliOverrides">CLI 路径覆盖（高级）</label>
+                            <textarea id="cliOverrides" name="cli_command_overrides"
+                                      spellcheck="false" placeholder="每行一条 provider=/绝对/路径，例如 codex=/usr/local/bin/codex"></textarea>
+                            <p class="hint" data-i18n="panel.field.cliOverridesHint">仅在 PATH 检测不到时填写；不允许任何 shell 符号。</p>
+                        </div>
+                    </div>
+                        </div>
+                    </details>
+
+                    <div class="form-grid">
+                        <div class="field full">
+                            <label for="workspaceRoots" data-i18n="panel.field.workspaceRoots">允许的工作区根目录</label>
+                            <textarea id="workspaceRoots" name="allowed_workspace_roots"
+                                      spellcheck="false" placeholder="每行一个绝对路径；未配置时禁止创建或控制任务"></textarea>
+                            <p class="hint" data-i18n="panel.field.workspaceRootsHint">每行一个已存在的绝对目录</p>
+                        </div>
+                    </div>
+
+                    <div class="divider" role="presentation"></div>
+                    <h3 data-i18n="panel.security.title">工作区与工具策略</h3>
+                    <p class="label" data-i18n="panel.field.providers">允许的提供商</p>
+                    <div class="choice-grid" aria-label="允许的 Vibe Coding 提供商">
+                        <label class="choice" for="providerClaude">
+                            <input id="providerClaude" type="checkbox" value="claude">
+                            <span><strong>Claude Code</strong><span>agent: claude</span></span>
+                        </label>
+                        <label class="choice" for="providerCodex">
+                            <input id="providerCodex" type="checkbox" value="codex">
+                            <span><strong>Codex</strong><span>agent: codex</span></span>
+                        </label>
+                        <label class="choice" for="providerOpenCode">
+                            <input id="providerOpenCode" type="checkbox" value="opencode">
+                            <span><strong>OpenCode</strong><span>agent: opencode</span></span>
+                        </label>
+                    </div>
+
+                    <div class="divider" role="presentation"></div>
+                    <h3>猫娘可调用的操作</h3>
+                    <div class="toggle-grid">
+                        <label class="toggle" for="allowCreate">
+                            <input id="allowCreate" type="checkbox">
+                            <span><strong data-i18n="panel.field.allowCreate">允许创建会话</strong><span>允许启动一个受限工作区会话</span></span>
+                        </label>
+                        <label class="toggle" for="allowSend">
+                            <input id="allowSend" type="checkbox">
+                            <span><strong data-i18n="panel.field.allowSend">允许提交任务</strong><span>允许向已有会话继续发送任务</span></span>
+                        </label>
+                        <label class="toggle" for="allowStop">
+                            <input id="allowStop" type="checkbox">
+                            <span><strong data-i18n="panel.field.allowStop">允许停止会话</strong><span>允许请求 HAPI 取消正在运行的任务</span></span>
+                        </label>
+                        <label class="toggle" for="allowApproval">
+                            <input id="allowApproval" type="checkbox">
+                            <span><strong data-i18n="panel.field.allowApproval">允许响应审批</strong><span>仍需逐项明确批准或拒绝，不会自动批准</span></span>
+                        </label>
+                    </div>
+                    <p class="warning-box">
+                        <span data-i18n="panel.reason.autoApprovalOff">危险权限自动批准始终关闭。</span>
+                        启用“响应审批”只会开放逐项操作，不代表默认同意。
+                    </p>
+
+                    <details class="advanced">
+                        <summary data-i18n="panel.notifications.title">SSE 与通知</summary>
+                        <div class="advanced-body form-grid">
+                            <div class="field">
+                                <label for="timeoutSeconds" data-i18n="panel.field.timeout">请求超时（秒）</label>
+                                <input id="timeoutSeconds" type="number" min="1" max="30" step="1" value="15">
+                            </div>
+                            <div class="field">
+                                <label for="reconnectDelay" data-i18n="panel.field.reconnectDelay">SSE 重连延迟（秒）</label>
+                                <input id="reconnectDelay" type="number" min="1" max="120" step="1" value="5">
+                            </div>
+                            <div class="field">
+                                <label class="toggle" for="sseEnabled">
+                                    <input id="sseEnabled" type="checkbox">
+                                    <span><strong data-i18n="panel.field.sseEnabled">监听 SSE 事件</strong><span>断线后按设置重连</span></span>
+                                </label>
+                            </div>
+                            <div class="field">
+                                <label class="toggle" for="notificationsEnabled">
+                                    <input id="notificationsEnabled" type="checkbox">
+                                    <span><strong data-i18n="panel.field.notifyEnabled">推送重要通知</strong><span>只推送重要且已去重的事件</span></span>
+                                </label>
+                            </div>
+                            <div class="field">
+                                <label for="notificationBehavior" data-i18n="panel.field.aiBehavior">通知 AI 行为</label>
+                                <select id="notificationBehavior">
+                                    <option value="read">read · 可读但不触发回复</option>
+                                    <option value="blind">blind · 不提供给 AI</option>
+                                </select>
+                            </div>
+                            <div class="field">
+                                <span class="label" data-i18n="panel.field.visibility">通知可见性</span>
+                                <div class="actions">
+                                    <label class="choice" for="visibilityHud">
+                                        <input id="visibilityHud" type="checkbox" value="hud">
+                                        <span><strong>HUD</strong></span>
+                                    </label>
+                                    <label class="choice" for="visibilityChat">
+                                        <input id="visibilityChat" type="checkbox" value="chat">
+                                        <span><strong>Chat</strong></span>
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="field">
+                                <label for="maxResponseSize" data-i18n="panel.field.maxResponseSize">最大响应字节数</label>
+                                <input id="maxResponseSize" type="number" min="16384" max="2097152" step="1024" value="262144">
+                            </div>
+                            <div class="field">
+                                <label for="maxInstructionChars">最大指令字符数</label>
+                                <input id="maxInstructionChars" type="number" min="256" max="32000" step="1" value="8000">
+                            </div>
+                            <div class="field">
+                                <label for="maxOutputChars">最大输出字符数</label>
+                                <input id="maxOutputChars" type="number" min="1000" max="64000" step="1000" value="12000">
+                            </div>
+                            <div class="field">
+                                <label for="maxConcurrency">最大并发请求</label>
+                                <input id="maxConcurrency" type="number" min="1" max="10" step="1" value="3">
+                            </div>
+                            <div class="field">
+                                <label for="rateLimit">每分钟调用上限</label>
+                                <input id="rateLimit" type="number" min="1" max="120" step="1" value="20">
+                            </div>
+                        </div>
+                    </details>
+
+                    <div class="section-actions">
+                        <div class="actions">
+                            <button id="saveSettingsBtn" class="btn primary" type="submit" disabled>
+                                <span data-i18n="panel.action.save">保存设置</span>
+                            </button>
+                            <button id="resetSettingsBtn" class="btn danger" type="button" disabled>
+                                <span data-i18n="panel.action.reset">重置设置</span>
+                            </button>
+                        </div>
+                        <p class="hint">留空令牌并保存会保留原值；清除必须使用独立按钮确认。</p>
+                    </div>
+                </form>
+            </section>
+
+            <section class="card" aria-labelledby="sessionsHeading">
+                <div class="card-head">
+                    <div>
+                        <h2 id="sessionsHeading" data-i18n="panel.sessions.title">创建与管理会话</h2>
+                        <p class="subtle">会话只能在已允许且通过真实路径检查的工作区中创建。</p>
+                    </div>
+                </div>
+
+                <form id="createSessionForm">
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="createProvider" data-i18n="panel.field.provider">提供商</label>
+                            <select id="createProvider"></select>
+                        </div>
+                        <div class="field">
+                            <label for="workingDirectory" data-i18n="panel.field.workingDirectory">工作目录</label>
+                            <input id="workingDirectory" type="text" list="workspaceRootChoices"
+                                   spellcheck="false" autocomplete="off" placeholder="选择允许根目录或输入其子目录">
+                            <datalist id="workspaceRootChoices"></datalist>
+                        </div>
+                    </div>
+                    <div class="section-actions">
+                        <p id="createDisabledReason" class="disabled-reason" role="note"></p>
+                        <button id="createSessionBtn" class="btn primary" type="submit" disabled>
+                            <span data-i18n="panel.action.createSession">创建会话</span>
+                        </button>
+                    </div>
+                </form>
+
+                <div class="divider" role="presentation"></div>
+                <div id="sessionList" class="session-list" aria-live="polite">
+                    <div class="empty" data-i18n="panel.status.emptySessions">暂无会话</div>
+                </div>
+
+                <div class="divider" role="presentation"></div>
+                <h3>继续任务与活动记录</h3>
+                <div class="form-grid">
+                    <div class="field full">
+                        <label for="sessionSelect" data-i18n="panel.field.session">目标会话</label>
+                        <select id="sessionSelect"></select>
+                    </div>
+                    <div class="field full">
+                        <label for="instructionInput" data-i18n="panel.field.instruction">开发指令</label>
+                        <textarea id="instructionInput" placeholder="输入要交给所选会话的开发任务"></textarea>
+                        <p id="instructionLimitHint" class="hint"></p>
+                    </div>
+                </div>
+                <div class="section-actions">
+                    <p id="sessionActionReason" class="disabled-reason" role="note"></p>
+                    <div class="actions">
+                        <button id="sendInstructionBtn" class="btn primary" type="button" disabled>
+                            <span data-i18n="panel.action.sendInstruction">发送测试指令</span>
+                        </button>
+                        <button id="readActivityBtn" class="btn" type="button" disabled>
+                            <span data-i18n="panel.action.inspect">读取活动</span>
+                        </button>
+                        <button id="stopSessionBtn" class="btn danger" type="button" disabled>
+                            <span data-i18n="panel.action.stopSession">停止会话</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="activity-head">
+                    <div>
+                        <span class="label">最近输出 / 状态</span>
+                        <p id="activityStatus" class="hint">选择一个真实会话后读取</p>
+                    </div>
+                </div>
+                <pre id="activityOutput" class="output empty-output" tabindex="0">尚未读取会话输出。</pre>
+            </section>
+        </div>
+
+        <aside class="stack" aria-label="审批与事件">
+            <section class="card" aria-labelledby="capabilitiesHeading">
+                <div class="card-head">
+                    <div>
+                        <h2 id="capabilitiesHeading" data-i18n="panel.connection.capabilities">能力与提供商</h2>
+                        <p class="subtle">只展示 HAPI 返回或本插件明确配置的能力，不猜测远端版本。</p>
+                    </div>
+                </div>
+                <div id="capabilityList" class="event-list">
+                    <div class="empty">尚未测试连接。</div>
+                </div>
+            </section>
+
+            <section class="card" aria-labelledby="approvalsHeading">
+                <div class="card-head">
+                    <div>
+                        <h2 id="approvalsHeading" data-i18n="panel.approvals.title">待处理审批</h2>
+                        <p class="subtle">批准或拒绝前会再次确认。审批参数不会在这里无限展开。</p>
+                    </div>
+                    <button id="refreshApprovalsBtn" class="btn small" type="button">
+                        <span data-i18n="panel.action.refresh">刷新</span>
+                    </button>
+                </div>
+                <p id="approvalDisabledReason" class="disabled-reason" role="note"></p>
+                <div id="approvalList" class="approval-list" aria-live="polite">
+                    <div class="empty" data-i18n="panel.status.emptyApprovals">暂无待处理审批</div>
+                </div>
+            </section>
+
+            <section class="card" aria-labelledby="eventsHeading">
+                <div class="card-head">
+                    <div>
+                        <h2 id="eventsHeading" data-i18n="panel.events.title">最近事件</h2>
+                        <p class="subtle">来自持久化的有界、去重事件元数据。</p>
+                    </div>
+                </div>
+                <div id="eventList" class="event-list" aria-live="polite">
+                    <div class="empty" data-i18n="panel.status.emptyEvents">暂无近期事件</div>
+                </div>
+            </section>
+        </aside>
+    </main>
+</div>
+
+<script>
+(() => {
+    "use strict";
+
+    const PLUGIN_ID = "vibe_coding_connector";
+    const RUNS_URL = "/runs";
+    const POLL_INTERVAL_MS = 260;
+    const RUN_TIMEOUT_MS = 195000;
+    const SECRET_ENVELOPE_ALGORITHM = "RSA-OAEP-256+A256GCM";
+    const SECRET_ENVELOPE_BINDING_PREFIX =
+        "vibe_coding_connector:vibe_coding_save_settings:";
+    const ENVELOPE_RETRY_CODES = new Set([
+        "secret_envelope_expired_or_used",
+        "encrypted_settings_required",
+        "encrypted_settings_invalid"
+    ]);
+    const SUPPORTED_LOCALES = ["zh-CN", "zh-TW", "en", "ja", "ko", "es", "pt", "ru"];
+    const ALLOWED_PROVIDERS = ["claude", "codex", "opencode"];
+    const PROVIDER_LABELS = {
+        claude: "Claude Code",
+        codex: "Codex",
+        opencode: "OpenCode"
+    };
+
+    const model = {
+        loaded: false,
+        settings: {},
+        token: { configured: false },
+        secretEnvelope: null,
+        health: null,
+        sessions: [],
+        approvals: [],
+        events: [],
+        disabledReasons: {},
+        localProviders: {},
+        runtime: {},
+        actualPort: null,
+        selectedSessionId: "",
+        activity: { status: "", output: "" }
+    };
+
+    let translations = {};
+    let activeCalls = 0;
+
+    const byId = id => document.getElementById(id);
+    const sleep = ms => new Promise(resolve => window.setTimeout(resolve, ms));
+    const objectValue = value => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    const arrayValue = value => Array.isArray(value) ? value : [];
+    const t = (key, fallback = "") => {
+        const translated = translations[key];
+        return typeof translated === "string" && translated.trim()
+            ? translated
+            : fallback;
+    };
+    const scalarText = (value, fallback = "") => {
+        if (value === null || value === undefined) return fallback;
+        if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+            return String(value);
+        }
+        return fallback;
+    };
+
+    function scrubSensitive(value) {
+        let result = String(value ?? "");
+        const tokenField = document.getElementById("tokenInput");
+        const pendingToken = tokenField && typeof tokenField.value === "string"
+            ? tokenField.value
+            : "";
+        if (pendingToken) result = result.split(pendingToken).join("[已隐藏]");
+        return result
+            .replace(/\b(https?:\/\/)[^/\s:@]+:[^@\s/]+@/gi, "$1[凭据已隐藏]@")
+            .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]+/gi, "$1 [已隐藏]")
+            .replace(/([?&](?:token|access_token|api_key)=)[^&#\s]+/gi, "$1[已隐藏]")
+            .replace(/("(?:token|access_token|api[_-]?key|password)"\s*:\s*")[^"]*(")/gi, "$1[已隐藏]$2")
+            .replace(/\b((?:token|access_token|api[_-]?key|password)\s*[=:]\s*)[^\s,;]+/gi, "$1[已隐藏]");
+    }
+
+    function safeText(value, fallback = "", limit = 600) {
+        const text = scrubSensitive(scalarText(value, fallback)).replace(/\u0000/g, "");
+        if (text.length <= limit) return text;
+        return `${text.slice(0, Math.max(0, limit - 1))}…`;
+    }
+
+    function safeError(error) {
+        const message = error && error.message ? error.message : "未知错误";
+        return safeText(message, "未知错误", 500);
+    }
+
+    function canonicalBackendMode(value) {
+        const mode = String(value || "").trim();
+        if (mode === "hapi_remote") return "hapi_external";
+        if (["managed_hapi", "hapi_external", "local_cli"].includes(mode)) {
+            return mode;
+        }
+        return "managed_hapi";
+    }
+
+    function createElement(tag, className, text) {
+        const element = document.createElement(tag);
+        if (className) element.className = className;
+        if (text !== undefined) element.textContent = safeText(text);
+        return element;
+    }
+
+    function normalizeLocale(value) {
+        const raw = String(value || "").trim().replace("_", "-");
+        if (!raw || /[^A-Za-z-]/.test(raw)) return "";
+        const exact = SUPPORTED_LOCALES.find(locale => locale.toLowerCase() === raw.toLowerCase());
+        if (exact) return exact;
+        const lower = raw.toLowerCase();
+        if (lower === "zh" || lower.startsWith("zh-hans")) return "zh-CN";
+        if (lower === "zh-tw" || lower === "zh-hk" || lower.startsWith("zh-hant")) return "zh-TW";
+        const language = lower.split("-")[0];
+        return SUPPORTED_LOCALES.includes(language) ? language : "";
+    }
+
+    function localeCandidates(value) {
+        const raw = String(value || "");
+        const choices = [
+            normalizeLocale(raw),
+            normalizeLocale(raw.split("-")[0]),
+            "zh-CN",
+            "en"
+        ];
+        return choices.filter((item, index) => item && choices.indexOf(item) === index);
+    }
+
+    async function loadI18n() {
+        let locale = new URLSearchParams(window.location.search).get("locale")
+            || navigator.language
+            || "zh-CN";
+        try {
+            const response = await fetch(`/plugin/${PLUGIN_ID}/ui-api/locale`, {
+                credentials: "same-origin"
+            });
+            if (response.ok) {
+                const data = await response.json();
+                locale = data.locale || data.language || locale;
+            }
+        } catch (_) {
+            // Chinese-first copy remains usable when the optional locale route is unavailable.
+        }
+
+        for (const candidate of localeCandidates(locale)) {
+            try {
+                const response = await fetch(`/plugin/${PLUGIN_ID}/ui-api/i18n/${candidate}.json`, {
+                    credentials: "same-origin"
+                });
+                if (!response.ok) continue;
+                const data = await response.json();
+                if (!data || typeof data !== "object" || Array.isArray(data)) continue;
+                translations = data;
+                document.documentElement.lang = candidate;
+                break;
+            } catch (_) {
+                // Try the next safe locale candidate.
+            }
+        }
+    }
+
+    function translatePage() {
+        document.querySelectorAll("[data-i18n]").forEach(element => {
+            const key = element.getAttribute("data-i18n");
+            const translated = t(key);
+            if (translated) element.textContent = translated;
+        });
+        document.querySelectorAll("[data-i18n-placeholder]").forEach(element => {
+            const key = element.getAttribute("data-i18n-placeholder");
+            const translated = t(key);
+            if (translated) element.setAttribute("placeholder", translated);
+        });
+        document.querySelectorAll("[data-i18n-aria-label]").forEach(element => {
+            const key = element.getAttribute("data-i18n-aria-label");
+            const translated = t(key);
+            if (translated) element.setAttribute("aria-label", translated);
+        });
+    }
+
+    async function responseJson(response) {
+        const text = await response.text();
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status} 请求失败`);
+        }
+        if (!text.trim()) return {};
+        try {
+            return JSON.parse(text);
+        } catch (_) {
+            throw new Error("服务返回了无法解析的响应");
+        }
+    }
+
+    function pluginErrorDetails(payload) {
+        const source = objectValue(payload);
+        const error = source.error;
+        if (typeof error === "string") {
+            return {
+                code: safeText(source.code, "", 120),
+                message: safeText(error, "插件调用失败")
+            };
+        }
+        if (error && typeof error === "object") {
+            return {
+                code: safeText(error.code || source.code, "", 120),
+                message: safeText(
+                    error.message || error.detail || error.code,
+                    "插件调用失败"
+                )
+            };
+        }
+        return {
+            code: safeText(source.code, "", 120),
+            message: safeText(source.message, "插件调用失败")
+        };
+    }
+
+    function pluginFailure(payload) {
+        const detail = pluginErrorDetails(payload);
+        const error = new Error(detail.message);
+        if (detail.code) error.code = detail.code;
+        return error;
+    }
+
+    function unwrapPluginPayload(value) {
+        let current = value;
+        for (let depth = 0; depth < 5; depth += 1) {
+            if (typeof current === "string") {
+                try {
+                    current = JSON.parse(current);
+                } catch (_) {
+                    return { summary: "插件返回了无法安全解析的文本结果。" };
+                }
+            }
+            if (!current || typeof current !== "object" || Array.isArray(current)) return current ?? {};
+            if (current.success === false || current.ok === false) {
+                throw pluginFailure(current);
+            }
+            if (current.success === true && Object.prototype.hasOwnProperty.call(current, "data")) {
+                current = current.data;
+                continue;
+            }
+            if (current.type === "json" && Object.prototype.hasOwnProperty.call(current, "json")) {
+                current = current.json;
+                continue;
+            }
+            return current;
+        }
+        return current || {};
+    }
+
+    function exportedPayload(exportRecord) {
+        const record = objectValue(exportRecord);
+        const items = arrayValue(record.items);
+        for (const item of items) {
+            if (!item || typeof item !== "object") continue;
+            if (Object.prototype.hasOwnProperty.call(item, "json")) return unwrapPluginPayload(item.json);
+            if (Object.prototype.hasOwnProperty.call(item, "data")) return unwrapPluginPayload(item.data);
+            if (Object.prototype.hasOwnProperty.call(item, "value")) return unwrapPluginPayload(item.value);
+        }
+        if (Object.prototype.hasOwnProperty.call(record, "result")) {
+            return unwrapPluginPayload(record.result);
+        }
+        if (Object.prototype.hasOwnProperty.call(record, "data")) {
+            return unwrapPluginPayload(record.data);
+        }
+        return {};
+    }
+
+    async function callPlugin(entryId, args = {}) {
+        const createResponse = await fetch(RUNS_URL, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                plugin_id: PLUGIN_ID,
+                entry_id: entryId,
+                args
+            })
+        });
+        const created = await responseJson(createResponse);
+        const runId = created.run_id || created.id || objectValue(created.data).run_id;
+        if (!runId) throw new Error("N.E.K.O 未返回 run_id");
+
+        const deadline = Date.now() + RUN_TIMEOUT_MS;
+        while (Date.now() < deadline) {
+            await sleep(POLL_INTERVAL_MS);
+            let run;
+            try {
+                const pollResponse = await fetch(`${RUNS_URL}/${encodeURIComponent(runId)}`, {
+                    credentials: "same-origin",
+                    cache: "no-store"
+                });
+                if (!pollResponse.ok) continue;
+                run = await responseJson(pollResponse);
+            } catch (_) {
+                continue;
+            }
+
+            const status = String(run.status || "").toLowerCase();
+            if (status === "succeeded" || status === "completed" || status === "success") {
+                const exportResponse = await fetch(
+                    `${RUNS_URL}/${encodeURIComponent(runId)}/export`,
+                    { credentials: "same-origin", cache: "no-store" }
+                );
+                if (!exportResponse.ok) throw new Error("插件调用成功，但结果导出失败");
+                return exportedPayload(await responseJson(exportResponse));
+            }
+            if (["failed", "canceled", "cancelled", "timeout", "timed_out"].includes(status)) {
+                const runError = objectValue(run.error);
+                const detail = runError.message || run.message || status;
+                const error = new Error(safeText(detail, "插件执行失败"));
+                const code = safeText(runError.code || run.code, "", 120);
+                if (code) error.code = code;
+                throw error;
+            }
+        }
+        throw new Error("插件调用超时，请检查 HAPI 是否可访问");
+    }
+
+    function decodeBase64(value) {
+        const normalized = String(value || "").trim();
+        if (!normalized || normalized.length > 16384
+            || !/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)
+            || normalized.length % 4 !== 0) {
+            throw new Error("安全密钥信封无效，请刷新面板后重试");
+        }
+        try {
+            const binary = window.atob(normalized);
+            const result = new Uint8Array(binary.length);
+            for (let index = 0; index < binary.length; index += 1) {
+                result[index] = binary.charCodeAt(index);
+            }
+            return result;
+        } catch (_) {
+            throw new Error("安全密钥信封无效，请刷新面板后重试");
+        }
+    }
+
+    function encodeBase64(value) {
+        const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+        let binary = "";
+        for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+            binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+        }
+        return window.btoa(binary);
+    }
+
+    function envelopeExpiryMillis(value) {
+        if (typeof value === "number" && Number.isFinite(value)) {
+            return value < 1e12 ? value * 1000 : value;
+        }
+        const parsed = Date.parse(String(value || ""));
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    async function encryptSavePayload(savePayload) {
+        const envelope = model.secretEnvelope;
+        if (!envelope || typeof envelope !== "object"
+            || envelope.algorithm !== SECRET_ENVELOPE_ALGORITHM
+            || typeof envelope.key_id !== "string"
+            || !/^[0-9a-f]{32}$/.test(envelope.key_id)
+            || typeof envelope.public_key_spki_b64 !== "string"
+            || envelopeExpiryMillis(envelope.expires_at) <= Date.now()) {
+            throw new Error("安全密钥信封已失效，请刷新面板后重试");
+        }
+        if (!window.crypto || !window.crypto.subtle || typeof TextEncoder === "undefined") {
+            throw new Error("当前浏览器无法安全加密设置内容");
+        }
+
+        const encoder = new TextEncoder();
+        const plaintext = encoder.encode(JSON.stringify(savePayload));
+        const maxBytes = Math.max(
+            1,
+            Math.min(262144, numberValue(envelope.max_plaintext_bytes, 262144))
+        );
+        if (!plaintext.length || plaintext.length > maxBytes) {
+            plaintext.fill(0);
+            throw new Error("设置内容超过安全信封允许的长度");
+        }
+
+        let rawContentKey = null;
+        try {
+            const publicKey = await window.crypto.subtle.importKey(
+                "spki",
+                decodeBase64(envelope.public_key_spki_b64),
+                { name: "RSA-OAEP", hash: "SHA-256" },
+                false,
+                ["encrypt"]
+            );
+            const contentKey = await window.crypto.subtle.generateKey(
+                { name: "AES-GCM", length: 256 },
+                true,
+                ["encrypt"]
+            );
+            rawContentKey = new Uint8Array(
+                await window.crypto.subtle.exportKey("raw", contentKey)
+            );
+            const iv = window.crypto.getRandomValues(new Uint8Array(12));
+            const additionalData = encoder.encode(
+                `${SECRET_ENVELOPE_BINDING_PREFIX}${envelope.key_id}`
+            );
+            const ciphertext = new Uint8Array(
+                await window.crypto.subtle.encrypt(
+                    { name: "AES-GCM", iv, additionalData },
+                    contentKey,
+                    plaintext
+                )
+            );
+            const wrappedKey = new Uint8Array(
+                await window.crypto.subtle.encrypt(
+                    { name: "RSA-OAEP", label: additionalData },
+                    publicKey,
+                    rawContentKey
+                )
+            );
+            const payload = {
+                v: 1,
+                wrapped_key: encodeBase64(wrappedKey),
+                iv: encodeBase64(iv),
+                ciphertext: encodeBase64(ciphertext)
+            };
+            return {
+                encrypted_payload: encodeBase64(
+                    encoder.encode(JSON.stringify(payload))
+                ),
+                key_id: envelope.key_id
+            };
+        } catch (_) {
+            throw new Error("无法安全加密设置内容，请刷新面板后重试");
+        } finally {
+            plaintext.fill(0);
+            if (rawContentKey) rawContentKey.fill(0);
+        }
+    }
+
+    function retryableEnvelopeError(error) {
+        return Boolean(
+            error
+            && typeof error.code === "string"
+            && ENVELOPE_RETRY_CODES.has(error.code)
+        );
+    }
+
+    async function freshSecretEnvelope(invoke = callPlugin) {
+        const payload = await invoke("vibe_coding_fresh_secret_envelope", {});
+        const envelope = objectValue(
+            objectValue(payload).secret_envelope || payload
+        );
+        if (!envelope.key_id || !envelope.public_key_spki_b64) {
+            const error = new Error("插件未返回有效的一次性设置安全信封");
+            error.code = "secret_envelope_unavailable";
+            throw error;
+        }
+        model.secretEnvelope = envelope;
+        return envelope;
+    }
+
+    async function saveWithFreshEnvelope(
+        savePayload,
+        invoke = callPlugin,
+        encrypt = encryptSavePayload
+    ) {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            await freshSecretEnvelope(invoke);
+            const encryptedArgs = await encrypt(savePayload);
+            try {
+                return await invoke("vibe_coding_save_settings", encryptedArgs);
+            } catch (error) {
+                if (attempt === 0 && retryableEnvelopeError(error)) continue;
+                throw error;
+            }
+        }
+        throw new Error("一次性设置安全信封重试次数已用尽");
+    }
+
+    function setNotice(message, kind = "loading") {
+        const notice = byId("statusMessage");
+        notice.className = `notice ${kind}`;
+        notice.firstElementChild.textContent = safeText(message, "状态已更新");
+    }
+
+    async function runAction(button, loadingMessage, action) {
+        const originalDisabled = button ? button.disabled : false;
+        activeCalls += 1;
+        if (button) {
+            button.disabled = true;
+            button.setAttribute("aria-busy", "true");
+        }
+        setNotice(loadingMessage, "loading");
+        try {
+            const result = await action();
+            return result;
+        } catch (error) {
+            setNotice(`${t("panel.message.requestFailed", "操作失败。")} ${safeError(error)}`, "error");
+            throw error;
+        } finally {
+            activeCalls = Math.max(0, activeCalls - 1);
+            if (button) {
+                button.removeAttribute("aria-busy");
+                button.disabled = originalDisabled;
+            }
+            updateActionAvailability();
+        }
+    }
+
+    function boolValue(value) {
+        if (typeof value === "boolean") return value;
+        if (typeof value === "number") return value !== 0;
+        if (typeof value === "string") return ["true", "1", "yes", "on"].includes(value.toLowerCase());
+        return false;
+    }
+
+    function numberValue(value, fallback) {
+        const number = Number(value);
+        return Number.isFinite(number) ? number : fallback;
+    }
+
+    function linesValue(value) {
+        if (Array.isArray(value)) return value.map(item => scalarText(item)).filter(Boolean);
+        if (typeof value === "string") {
+            return value.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
+        }
+        return [];
+    }
+
+    function normalizeProvider(value) {
+        const provider = String(value || "").trim().toLowerCase().replace(/[_ ]+/g, "");
+        if (provider === "claudecode") return "claude";
+        if (provider === "open-code") return "opencode";
+        return ALLOWED_PROVIDERS.includes(provider) ? provider : "";
+    }
+
+    function protocolId(value) {
+        if (typeof value !== "string" || value !== value.trim()) return "";
+        if (value === "." || value === ".." || value.length > 256) return "";
+        return /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value) ? value : "";
+    }
+
+    function sessionId(session) {
+        return protocolId(session.id || session.session_id || session.sessionId);
+    }
+
+    function sessionProvider(session) {
+        const metadata = objectValue(session.metadata);
+        return normalizeProvider(session.provider || session.agent || metadata.provider || metadata.agent);
+    }
+
+    function sessionDirectory(session) {
+        const metadata = objectValue(session.metadata);
+        return safeText(
+            session.working_directory || session.directory || session.path
+                || metadata.working_directory || metadata.directory,
+            "",
+            360
+        );
+    }
+
+    function sessionStatus(session) {
+        const status = scalarText(session.status || session.state || session.lifecycle_state);
+        if (status) return safeText(status, "", 80);
+        if (session.active === true || session.online === true) return "active";
+        if (session.active === false || session.online === false) return "idle";
+        return "unknown";
+    }
+
+    function normalizeSessions(payload) {
+        const source = objectValue(payload);
+        const candidates = [
+            source.sessions,
+            objectValue(source.data).sessions,
+            source.items,
+            Array.isArray(payload) ? payload : null
+        ];
+        const list = candidates.find(Array.isArray) || [];
+        return list
+            .filter(item => item && typeof item === "object" && sessionId(item))
+            .slice(0, 100);
+    }
+
+    function normalizeApprovals(payload) {
+        const source = objectValue(payload);
+        const candidates = [
+            source.approvals,
+            source.requests,
+            source.pending,
+            objectValue(source.data).approvals,
+            Array.isArray(payload) ? payload : null
+        ];
+        const list = candidates.find(Array.isArray) || [];
+        return list.filter(item => item && typeof item === "object").slice(0, 100);
+    }
+
+    function normalizeEvents(payload) {
+        const source = objectValue(payload);
+        const candidates = [
+            source.events,
+            source.activity,
+            source.messages,
+            objectValue(source.data).events,
+            Array.isArray(payload) ? payload : null
+        ];
+        const list = candidates.find(Array.isArray) || [];
+        return list.filter(item => item && typeof item === "object").slice(-150);
+    }
+
+    function normalizeRuntimeStatus(value, actualPort = null) {
+        const source = objectValue(value);
+        const port = numberValue(
+            source.actual_port ?? source.actualPort ?? actualPort,
+            0
+        );
+        const rootCount = numberValue(
+            source.workspace_root_count ?? source.workspaceRootCount,
+            0
+        );
+        return {
+            state: safeText(source.state, "unknown", 40).toLowerCase(),
+            version: safeText(source.version, "", 40),
+            platform: safeText(source.platform, "", 80),
+            bundled: source.bundled === true,
+            downloadEnabled: source.download_enabled === true
+                || source.downloadEnabled === true,
+            actualPort: Number.isInteger(port) && port >= 1 && port <= 65535
+                ? port
+                : null,
+            baseUrl: safeText(source.base_url, "", 260),
+            hubReady: source.hub_ready === true || source.hubReady === true,
+            runnerReady: source.runner_ready === true
+                || source.runnerReady === true,
+            workspaceRootCount: Number.isInteger(rootCount) && rootCount >= 0
+                ? rootCount
+                : 0,
+            restartCount: Math.max(
+                0,
+                numberValue(source.restart_count ?? source.restartCount, 0)
+            ),
+            maxRestarts: Math.max(
+                0,
+                numberValue(source.max_restarts ?? source.maxRestarts, 0)
+            ),
+            lastError: safeText(
+                source.last_error ?? source.lastError,
+                "",
+                400
+            ),
+            providerNote: safeText(
+                source.provider_note ?? source.providerNote,
+                "",
+                360
+            ),
+            license: safeText(source.license, "", 80)
+        };
+    }
+
+    function runtimeView(runtimeValue, backendMode) {
+        const runtime = normalizeRuntimeStatus(runtimeValue);
+        const mode = canonicalBackendMode(backendMode);
+        const stateLabels = {
+            ready: t("panel.runtime.ready", "运行正常"),
+            degraded: t("panel.runtime.degraded", "Hub 已启动，Runner 等待工作目录"),
+            preparing: t("panel.runtime.starting", "正在启动"),
+            starting: t("panel.runtime.starting", "正在启动"),
+            restarting: t("panel.runtime.restarting", "正在有限重启"),
+            failed: t("panel.runtime.failed", "启动失败"),
+            shutdown_failed: t("panel.runtime.failed", "启动失败"),
+            unsupported: t("panel.runtime.platformUnsupported", "当前平台未内置"),
+            busy: t("panel.runtime.starting", "正在启动"),
+            stopped: t("panel.runtime.stopped", "已停止"),
+            external: t("panel.runtime.external", "使用外部 HAPI"),
+            compatibility: t("panel.runtime.compatibility", "本机 CLI 兼容模式"),
+            unknown: t("panel.runtime.unknown", "尚未确认")
+        };
+        const managed = mode === "managed_hapi";
+        let modeNote = t(
+            "panel.runtime.modeManaged",
+            "插件会自动启动并监督锁版 HAPI 服务。"
+        );
+        if (mode === "hapi_external") {
+            modeNote = t(
+                "panel.runtime.modeExternal",
+                "插件不会管理外部 HAPI 的进程或端口。"
+            );
+        } else if (mode === "local_cli") {
+            modeNote = t(
+                "panel.runtime.modeLocal",
+                "兼容模式不启动 HAPI，由插件直接调用已安装的 provider CLI。"
+            );
+        }
+
+        let bundle = t("panel.runtime.notBundled", "当前平台未随包提供");
+        if (runtime.bundled) {
+            bundle = `${t("panel.runtime.bundled", "已内置")} · v${runtime.version || "?"}`;
+        } else if (managed && runtime.downloadEnabled) {
+            bundle = t("panel.runtime.verifiedDownload", "未内置；已允许校验后获取");
+        } else if (!managed) {
+            bundle = t("panel.status.notApplicable", "不适用");
+        }
+
+        const runner = runtime.runnerReady
+            ? t("panel.runtime.ready", "运行正常")
+            : runtime.workspaceRootCount === 0 && managed
+                ? t("panel.runtime.waitingRoots", "等待配置工作目录")
+                : t("panel.status.notReady", "未就绪");
+        const hub = runtime.hubReady
+            ? t("panel.runtime.ready", "运行正常")
+            : t("panel.status.notReady", "未就绪");
+        const restartDetail = runtime.maxRestarts > 0 && runtime.restartCount > 0
+            ? ` (${runtime.restartCount}/${runtime.maxRestarts})`
+            : "";
+        const diagnostic = runtime.lastError
+            || runtime.providerNote
+            || (managed && !runtime.bundled && !runtime.downloadEnabled
+                ? t(
+                    "panel.runtime.platformUnsupported",
+                    "当前平台未随安装包提供，且校验后自动获取未开启。"
+                )
+                : "");
+        return {
+            state: `${stateLabels[runtime.state] || safeText(runtime.state, stateLabels.unknown)}${restartDetail}`,
+            actualPort: runtime.actualPort ? String(runtime.actualPort) : "—",
+            platform: runtime.platform || (mode === "hapi_external"
+                ? t("panel.runtime.external", "使用外部 HAPI")
+                : mode === "local_cli"
+                    ? t("panel.runtime.compatibility", "本机 CLI 兼容模式")
+                    : t("panel.runtime.unknown", "尚未确认")),
+            bundle,
+            hub,
+            runner,
+            modeNote,
+            diagnostic,
+            hasError: Boolean(runtime.lastError),
+            managed,
+            actualPortValue: runtime.actualPort
+        };
+    }
+
+    function normalizePanelState(payload) {
+        const source = objectValue(payload);
+        model.settings = objectValue(source.settings);
+        model.settings.backend_mode = canonicalBackendMode(
+            model.settings.backend_mode || source.backend_mode
+        );
+        const token = objectValue(source.token);
+        model.token = {
+            configured: boolValue(token.configured || source.token_configured)
+        };
+        model.secretEnvelope = objectValue(source.secret_envelope);
+        model.health = source.health && typeof source.health === "object" ? source.health : null;
+        model.sessions = normalizeSessions(source.sessions || source);
+        model.approvals = normalizeApprovals(source.approvals || source);
+        model.events = normalizeEvents(source.events || source);
+        model.disabledReasons = objectValue(source.disabled_reasons || source.disabledReasons);
+        model.localProviders = objectValue(source.local_providers || source.localProviders);
+        model.runtime = normalizeRuntimeStatus(source.runtime, source.actual_port);
+        model.actualPort = model.runtime.actualPort;
+        model.loaded = true;
+        if (!model.sessions.some(session => sessionId(session) === model.selectedSessionId)) {
+            model.selectedSessionId = model.sessions.length ? sessionId(model.sessions[0]) : "";
+        }
+    }
+
+    function setInputValue(id, value) {
+        if (value === undefined || value === null) return;
+        byId(id).value = String(value);
+    }
+
+    function setChecked(id, value) {
+        byId(id).checked = boolValue(value);
+    }
+
+    function applySettingsToForm() {
+        const settings = model.settings;
+        setInputValue("backendMode", canonicalBackendMode(settings.backend_mode));
+        setInputValue("preferredPort", settings.preferred_port ?? 3006);
+        setChecked("allowRuntimeDownload", settings.allow_runtime_download);
+        setInputValue("baseUrl", settings.base_url);
+        setInputValue("authMode", settings.auth_mode || "access_token");
+        byId("tokenInput").value = "";
+        setChecked("allowRemote", settings.allow_remote);
+
+        const overrides = settings.cli_command_overrides && typeof settings.cli_command_overrides === "object"
+            ? settings.cli_command_overrides
+            : {};
+        byId("cliOverrides").value = Object.entries(overrides)
+            .map(([provider, command]) => `${provider}=${command}`)
+            .join("\n");
+
+        const roots = linesValue(settings.allowed_workspace_roots);
+        byId("workspaceRoots").value = roots.join("\n");
+
+        const providers = arrayValue(settings.allowed_providers)
+            .map(normalizeProvider)
+            .filter(Boolean);
+        setChecked("providerClaude", providers.includes("claude"));
+        setChecked("providerCodex", providers.includes("codex"));
+        setChecked("providerOpenCode", providers.includes("opencode"));
+
+        setChecked("allowCreate", settings.allow_create);
+        setChecked("allowSend", settings.allow_send);
+        setChecked("allowStop", settings.allow_stop);
+        setChecked("allowApproval", settings.allow_approval);
+        setInputValue("timeoutSeconds", settings.timeout_seconds);
+        setChecked("sseEnabled", settings.sse_enabled);
+        setInputValue("reconnectDelay", settings.sse_reconnect_delay);
+        setChecked("notificationsEnabled", settings.notifications_enabled);
+        setInputValue("notificationBehavior", settings.notification_ai_behavior || "read");
+
+        const visibility = arrayValue(settings.notification_visibility);
+        setChecked("visibilityHud", visibility.includes("hud"));
+        setChecked("visibilityChat", visibility.includes("chat"));
+        setInputValue("maxResponseSize", settings.max_response_size);
+        setInputValue("maxInstructionChars", settings.max_instruction_chars);
+        setInputValue("maxOutputChars", settings.max_output_chars);
+        setInputValue("maxConcurrency", settings.max_concurrency);
+        setInputValue("rateLimit", settings.rate_limit_per_minute);
+        updateTokenState();
+        updateLocalCliStatus();
+        updateModeVisibility();
+        updateWorkspaceChoices();
+        updateInstructionLimit();
+    }
+
+    function updateLocalCliStatus() {
+        const providers = model.localProviders || {};
+        const mapping = [
+            ["cliClaude", "claude"],
+            ["cliCodex", "codex"],
+            ["cliOpencode", "opencode"],
+        ];
+        mapping.forEach(([id, provider]) => {
+            const element = byId(id);
+            if (!element) return;
+            const info = providers[provider];
+            const available = info && info.available === true;
+            element.classList.toggle("configured", available);
+            const path = available ? safeText(info.path, "", 180) : "";
+            element.textContent = available
+                ? `${provider}: ${t("panel.status.cliAvailable", "已检测到")}${path ? ` · ${path}` : ""}`
+                : `${provider}: ${t("panel.status.cliMissing", "未检测到")}`;
+        });
+    }
+
+    function updateModeVisibility() {
+        const mode = canonicalBackendMode(byId("backendMode").value);
+        model.settings.backend_mode = mode;
+        byId("managedHapiSettings").hidden = mode !== "managed_hapi";
+        byId("externalHapiSettings").hidden = mode !== "hapi_external";
+        byId("baseUrl").required = mode === "hapi_external";
+        if (mode === "hapi_external") byId("hapiAdvanced").open = true;
+        byId("runtimeStartBtn").hidden = mode !== "managed_hapi";
+        byId("runtimeRestartBtn").hidden = mode !== "managed_hapi";
+        updateTokenState();
+        renderRuntime();
+    }
+
+    function renderRuntime() {
+        const view = runtimeView(model.runtime, model.settings.backend_mode);
+        byId("runtimeState").textContent = view.state;
+        byId("runtimeActualPort").textContent = view.actualPort;
+        byId("actualPortMetric").textContent = view.actualPort;
+        byId("runtimePlatform").textContent = view.platform;
+        byId("runtimeBundle").textContent = view.bundle;
+        byId("runtimeHub").textContent = view.hub;
+        byId("runtimeRunner").textContent = view.runner;
+        byId("runtimeModeNote").textContent = view.modeNote;
+        const diagnostic = byId("runtimeDiagnostic");
+        diagnostic.textContent = view.diagnostic;
+        diagnostic.classList.toggle("error", view.hasError);
+    }
+
+    function updateTokenState() {
+        const element = byId("tokenState");
+        element.classList.toggle("configured", model.token.configured);
+        if (model.token.configured) {
+            element.textContent = `${t("panel.status.configured", "已配置")}（仅显示状态）`;
+        } else {
+            element.textContent = t("panel.status.notConfigured", "尚未配置令牌");
+        }
+        const external = canonicalBackendMode(
+            byId("backendMode").value
+        ) === "hapi_external";
+        byId("clearTokenBtn").disabled = !external
+            || !model.loaded
+            || !model.token.configured
+            || activeCalls > 0;
+    }
+
+    function configuredProviders() {
+        return [
+            ["providerClaude", "claude"],
+            ["providerCodex", "codex"],
+            ["providerOpenCode", "opencode"]
+        ].filter(([id]) => byId(id).checked).map(([, provider]) => provider);
+    }
+
+    function updateWorkspaceChoices() {
+        const roots = linesValue(byId("workspaceRoots").value);
+        const datalist = byId("workspaceRootChoices");
+        datalist.replaceChildren();
+        roots.slice(0, 100).forEach(root => {
+            const option = document.createElement("option");
+            option.value = root;
+            datalist.append(option);
+        });
+        updateProviderChoices();
+    }
+
+    function updateProviderChoices() {
+        const selected = byId("createProvider").value;
+        const providerSelect = byId("createProvider");
+        providerSelect.replaceChildren();
+        configuredProviders().forEach(provider => {
+            const option = document.createElement("option");
+            option.value = provider;
+            option.textContent = PROVIDER_LABELS[provider];
+            providerSelect.append(option);
+        });
+        if ([...providerSelect.options].some(option => option.value === selected)) {
+            providerSelect.value = selected;
+        }
+    }
+
+    function updateInstructionLimit() {
+        const max = Math.max(1, numberValue(byId("maxInstructionChars").value, 8000));
+        byId("instructionInput").maxLength = max;
+        byId("instructionLimitHint").textContent = `最多 ${max.toLocaleString()} 个字符；空指令不会发送。`;
+    }
+
+    function parseCliOverrides(raw) {
+        const result = {};
+        linesValue(raw).forEach(line => {
+            const match = /^\s*(claude|codex|opencode)\s*=\s*(\S+)\s*$/.exec(line);
+            if (match) result[match[1]] = match[2];
+        });
+        return result;
+    }
+
+    function readSettingsForm() {
+        return {
+            backend_mode: canonicalBackendMode(byId("backendMode").value),
+            preferred_port: numberValue(byId("preferredPort").value, 3006),
+            allow_runtime_download: byId("allowRuntimeDownload").checked,
+            cli_command_overrides: parseCliOverrides(byId("cliOverrides").value),
+            base_url: byId("baseUrl").value.trim(),
+            auth_mode: byId("authMode").value,
+            allow_remote: byId("allowRemote").checked,
+            allowed_workspace_roots: byId("workspaceRoots").value,
+            allowed_providers: configuredProviders(),
+            allow_create: byId("allowCreate").checked,
+            allow_send: byId("allowSend").checked,
+            allow_stop: byId("allowStop").checked,
+            allow_approval: byId("allowApproval").checked,
+            timeout_seconds: numberValue(byId("timeoutSeconds").value, 15),
+            sse_enabled: byId("sseEnabled").checked,
+            sse_reconnect_delay: numberValue(byId("reconnectDelay").value, 5),
+            notifications_enabled: byId("notificationsEnabled").checked,
+            notification_ai_behavior: byId("notificationBehavior").value,
+            notification_visibility: [
+                byId("visibilityHud").checked ? "hud" : "",
+                byId("visibilityChat").checked ? "chat" : ""
+            ].filter(Boolean),
+            max_response_size: numberValue(byId("maxResponseSize").value, 262144),
+            max_instruction_chars: numberValue(byId("maxInstructionChars").value, 8000),
+            max_output_chars: numberValue(byId("maxOutputChars").value, 12000),
+            max_concurrency: numberValue(byId("maxConcurrency").value, 3),
+            rate_limit_per_minute: numberValue(byId("rateLimit").value, 20),
+            max_recent_events: numberValue(model.settings.max_recent_events, 100),
+            max_recent_sessions: numberValue(model.settings.max_recent_sessions, 50),
+            auto_approve: false
+        };
+    }
+
+    function isLoopbackUrl(value) {
+        try {
+            const url = new URL(value);
+            const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+            if (host === "localhost" || host === "::1") return true;
+            const parts = host.split(".").map(Number);
+            return parts.length === 4
+                && parts.every(part => Number.isInteger(part) && part >= 0 && part <= 255)
+                && parts[0] === 127;
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function disabledReason(action) {
+        const reasons = model.disabledReasons;
+        const aliases = {
+            create: ["create", "create_session", "allow_create"],
+            send: ["send", "send_instruction", "submit", "allow_send"],
+            stop: ["stop", "stop_session", "cancel", "allow_stop"],
+            approval: ["approval", "respond_approval", "permission", "allow_approval"]
+        };
+        const keys = aliases[action] || [action, `allow_${action}`];
+        let raw = "";
+        for (const key of [...keys, `${action}_disabled`]) {
+            if (Object.prototype.hasOwnProperty.call(reasons, key)) {
+                raw = reasons[key];
+                break;
+            }
+        }
+        if (typeof raw === "string") return safeText(raw, "", 260);
+        if (Array.isArray(raw)) return safeText(raw.join("；"), "", 260);
+        if (raw && typeof raw === "object") return safeText(raw.reason || raw.message, "", 260);
+        return "";
+    }
+
+    function updateActionAvailability() {
+        const busy = activeCalls > 0;
+        const roots = linesValue(byId("workspaceRoots").value);
+        const providers = configuredProviders();
+        const selected = model.selectedSessionId || byId("sessionSelect").value;
+        const selectedRecord = model.sessions.find(
+            session => sessionId(session) === selected
+        );
+        const sendPolicyReason = selectedRecord && selectedRecord.manageable === false
+            ? (
+                selectedRecord.permission_safe === false
+                    ? "该会话报告了自动或绕过式权限模式，不能提交指令。"
+                    : "该会话的提供商或工作目录不符合当前安全策略。"
+            )
+            : "";
+        const stopPolicyReason = selectedRecord && selectedRecord.stoppable === false
+            ? "该会话的提供商或工作目录不符合当前安全策略，不能停止。"
+            : "";
+        const readPolicyReason = selectedRecord && selectedRecord.readable === false
+            ? "该会话的工作目录不符合当前安全策略，不能读取。"
+            : "";
+        const createReason = disabledReason("create")
+            || (!byId("allowCreate").checked ? t("panel.reason.actionDisabled", "工具策略已关闭此操作。") : "")
+            || (!roots.length ? t("panel.reason.configureRoots", "请先配置至少一个允许的工作区根目录。") : "")
+            || (!providers.length ? "请至少允许一个提供商。" : "");
+        const sendReason = disabledReason("send")
+            || (!byId("allowSend").checked ? t("panel.reason.actionDisabled", "工具策略已关闭此操作。") : "")
+            || (!selected ? t("panel.reason.selectSession", "请先选择一个会话。") : "")
+            || sendPolicyReason;
+        const stopReason = disabledReason("stop")
+            || (!byId("allowStop").checked ? t("panel.reason.actionDisabled", "工具策略已关闭此操作。") : "")
+            || (!selected ? t("panel.reason.selectSession", "请先选择一个会话。") : "")
+            || stopPolicyReason;
+        const approvalReason = disabledReason("approval")
+            || (!byId("allowApproval").checked ? t("panel.reason.actionDisabled", "工具策略已关闭此操作。") : "");
+
+        byId("createDisabledReason").textContent = createReason;
+        byId("sessionActionReason").textContent = sendReason || stopReason;
+        byId("approvalDisabledReason").textContent = approvalReason;
+
+        byId("saveSettingsBtn").disabled = !model.loaded || busy;
+        byId("resetSettingsBtn").disabled = !model.loaded || busy;
+        const managedMode = canonicalBackendMode(
+            byId("backendMode").value
+        ) === "managed_hapi";
+        const externalMode = canonicalBackendMode(
+            byId("backendMode").value
+        ) === "hapi_external";
+        byId("clearTokenBtn").disabled = !externalMode
+            || !model.loaded
+            || !model.token.configured
+            || busy;
+        byId("runtimeStartBtn").disabled = !model.loaded || !managedMode || busy;
+        byId("runtimeRestartBtn").disabled = !model.loaded || !managedMode || busy;
+        byId("createSessionBtn").disabled = busy || Boolean(createReason);
+        byId("sendInstructionBtn").disabled = busy || Boolean(sendReason);
+        byId("readActivityBtn").disabled = busy || !selected || Boolean(readPolicyReason);
+        byId("stopSessionBtn").disabled = busy || Boolean(stopReason);
+        byId("testConnectionBtn").disabled = busy;
+        byId("refreshSessionsBtn").disabled = busy;
+        byId("refreshApprovalsBtn").disabled = busy;
+
+        byId("createSessionBtn").title = createReason;
+        byId("sendInstructionBtn").title = sendReason;
+        byId("stopSessionBtn").title = stopReason;
+        byId("readActivityBtn").title = readPolicyReason;
+        byId("refreshApprovalsBtn").title = approvalReason;
+
+        document.querySelectorAll("[data-approval-action]").forEach(button => {
+            const itemReason = button.dataset.approvalBlockedReason || "";
+            const reason = approvalReason || itemReason;
+            button.disabled = busy || Boolean(reason);
+            button.title = reason;
+        });
+    }
+
+    function nestedHealthValue(health, key) {
+        if (Object.prototype.hasOwnProperty.call(health, key)) return health[key];
+        const inner = objectValue(health.health);
+        if (Object.prototype.hasOwnProperty.call(inner, key)) return inner[key];
+        return undefined;
+    }
+
+    function healthConnected(health) {
+        if (!health || typeof health !== "object") return null;
+        const explicit = nestedHealthValue(health, "connected");
+        if (typeof explicit === "boolean") return explicit;
+        const ok = nestedHealthValue(health, "ok");
+        if (typeof ok === "boolean") return ok;
+        const status = String(nestedHealthValue(health, "status") || "").toLowerCase();
+        if (["ok", "healthy", "connected", "online"].includes(status)) return true;
+        if (["error", "unhealthy", "disconnected", "offline", "unavailable"].includes(status)) return false;
+        return null;
+    }
+
+    function healthProtocol(health) {
+        const value = nestedHealthValue(health || {}, "protocol_version")
+            ?? nestedHealthValue(health || {}, "protocolVersion")
+            ?? nestedHealthValue(health || {}, "version");
+        return safeText(value, "—", 30);
+    }
+
+    function renderHealth() {
+        const health = model.health;
+        const connected = healthConnected(health);
+        const orb = byId("healthOrb");
+        orb.className = "health-orb";
+        if (connected === true) orb.classList.add("online");
+        if (connected === false) orb.classList.add("offline");
+
+        byId("healthValue").textContent = connected === true
+            ? t("panel.status.connected", "连接正常")
+            : connected === false
+                ? t("panel.status.disconnected", "连接不可用")
+                : t("panel.status.notConfigured", "尚未确认");
+        const detail = health && typeof health === "object"
+            ? nestedHealthValue(health, "summary")
+                || nestedHealthValue(health, "message")
+                || nestedHealthValue(health, "status")
+            : "";
+        byId("healthDetail").textContent = safeText(detail, "点击“测试连接”获取实时状态", 240);
+        byId("protocolMetric").textContent = healthProtocol(health);
+        byId("sessionMetric").textContent = model.loaded ? String(model.sessions.length) : "—";
+        byId("approvalMetric").textContent = model.loaded ? String(model.approvals.length) : "—";
+    }
+
+    function capabilityRows() {
+        const health = objectValue(model.health);
+        const capabilities = health.capabilities || objectValue(health.health).capabilities;
+        const machines = health.machines || objectValue(health.health).machines;
+        const remoteProviders = health.providers || objectValue(capabilities).providers;
+        const rows = [];
+        rows.push({
+            label: "SSE",
+            value: boolValue(model.settings.sse_enabled)
+                ? t("panel.status.enabled", "已开启")
+                : t("panel.status.disabled", "已关闭")
+        });
+        rows.push({
+            label: "配置允许的提供商",
+            value: arrayValue(model.settings.allowed_providers)
+                .map(normalizeProvider)
+                .filter(Boolean)
+                .map(provider => PROVIDER_LABELS[provider])
+                .join("、") || t("panel.status.notConfigured", "未配置")
+        });
+        if (Array.isArray(remoteProviders) && remoteProviders.length) {
+            rows.push({
+                label: "连接器本地允许的提供商",
+                value: remoteProviders.map(item => safeText(item, "", 60)).filter(Boolean).join("、")
+            });
+        } else {
+            rows.push({ label: "HAPI 提供商声明", value: "当前协议未明确报告；不作推测" });
+        }
+        if (Array.isArray(machines)) {
+            rows.push({ label: t("panel.field.machine", "在线 / 已报告机器"), value: String(machines.length) });
+        } else if (Number.isFinite(Number(health.machine_count))) {
+            rows.push({ label: t("panel.field.machine", "已报告机器"), value: String(health.machine_count) });
+        }
+
+        if (Array.isArray(capabilities)) {
+            rows.push({
+                label: "协议能力",
+                value: capabilities.map(item => safeText(item, "", 80)).filter(Boolean).slice(0, 12).join("、")
+                    || "未报告"
+            });
+        } else if (capabilities && typeof capabilities === "object") {
+            const enabled = Object.entries(capabilities)
+                .filter(([, value]) => value === true || typeof value === "string" || typeof value === "number")
+                .map(([key, value]) => value === true ? key : `${key}: ${safeText(value, "", 60)}`)
+                .slice(0, 12);
+            rows.push({ label: "协议能力", value: enabled.join("、") || "未报告" });
+        } else {
+            rows.push({ label: "协议能力", value: "未报告" });
+        }
+        return rows;
+    }
+
+    function renderCapabilities() {
+        const container = byId("capabilityList");
+        container.replaceChildren();
+        if (!model.loaded && !model.health) {
+            container.append(createElement("div", "empty", "尚未测试连接。"));
+            return;
+        }
+        capabilityRows().forEach(row => {
+            const item = createElement("div", "event");
+            const top = createElement("div", "event-top");
+            top.append(createElement("span", "event-type", row.label));
+            item.append(top, createElement("p", "event-summary", row.value));
+            container.append(item);
+        });
+    }
+
+    function renderSessions() {
+        const list = byId("sessionList");
+        const select = byId("sessionSelect");
+        const priorSelection = model.selectedSessionId || select.value;
+        list.replaceChildren();
+        select.replaceChildren();
+
+        if (!model.sessions.length) {
+            list.append(createElement("div", "empty", "HAPI 未返回任何会话。"));
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "暂无可选会话";
+            select.append(option);
+            model.selectedSessionId = "";
+            renderActivity();
+            return;
+        }
+
+        model.sessions.forEach(session => {
+            const id = sessionId(session);
+            const provider = sessionProvider(session);
+            const status = sessionStatus(session);
+            const directory = sessionDirectory(session);
+
+            const option = document.createElement("option");
+            option.value = id;
+            option.textContent = safeText(
+                `${PROVIDER_LABELS[provider] || provider || "未知提供商"} · ${id}`,
+                id,
+                160
+            );
+            select.append(option);
+
+            const button = createElement("button", "session");
+            button.type = "button";
+            button.dataset.sessionId = id;
+            button.setAttribute("aria-label", `选择会话 ${id}`);
+            const top = createElement("div", "session-top");
+            top.append(
+                createElement("span", "session-name", PROVIDER_LABELS[provider] || provider || id),
+                createElement(
+                    "span",
+                    `tag ${["active", "running", "online", "busy"].includes(status.toLowerCase()) ? "online" : ""}`,
+                    status
+                )
+            );
+            const idLine = createElement("div", "session-meta", `ID · ${id}`);
+            const directoryLine = createElement("div", "session-meta", directory || "工作目录未报告");
+            button.append(top, idLine, directoryLine);
+            if (session.permission_safe === null || session.requires_permission_check === true) {
+                button.append(createElement(
+                    "div",
+                    "session-meta",
+                    "权限模式需在提交前读取会话详情验证"
+                ));
+            } else if (session.permission_safe === false) {
+                button.append(createElement(
+                    "div",
+                    "session-meta",
+                    "危险权限模式：只允许读取、停止或拒绝"
+                ));
+            }
+            button.addEventListener("click", () => selectSession(id));
+            list.append(button);
+        });
+
+        const validSelection = model.sessions.some(session => sessionId(session) === priorSelection)
+            ? priorSelection
+            : sessionId(model.sessions[0]);
+        selectSession(validSelection, false);
+    }
+
+    function selectSession(id, clearActivity = true) {
+        model.selectedSessionId = String(id || "");
+        byId("sessionSelect").value = model.selectedSessionId;
+        document.querySelectorAll(".session[data-session-id]").forEach(button => {
+            const selected = button.dataset.sessionId === model.selectedSessionId;
+            button.classList.toggle("selected", selected);
+            button.setAttribute("aria-pressed", String(selected));
+        });
+        if (clearActivity) {
+            model.activity = { status: "", output: "" };
+            renderActivity();
+        }
+        updateActionAvailability();
+    }
+
+    function approvalId(approval) {
+        return protocolId(
+            approval.id || approval.request_id || approval.requestId || approval.permission_id
+        );
+    }
+
+    function approvalSessionId(approval) {
+        return protocolId(
+            approval.session_id || approval.sessionId || objectValue(approval.session).id
+        );
+    }
+
+    function renderApprovals() {
+        const list = byId("approvalList");
+        list.replaceChildren();
+        if (!model.approvals.length) {
+            list.append(createElement("div", "empty", "当前没有待处理审批。"));
+            renderHealth();
+            updateActionAvailability();
+            return;
+        }
+
+        model.approvals.forEach(approval => {
+            const requestId = approvalId(approval);
+            const session = approvalSessionId(approval);
+            const title = approval.title || approval.tool || approval.type || approval.kind || "权限请求";
+            const summary = approval.summary || approval.description || approval.reason || approval.tool_name
+                || "HAPI 未提供可安全展示的摘要。";
+            const argumentKeys = arrayValue(approval.argument_keys)
+                .map(key => safeText(key, "", 128))
+                .filter(Boolean);
+            const argumentPreview = safeText(
+                approval.argument_preview,
+                "",
+                600
+            );
+            let approveBlockedReason = "";
+            if (approval.permission_safe !== true) {
+                approveBlockedReason = approval.permission_safe === false
+                    ? "该会话报告了危险或不支持的权限模式；只能拒绝，不能批准。"
+                    : "HAPI 未报告可验证的安全权限模式；只能拒绝，不能批准。";
+            } else if (approval.requires_answers === true) {
+                approveBlockedReason = "此问题审批需要逐题答案；面板仅允许拒绝，请在原生 HAPI 客户端中审阅并回答。";
+            } else if (approval.details_withheld === true) {
+                approveBlockedReason = "参数详情已被截断；为避免盲批，请在原生 HAPI 客户端中审阅。";
+            } else if (approval.approvable_without_answers !== true) {
+                approveBlockedReason = "连接器无法完整验证该请求，不能从面板批准。";
+            }
+
+            const item = createElement("article", "approval");
+            const top = createElement("div", "approval-top");
+            top.append(
+                createElement("span", "approval-title", title),
+                createElement("span", "tag pending", "待审批")
+            );
+            const metaParts = [];
+            if (session) metaParts.push(`会话 ${session}`);
+            if (requestId) metaParts.push(`请求 ${requestId}`);
+            item.append(top);
+            if (metaParts.length) item.append(createElement("div", "approval-meta", metaParts.join(" · ")));
+            item.append(createElement("p", "approval-summary", summary));
+            if (argumentKeys.length) {
+                item.append(createElement(
+                    "div",
+                    "approval-meta",
+                    `参数键：${argumentKeys.join("、")}`
+                ));
+            }
+            if (argumentPreview) {
+                item.append(createElement(
+                    "pre",
+                    "activity-output",
+                    argumentPreview
+                ));
+            }
+            if (approveBlockedReason) {
+                item.append(createElement(
+                    "p",
+                    "warning-box",
+                    approveBlockedReason
+                ));
+            } else {
+                item.append(createElement(
+                    "p",
+                    "approval-meta",
+                    "批准前请核对以上有界脱敏预览；如需完整上下文，请转到原生 HAPI 客户端。"
+                ));
+            }
+
+            const actions = createElement("div", "actions");
+            const approve = createElement("button", "btn small approve", translations["panel.action.approve"] || "批准");
+            approve.type = "button";
+            approve.dataset.approvalAction = "approve";
+            approve.dataset.approvalBlockedReason = approveBlockedReason;
+            approve.addEventListener("click", asyncGuard(() => respondToApproval(approval, "approve", approve)));
+            const deny = createElement("button", "btn small danger", translations["panel.action.deny"] || "拒绝");
+            deny.type = "button";
+            deny.dataset.approvalAction = "deny";
+            deny.dataset.approvalBlockedReason = "";
+            deny.addEventListener("click", asyncGuard(() => respondToApproval(approval, "deny", deny)));
+            actions.append(approve, deny);
+            item.append(actions);
+            list.append(item);
+        });
+        renderHealth();
+        updateActionAvailability();
+    }
+
+    function eventTimestamp(event) {
+        const value = event.timestamp || event.time || event.created_at || event.createdAt;
+        if (!value) return "";
+        const numeric = typeof value === "number" ? value : Number.NaN;
+        const normalized = Number.isFinite(numeric) && numeric > 0 && numeric < 1e12
+            ? numeric * 1000
+            : value;
+        const date = new Date(normalized);
+        if (Number.isNaN(date.getTime())) return safeText(value, "", 60);
+        return date.toLocaleString(document.documentElement.lang || "zh-CN", { hour12: false });
+    }
+
+    function eventType(event) {
+        return safeText(event.type || event.event || event.kind || event.status, "事件", 90);
+    }
+
+    function eventSummary(event) {
+        return safeText(
+            event.summary || event.message || event.output_summary || event.description
+                || event.session_id || event.sessionId,
+            "无可展示摘要",
+            480
+        );
+    }
+
+    function renderEvents() {
+        const list = byId("eventList");
+        list.replaceChildren();
+        if (!model.events.length) {
+            list.append(createElement("div", "empty", "尚无事件。"));
+            return;
+        }
+        [...model.events].reverse().slice(0, 100).forEach(event => {
+            const item = createElement("article", "event");
+            const top = createElement("div", "event-top");
+            top.append(
+                createElement("span", "event-type", eventType(event)),
+                createElement("span", "event-meta", eventTimestamp(event))
+            );
+            item.append(top, createElement("p", "event-summary", eventSummary(event)));
+            list.append(item);
+        });
+    }
+
+    function activityOutputFrom(payload) {
+        const source = objectValue(payload);
+        const direct = source.output || source.recent_output || source.text;
+        if (typeof direct === "string") return direct;
+        if (Array.isArray(direct)) {
+            return direct.map(item => {
+                if (typeof item === "string") return item;
+                return eventSummary(objectValue(item));
+            }).join("\n");
+        }
+        const messages = arrayValue(source.messages);
+        if (messages.length) {
+            return messages.map(message => {
+                const item = objectValue(message);
+                const role = safeText(item.role || item.type, "", 30);
+                const content = safeText(item.content || item.text || item.summary, "", 1800);
+                return role ? `${role}: ${content}` : content;
+            }).filter(Boolean).join("\n");
+        }
+        return "";
+    }
+
+    function renderActivity() {
+        const output = byId("activityOutput");
+        const max = Math.min(64000, Math.max(256, numberValue(byId("maxOutputChars").value, 12000)));
+        const content = safeText(model.activity.output, "", max);
+        output.textContent = content || "尚未读取会话输出。";
+        output.classList.toggle("empty-output", !content);
+        byId("activityStatus").textContent = safeText(
+            model.activity.status,
+            model.selectedSessionId ? "点击“读取活动”获取最新状态" : "选择一个真实会话后读取",
+            240
+        );
+    }
+
+    function renderAll() {
+        applySettingsToForm();
+        renderRuntime();
+        renderHealth();
+        renderCapabilities();
+        renderSessions();
+        renderApprovals();
+        renderEvents();
+        renderActivity();
+        updateActionAvailability();
+    }
+
+    async function loadPanelState(options = {}, invoke = callPlugin, render = renderAll) {
+        const payload = await invoke("vibe_coding_panel_state", {});
+        normalizePanelState(payload);
+        if (typeof render === "function") render();
+        if (!options.quiet) setNotice("连接器设置与持久化状态已载入。", "success");
+        return payload;
+    }
+
+    async function testConnection() {
+        const button = byId("testConnectionBtn");
+        try {
+            await runAction(button, "正在测试 HAPI 健康状态与认证…", async () => {
+                const payload = await callPlugin("vibe_coding_panel_status", {});
+                model.health = objectValue(payload.health || payload);
+                if (payload.runtime) {
+                    model.runtime = normalizeRuntimeStatus(
+                        payload.runtime,
+                        payload.actual_port
+                    );
+                    model.actualPort = model.runtime.actualPort;
+                    renderRuntime();
+                }
+                renderHealth();
+                renderCapabilities();
+                const summary = safeText(
+                    payload.summary || nestedHealthValue(model.health, "summary"),
+                    t("panel.message.requestSucceeded", "操作成功。")
+                );
+                setNotice(summary, healthConnected(model.health) === false ? "error" : "success");
+            });
+        } catch (_) {
+            model.health = {
+                connected: false,
+                summary: "无法连接 HAPI。请确认独立服务已启动、地址正确且令牌有效。"
+            };
+            renderHealth();
+            renderCapabilities();
+        }
+    }
+
+    async function refreshSessions(button = byId("refreshSessionsBtn")) {
+        await runAction(button, "正在从 HAPI 刷新会话与审批…", async () => {
+            const results = await Promise.allSettled([
+                callPlugin("vibe_coding_panel_list_sessions", {}),
+                callPlugin("vibe_coding_panel_list_approvals", {})
+            ]);
+            const errors = [];
+            if (results[0].status === "fulfilled") {
+                model.sessions = normalizeSessions(results[0].value);
+            } else {
+                errors.push(`会话：${safeError(results[0].reason)}`);
+            }
+            if (results[1].status === "fulfilled") {
+                model.approvals = normalizeApprovals(results[1].value);
+            } else {
+                errors.push(`审批：${safeError(results[1].reason)}`);
+            }
+            renderSessions();
+            renderApprovals();
+            if (errors.length) throw new Error(errors.join("；"));
+            setNotice(`已刷新 ${model.sessions.length} 个会话、${model.approvals.length} 个待处理审批。`, "success");
+        });
+    }
+
+    async function controlRuntime(action) {
+        const restart = action === "restart";
+        const button = byId(restart ? "runtimeRestartBtn" : "runtimeStartBtn");
+        const entryId = restart
+            ? "vibe_coding_runtime_restart"
+            : "vibe_coding_runtime_start";
+        const loading = restart
+            ? t("panel.message.restartingRuntime", "正在安全重启内置 HAPI…")
+            : t("panel.message.startingRuntime", "正在启动内置 HAPI…");
+        await runAction(button, loading, async () => {
+            const payload = await callPlugin(entryId, {});
+            model.runtime = normalizeRuntimeStatus(
+                objectValue(payload).runtime,
+                objectValue(payload).actual_port
+            );
+            model.actualPort = model.runtime.actualPort;
+            renderRuntime();
+            await loadPanelState({ quiet: true });
+            setNotice(
+                safeText(
+                    objectValue(payload).summary,
+                    restart ? "内置 HAPI 已重启。" : "内置 HAPI 已启动。"
+                ),
+                "success"
+            );
+        });
+    }
+
+    async function refreshApprovals() {
+        const button = byId("refreshApprovalsBtn");
+        await runAction(button, "正在刷新待处理审批…", async () => {
+            const payload = await callPlugin("vibe_coding_panel_list_approvals", {});
+            model.approvals = normalizeApprovals(payload);
+            renderApprovals();
+            setNotice(`已刷新，当前有 ${model.approvals.length} 个待处理审批。`, "success");
+        });
+    }
+
+    async function saveSettings(event) {
+        event.preventDefault();
+        const form = byId("settingsForm");
+        if (!form.reportValidity()) return;
+        const settings = readSettingsForm();
+        if (settings.backend_mode === "hapi_external" && !settings.base_url) {
+            setNotice("请填写 HAPI 基础地址。", "error");
+            byId("baseUrl").focus();
+            return;
+        }
+        if (
+            settings.backend_mode === "hapi_external"
+            && settings.base_url
+            && !isLoopbackUrl(settings.base_url)
+            && !settings.allow_remote
+        ) {
+            setNotice("外部非本机 HAPI 必须明确开启远程访问。", "error");
+            byId("allowRemote").focus();
+            return;
+        }
+        if (
+            settings.backend_mode === "hapi_external"
+            && settings.allow_remote
+            && !isLoopbackUrl(settings.base_url)
+        ) {
+            const confirmed = window.confirm(
+                `${t("panel.reason.remoteOptIn", "远程端点需要明确选择启用。")}\n`
+                + "请确认网络、TLS、远端服务及工作目录映射均可信。继续保存吗？"
+            );
+            if (!confirmed) return;
+        }
+
+        const tokenField = byId("tokenInput");
+        const token = tokenField.value;
+        tokenField.value = "";
+        const button = byId("saveSettingsBtn");
+        try {
+            await runAction(button, "正在安全保存设置…", async () => {
+                try {
+                    await saveWithFreshEnvelope({
+                        settings,
+                        token,
+                        clear_token: false
+                    });
+                } catch (error) {
+                    try {
+                        await loadPanelState({ quiet: true });
+                    } catch (_) {
+                        // Preserve the original structured save error.
+                    }
+                    throw error;
+                }
+                await loadPanelState({ quiet: true });
+                let savedMessage = t("panel.message.saved", "设置已保存。");
+                if (!token) {
+                    savedMessage += ` ${t(
+                        "panel.message.tokenKept",
+                        "空令牌输入会保留原有 token。"
+                    )}`;
+                }
+                setNotice(savedMessage, "success");
+            });
+        } finally {
+            tokenField.value = "";
+        }
+    }
+
+    async function resetSettings() {
+        if (!window.confirm(t(
+            "panel.confirm.reset",
+            "确定将连接器设置重置为安全默认值吗？"
+        ))) return;
+        const button = byId("resetSettingsBtn");
+        await runAction(button, "正在重置为安全默认设置…", async () => {
+            await callPlugin("vibe_coding_reset_settings", {});
+            await loadPanelState({ quiet: true });
+            setNotice("设置已重置为安全默认值；令牌保持不变。", "success");
+        });
+    }
+
+    async function clearToken() {
+        if (!window.confirm(t(
+            "panel.confirm.clearToken",
+            "确定清除已保存的 HAPI 令牌吗？"
+        ))) return;
+        const button = byId("clearTokenBtn");
+        await runAction(button, "正在清除令牌…", async () => {
+            await callPlugin("vibe_coding_clear_token", {});
+            byId("tokenInput").value = "";
+            await loadPanelState({ quiet: true });
+            setNotice(t("panel.message.tokenCleared", "HAPI 令牌已清除。"), "success");
+        });
+    }
+
+    async function createSession(event) {
+        event.preventDefault();
+        updateActionAvailability();
+        const button = byId("createSessionBtn");
+        if (button.disabled) return;
+        const provider = byId("createProvider").value;
+        const workingDirectory = byId("workingDirectory").value.trim();
+        if (!provider || !workingDirectory) {
+            setNotice("请选择允许的提供商并填写工作目录。", "error");
+            return;
+        }
+        if (!window.confirm(
+            `将在 HAPI 上创建 ${PROVIDER_LABELS[provider] || provider} 会话，并限制到所填工作目录。继续吗？`
+        )) return;
+
+        await runAction(button, "正在请求 HAPI 创建会话…", async () => {
+            const payload = await callPlugin("vibe_coding_panel_create_session", {
+                provider,
+                working_directory: workingDirectory
+            });
+            const createdId = protocolId(
+                payload.session_id || payload.sessionId || objectValue(payload.session).id
+            );
+            await refreshSessions(button);
+            if (createdId) selectSession(createdId);
+            setNotice(safeText(payload.summary, `会话已创建${createdId ? `：${createdId}` : ""}`), "success");
+        });
+    }
+
+    async function sendInstruction() {
+        const button = byId("sendInstructionBtn");
+        const session = model.selectedSessionId;
+        const instruction = byId("instructionInput").value.trim();
+        if (!session || !instruction) {
+            setNotice("请选择会话并输入非空开发指令。", "error");
+            return;
+        }
+        if (!window.confirm("该指令将发送到独立运行的 Vibe Coding 后端并可能修改工作区文件。确认发送吗？")) return;
+        await runAction(button, "正在向所选会话发送开发指令…", async () => {
+            const payload = await callPlugin("vibe_coding_send_instruction", {
+                session_id: session,
+                instruction
+            });
+            byId("instructionInput").value = "";
+            setNotice(safeText(payload.summary, "开发指令已提交。"), "success");
+            await readActivity(true);
+        });
+    }
+
+    async function readActivity(quiet = false) {
+        const button = byId("readActivityBtn");
+        const session = model.selectedSessionId;
+        if (!session) return;
+        await runAction(button, quiet ? "正在刷新会话活动…" : "正在读取最近输出、事件与状态…", async () => {
+            const payload = await callPlugin("vibe_coding_panel_read_activity", {
+                session_id: session,
+                limit: 50
+            });
+            const source = objectValue(payload);
+            const newEvents = normalizeEvents(source);
+            if (newEvents.length) {
+                model.events = newEvents;
+                renderEvents();
+            }
+            model.activity = {
+                status: safeText(source.status || source.session_status || source.summary, "", 240),
+                output: activityOutputFrom(source)
+            };
+            renderActivity();
+            if (!quiet) setNotice(safeText(source.summary, "会话活动已刷新。"), "success");
+        });
+    }
+
+    async function stopSession() {
+        const button = byId("stopSessionBtn");
+        const session = model.selectedSessionId;
+        if (!session) return;
+        if (!window.confirm(
+            `${t("panel.confirm.stop", "停止这个运行中的会话？")}\n${session}`
+        )) return;
+        await runAction(button, "正在请求 HAPI 停止会话…", async () => {
+            const payload = await callPlugin("vibe_coding_stop_session", { session_id: session });
+            await refreshSessions(button);
+            setNotice(safeText(payload.summary, `已向会话 ${session} 发送停止请求。`), "success");
+        });
+    }
+
+    async function respondToApproval(approval, decision, button) {
+        const requestId = approvalId(approval);
+        const session = approvalSessionId(approval);
+        if (!requestId || !session) {
+            setNotice(
+                t("panel.reason.selectApproval", "请先选择一个待处理审批。"),
+                "error"
+            );
+            return;
+        }
+        const verb = decision === "approve" ? "批准" : "拒绝";
+        const tool = safeText(approval.tool || approval.title, "未知工具", 128);
+        const preview = safeText(
+            approval.argument_preview,
+            "无可展示参数；需要完整信息时请先在原生 HAPI 客户端中审阅。",
+            600
+        );
+        const warning = decision === "approve"
+            ? t("panel.confirm.approve", "批准这个待处理请求？")
+            : t("panel.confirm.deny", "拒绝这个待处理请求？");
+        if (!window.confirm(
+            `${warning}\n\n会话：${session}\n请求：${requestId}\n工具：${tool}\n参数预览：${preview}\n\n确定${verb}吗？`
+        )) return;
+
+        await runAction(button, `正在${verb}审批…`, async () => {
+            const payload = await callPlugin("vibe_coding_respond_approval", {
+                session_id: session,
+                request_id: requestId,
+                decision
+            });
+            await refreshApprovals();
+            setNotice(safeText(payload.summary, `审批已${verb}。`), "success");
+        });
+    }
+
+    function asyncGuard(handler) {
+        return event => {
+            Promise.resolve(handler(event)).catch(() => {
+                // runAction has already placed a redacted, user-visible error in the live region.
+            });
+        };
+    }
+
+    function bindEvents() {
+        byId("settingsForm").addEventListener("submit", asyncGuard(saveSettings));
+        byId("backendMode").addEventListener("change", () => {
+            model.settings.backend_mode = canonicalBackendMode(
+                byId("backendMode").value
+            );
+            updateModeVisibility();
+            updateLocalCliStatus();
+            updateActionAvailability();
+        });
+        byId("resetSettingsBtn").addEventListener("click", asyncGuard(resetSettings));
+        byId("clearTokenBtn").addEventListener("click", asyncGuard(clearToken));
+        byId("runtimeStartBtn").addEventListener(
+            "click",
+            asyncGuard(() => controlRuntime("start"))
+        );
+        byId("runtimeRestartBtn").addEventListener(
+            "click",
+            asyncGuard(() => controlRuntime("restart"))
+        );
+        byId("testConnectionBtn").addEventListener("click", asyncGuard(testConnection));
+        byId("refreshSessionsBtn").addEventListener("click", asyncGuard(() => refreshSessions()));
+        byId("refreshApprovalsBtn").addEventListener("click", asyncGuard(refreshApprovals));
+        byId("createSessionForm").addEventListener("submit", asyncGuard(createSession));
+        byId("sendInstructionBtn").addEventListener("click", asyncGuard(sendInstruction));
+        byId("readActivityBtn").addEventListener("click", asyncGuard(() => readActivity(false)));
+        byId("stopSessionBtn").addEventListener("click", asyncGuard(stopSession));
+        byId("sessionSelect").addEventListener("change", event => selectSession(event.target.value));
+
+        [
+            "allowCreate", "allowSend", "allowStop", "allowApproval",
+            "providerClaude", "providerCodex", "providerOpenCode"
+        ].forEach(id => byId(id).addEventListener("change", () => {
+            updateProviderChoices();
+            updateActionAvailability();
+        }));
+        byId("workspaceRoots").addEventListener("input", () => {
+            updateWorkspaceChoices();
+            updateActionAvailability();
+        });
+        byId("maxInstructionChars").addEventListener("input", updateInstructionLimit);
+        byId("maxOutputChars").addEventListener("input", renderActivity);
+    }
+
+    async function initialize() {
+        bindEvents();
+        await loadI18n();
+        translatePage();
+        try {
+            await runAction(null, "正在读取连接器设置和真实 HAPI 元数据…", async () => {
+                await loadPanelState({ quiet: true });
+                setNotice("连接器面板已就绪。点击“测试连接”可获取实时 HAPI 状态。", "success");
+            });
+        } catch (_) {
+            model.loaded = false;
+            renderHealth();
+            renderCapabilities();
+            updateActionAvailability();
+        }
+    }
+
+    if (window.__VIBE_CODING_PANEL_TEST_MODE__ === true) {
+        window.__VIBE_CODING_PANEL_TEST__ = Object.freeze({
+            canonicalBackendMode,
+            normalizeRuntimeStatus,
+            runtimeView,
+            unwrapPluginPayload,
+            retryableEnvelopeError,
+            saveWithFreshEnvelope,
+            loadPanelState,
+            normalizePanelState,
+            modelSnapshot: () => JSON.parse(JSON.stringify(model))
+        });
+    } else {
+        initialize();
+    }
+})();
+</script>
+</body>
+</html>

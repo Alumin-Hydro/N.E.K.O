@@ -38,3 +38,4 @@
 *.vrm binary
 *.vrma binary
 *.moc3 binary
+plugin/plugins/vibe_coding_connector/runtime/bundles/hapi-v0.25.1-win32-x64.zip binary
