@@ -205,12 +205,12 @@ class _AuditPolicy:
         skill_root: Path,
         output_dir: Path,
         system_roots: Iterable[Path],
-        trusted_stat_files: Iterable[Path] = (),
+        trusted_launcher_files: Iterable[Path] = (),
     ) -> None:
         self.skill_root = skill_root
         self.output_dir = output_dir
         self.system_roots = tuple(system_roots)
-        self.trusted_stat_files = frozenset(trusted_stat_files)
+        self.trusted_launcher_files = frozenset(trusted_launcher_files)
         self.first_violation: str | None = None
 
     def _deny(self, message: str) -> NoReturn:
@@ -296,13 +296,30 @@ class _AuditPolicy:
             operation=operation,
         )
 
+    def _is_trusted_launcher(self, lexical: Path, resolved: Path) -> bool:
+        return lexical == resolved and resolved in self.trusted_launcher_files
+
+    def check_open_read(self, value: object) -> Path:
+        """Allow opening the exact verified launcher for reading, nothing else."""
+
+        if isinstance(value, int) and value in {0, 1, 2}:
+            return Path(os.devnull)
+        lexical, resolved = self._resolved(value, operation="open")
+        if self._is_trusted_launcher(lexical, resolved):
+            return resolved
+        return self._check_resolved_read(
+            lexical,
+            resolved,
+            operation="open",
+        )
+
     def check_stat(self, value: object) -> Path:
         """Allow metadata access to the exact verified launcher, nothing else."""
 
         if isinstance(value, int) and value in {0, 1, 2}:
             return Path(os.devnull)
         lexical, resolved = self._resolved(value, operation="os.stat")
-        if lexical == resolved and resolved in self.trusted_stat_files:
+        if self._is_trusted_launcher(lexical, resolved):
             return resolved
         return self._check_resolved_read(
             lexical,
@@ -329,7 +346,12 @@ class _AuditPolicy:
             return True
         if isinstance(flags, int):
             write_flags = (
-                os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+                os.O_WRONLY
+                | os.O_RDWR
+                | os.O_APPEND
+                | os.O_CREAT
+                | os.O_TRUNC
+                | getattr(os, "O_TEMPORARY", 0)
             )
             return bool(flags & write_flags)
         return False
@@ -341,7 +363,7 @@ class _AuditPolicy:
             if self._open_is_write(mode, flags):
                 self.check_write(args[0], operation="open")
             else:
-                self.check_read(args[0], operation="open")
+                self.check_open_read(args[0])
             return
 
         if event == "os.stat" and args:
@@ -540,7 +562,7 @@ def _main(raw_args: list[str]) -> int:
         skill_root=skill_root,
         output_dir=output_dir,
         system_roots=system_roots,
-        trusted_stat_files=(trusted_launcher,),
+        trusted_launcher_files=(trusted_launcher,),
     )
 
     sys.dont_write_bytecode = True

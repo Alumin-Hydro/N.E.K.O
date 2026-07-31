@@ -1052,7 +1052,7 @@ async def test_authorized_script_uses_argv_only_fixed_cwd_and_managed_artifact(
 
 
 @pytest.mark.asyncio
-async def test_sandbox_launcher_allowance_is_exact_and_stat_only(
+async def test_sandbox_launcher_allowance_is_exact_and_read_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1065,7 +1065,12 @@ operation, target = sys.argv[1:3]
 if operation == "stat":
     print(os.stat(target).st_size)
 elif operation == "read":
-    print(Path(target).read_text(encoding="utf-8"))
+    print(len(Path(target).read_bytes()))
+elif operation == "list":
+    print(len(os.listdir(target)))
+elif operation == "write":
+    with Path(target).open("r+", encoding="utf-8"):
+        pass
 else:
     raise RuntimeError("unexpected probe operation")
 """
@@ -1102,14 +1107,26 @@ else:
     assert launcher_stat.is_ok(), launcher_stat
     assert int(launcher_stat.value["stdout"].strip()) == launcher.stat().st_size
 
+    launcher_read = await plugin.skill_loader_run_script(
+        skill_id="fixture-skill",
+        script_path="scripts/build.py",
+        argv=["read", str(launcher)],
+        timeout_seconds=10,
+    )
+
+    assert launcher_read.is_ok(), launcher_read
+    assert int(launcher_read.value["stdout"].strip()) == launcher.stat().st_size
+
     denied_probes = [
-        ("read", launcher),
+        ("list", launcher.parent),
         ("stat", launcher.parent),
         ("stat", sibling_plugin_file),
         ("read", sibling_plugin_file),
+        ("stat", repository_file),
         ("read", repository_file),
         ("stat", outside_secret),
         ("read", outside_secret),
+        ("write", launcher),
     ]
     for operation, target in denied_probes:
         denied = await plugin.skill_loader_run_script(
@@ -1121,10 +1138,10 @@ else:
         error = _assert_error(denied, "sandbox_violation")
         assert isinstance(error.details, dict)
         assert error.details["status"] == "sandbox_violation"
-        assert "SECRET-MUST-NOT-LEAK" not in repr(error.details)
+        assert "SECRET-MUST-NOT-LEAK" not in repr(denied)
 
 
-def test_sandbox_launcher_stat_policy_rejects_path_aliases(
+def test_sandbox_launcher_read_policy_is_exact_and_rejects_path_aliases(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1138,16 +1155,21 @@ def test_sandbox_launcher_stat_policy_rejects_path_aliases(
         skill_root=skill_root,
         output_dir=output_dir,
         system_roots=(),
-        trusted_stat_files=(launcher,),
+        trusted_launcher_files=(launcher,),
     )
 
     assert policy.check_stat(launcher) == launcher
-    with pytest.raises(sandbox_runner_module.SandboxViolation):
-        policy.check_read(launcher, operation="open")
+    assert policy.check_open_read(launcher) == launcher
+    for event in ("os.listdir", "os.scandir", "os.lstat", "os.readlink"):
+        with pytest.raises(sandbox_runner_module.SandboxViolation):
+            policy.audit(event, (launcher,))
+
     hardlink_alias = launcher.with_name("hardlink-alias.py")
     os.link(launcher, hardlink_alias)
     with pytest.raises(sandbox_runner_module.SandboxViolation):
         policy.check_stat(hardlink_alias)
+    with pytest.raises(sandbox_runner_module.SandboxViolation):
+        policy.check_open_read(hardlink_alias)
 
     symlink_alias = launcher.with_name("symlink-alias.py")
 
@@ -1157,12 +1179,53 @@ def test_sandbox_launcher_stat_policy_rejects_path_aliases(
         operation: str,
     ) -> tuple[Path, Path]:
         assert Path(value) == symlink_alias
-        assert operation == "os.stat"
+        assert operation in {"open", "os.stat"}
         return symlink_alias, launcher
 
     monkeypatch.setattr(policy, "_resolved", resolve_alias)
     with pytest.raises(sandbox_runner_module.SandboxViolation):
         policy.check_stat(symlink_alias)
+    with pytest.raises(sandbox_runner_module.SandboxViolation):
+        policy.check_open_read(symlink_alias)
+
+
+def test_sandbox_launcher_read_allowance_never_applies_to_mutations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skill_root = (tmp_path / "managed").resolve()
+    output_dir = skill_root / "runs" / "fixture"
+    output_dir.mkdir(parents=True)
+    launcher = (tmp_path / "plugin" / "_sandbox_runner.py").resolve()
+    launcher.parent.mkdir()
+    launcher.write_text("# trusted launcher\n", encoding="utf-8")
+    policy = sandbox_runner_module._AuditPolicy(
+        skill_root=skill_root,
+        output_dir=output_dir,
+        system_roots=(),
+        trusted_launcher_files=(launcher,),
+    )
+    temporary_flag = getattr(os, "O_TEMPORARY", 1 << 29)
+    monkeypatch.setattr(
+        sandbox_runner_module.os,
+        "O_TEMPORARY",
+        temporary_flag,
+        raising=False,
+    )
+
+    mutation_events = [
+        ("open", (launcher, "r+", 0)),
+        ("open", (launcher, None, temporary_flag)),
+        ("os.remove", (launcher,)),
+        ("os.unlink", (launcher,)),
+        ("os.rename", (launcher, launcher.with_name("renamed.py"))),
+        ("os.replace", (launcher, launcher.with_name("replaced.py"))),
+        ("os.chmod", (launcher, 0o600)),
+        ("os.truncate", (launcher, 0)),
+    ]
+    for event, args in mutation_events:
+        with pytest.raises(sandbox_runner_module.SandboxViolation):
+            policy.audit(event, args)
 
 
 @pytest.mark.asyncio
