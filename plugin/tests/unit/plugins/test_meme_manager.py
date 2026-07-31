@@ -12,13 +12,20 @@ from plugin.plugins.meme_manager import (
     MemeManagerPlugin,
     _detect_extension,
     _matches,
+    _plugin_server_base,
+    _safe_stored_name,
     _validate_image_bytes,
 )
 from plugin.sdk.plugin import SdkError
 
+pytestmark = pytest.mark.plugin_unit
+
 _PNG = base64.b64encode(
-    b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
-).decode()
+    base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0l"
+        "EQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+).decode("ascii")
 
 
 class FakeStore:
@@ -38,6 +45,10 @@ class FakeCtx:
     pass
 
 
+async def _async_value(value: Any) -> Any:
+    return value
+
+
 def _make_plugin(tmp_path, monkeypatch) -> MemeManagerPlugin:
     plugin = MemeManagerPlugin(FakeCtx())
     plugin.store = FakeStore()
@@ -55,15 +66,44 @@ def test_detect_extension_rejects_fake_svg() -> None:
         _detect_extension("evil.svg", b"not svg at all")
 
 
+def test_detect_extension_rejects_mismatched_filename() -> None:
+    with pytest.raises(SdkError, match="扩展名"):
+        _detect_extension("looks-like.jpg", base64.b64decode(_PNG))
+
+
+def test_safe_stored_name_accepts_legacy_jpeg_without_path_escape() -> None:
+    assert _safe_stored_name("0123456789abcdef.jpeg") == "0123456789abcdef.jpeg"
+    assert _safe_stored_name("../0123456789abcdef.jpeg") is None
+
+
+def test_plugin_server_base_honors_public_origin(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "NEKO_USER_PLUGIN_SERVER_ORIGIN",
+        "https://neko.example.test:9443/",
+    )
+    assert _plugin_server_base() == "https://neko.example.test:9443"
+
+
 def test_validate_image_rejects_script_svg() -> None:
     svg = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
     with pytest.raises(SdkError, match="脚本"):
         _validate_image_bytes("x.svg", svg)
 
 
+def test_validate_image_rejects_svg_processing_instruction() -> None:
+    svg = (
+        b'<?xml-stylesheet href="https://example.invalid/a.css"?>'
+        b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>'
+    )
+    with pytest.raises(SdkError, match="处理指令"):
+        _validate_image_bytes("x.svg", svg)
+
+
 def test_validate_image_rejects_oversize() -> None:
     with pytest.raises(SdkError, match="上限"):
-        _validate_image_bytes("x.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * (3 * 1024 * 1024))
+        _validate_image_bytes(
+            "x.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * (3 * 1024 * 1024)
+        )
 
 
 def test_validate_image_rejects_unknown_format() -> None:
@@ -105,7 +145,9 @@ async def test_add_and_list_and_send(tmp_path, monkeypatch) -> None:
 
     sent = await plugin.meme_send(query="摸摸")
     assert sent.is_ok()
-    assert sent.value["image_url"].startswith(f"/plugin/{PLUGIN_ID}/ui/memes/")
+    assert sent.value["image_url"].startswith(
+        f"http://127.0.0.1:48916/plugin/{PLUGIN_ID}/ui/memes/"
+    )
     assert "摸摸头" in sent.value["display_markdown"]
 
     disabled = await plugin.update_meme(meme_id=meme_id, action="disable")
@@ -122,10 +164,16 @@ async def test_add_and_list_and_send(tmp_path, monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_send_empty_library_is_friendly(tmp_path, monkeypatch) -> None:
     plugin = _make_plugin(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        plugin,
+        "_fetch_system_content",
+        lambda _query: _async_value({"success": False, "data": []}),
+    )
     result = await plugin.meme_send(query="hi")
     assert result.is_ok()
     assert result.value["sent"] is False
-    assert "空" in result.value["message"]
+    assert "系统默认在线来源本次暂不可用" in result.value["message"]
+    assert "整个系统没有表情包" not in result.value["message"]
 
 
 @pytest.mark.asyncio
@@ -134,7 +182,9 @@ async def test_add_rejects_bad_base64(tmp_path, monkeypatch) -> None:
     meme_dir = tmp_path / "static" / "memes"
     meme_dir.mkdir(parents=True)
     plugin._meme_dir = meme_dir
-    result = await plugin.add_meme(name="x", filename="x.png", data_base64="!!!not-b64!!!")
+    result = await plugin.add_meme(
+        name="x", filename="x.png", data_base64="!!!not-b64!!!"
+    )
     assert result.is_err()
 
 

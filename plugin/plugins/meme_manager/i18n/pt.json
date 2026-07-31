@@ -1,10 +1,10 @@
 {
   "title": "Gerenciador de memes",
-  "subtitle": "Gerencie os memes que a gatinha pode enviar. Adicione, desative ou exclua; no chat ela escolhe entre os ativados.",
-  "search": "Buscar nome ou tags…",
+  "subtitle": "As fontes on-line existentes ficam em “Padrões do sistema”; gerencie suas imagens separadamente em “Envios do usuário”.",
+  "search": "Buscar nomes ou tags dos seus envios…",
   "add": "Adicionar meme",
   "advanced": "Avançado (limites e notas)",
-  "empty": "Ainda não há memes. Clique em \"Adicionar meme\" para enviar o primeiro.",
+  "empty": "Ainda não há envios do usuário; as fontes padrão continuam disponíveis.",
   "addTitle": "Adicionar meme",
   "pickImage": "Escolha uma imagem (PNG / JPEG / GIF / WebP / SVG, máx. 2MB)",
   "name": "Nome",

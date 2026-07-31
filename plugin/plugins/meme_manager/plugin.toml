@@ -1,10 +1,10 @@
 [plugin]
 id = "meme_manager"
 name = "表情包管理器"
-description = "管理猫娘可用的表情包库：添加、禁用、搜索，聊天中可让猫娘发送表情包。"
-short_description = "Manage the catgirl's meme/sticker library: add, disable, search, and let her send memes in chat."
+description = "统一展示 N.E.K.O 系统默认在线表情来源与用户上传；支持持久化管理和聊天发送。"
+short_description = "View N.E.K.O's default online meme sources and persistently manage user uploads in one catalog."
 keywords = ["表情包", "meme", "sticker", "表情", "贴纸", "ミーム", "スタンプ", "밈", "스티커", "мем", "стикер"]
-version = "0.1.0"
+version = "0.1.1"
 entry = "plugin.plugins.meme_manager:MemeManagerPlugin"
 
 [plugin.author]
@@ -13,6 +13,9 @@ name = "N.E.K.O community"
 [plugin.sdk]
 recommended = ">=0.1.0,<0.2.0"
 supported = ">=0.1.0,<0.3.0"
+
+[plugin.ui]
+enabled = true
 
 [plugin.i18n]
 default_locale = "zh-CN"

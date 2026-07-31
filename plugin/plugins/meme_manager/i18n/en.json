@@ -1,10 +1,10 @@
 {
   "title": "Meme Manager",
-  "subtitle": "Manage the memes the catgirl can send. Add, disable or delete; in chat she picks from enabled memes.",
-  "search": "Search name or tags…",
+  "subtitle": "Existing online sources stay under System defaults; manage your own images separately under User uploads.",
+  "search": "Search user-upload names or tags…",
   "add": "Add meme",
   "advanced": "Advanced (limits and notes)",
-  "empty": "No memes yet. Click \"Add meme\" to upload the first one.",
+  "empty": "No user uploads yet; system default sources are still available.",
   "addTitle": "Add meme",
   "pickImage": "Pick an image (PNG / JPEG / GIF / WebP / SVG, max 2MB)",
   "name": "Name",

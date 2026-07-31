@@ -1,20 +1,30 @@
 """Meme Manager plugin for N.E.K.O.
 
-Manages the catgirl's meme/sticker library: the panel lets users add,
-disable, rename, tag and delete memes; an LLM tool lets the catgirl pick an
-enabled meme and send it into the chat as Markdown pointing at the plugin's
-read-only static assets.
+The plugin presents one catalog made from the host's existing online meme
+search and a persistent user-upload area. Online images remain remote and are
+rendered only through the host meme proxy; uploaded assets are decoded,
+validated, and stored under the plugin runtime data root.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
+import os
 import re
+import threading
 import time
+import warnings
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import quote, urlsplit
+from uuid import uuid4
+from xml.etree import ElementTree
+
+from PIL import Image, UnidentifiedImageError
 
 from plugin.sdk.plugin import (
     Err,
@@ -29,8 +39,10 @@ from plugin.sdk.plugin import (
 
 PLUGIN_ID = "meme_manager"
 _STORE_KEY = "meme_library"
+_SYSTEM_SOURCE_ID = "system:neko-online"
 
 _ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+_CANONICAL_EXTENSION = {".jpeg": ".jpg"}
 _MIME_BY_EXT = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -39,22 +51,48 @@ _MIME_BY_EXT = {
     ".webp": "image/webp",
     ".svg": "image/svg+xml",
 }
-_IMAGE_MAGIC = (
-    (b"\x89PNG\r\n\x1a\n", ".png"),
-    (b"\xff\xd8\xff", ".jpg"),
-    (b"GIF87a", ".gif"),
-    (b"GIF89a", ".gif"),
-    (b"RIFF", ".webp"),
-)
 _MAX_IMAGE_BYTES = 2 * 1024 * 1024
+_MAX_IMAGE_DIMENSION = 4096
+_MAX_IMAGE_PIXELS = 16 * 1024 * 1024
+_MAX_ANIMATION_FRAMES = 256
 _MAX_MEMES = 500
 _MAX_NAME = 48
 _MAX_TAGS = 8
 _MAX_TAG_LEN = 24
+_MAX_SYSTEM_CANDIDATES = 3
+_SYSTEM_FETCH_TIMEOUT_SECONDS = 12.0
+_SYSTEM_MODERATION_TIMEOUT_SECONDS = 10.0
+_SYSTEM_PROXY_PREFLIGHT_TIMEOUT_SECONDS = 6.0
+_SYSTEM_SELECTION_TIMEOUT_SECONDS = 28.0
 
-_SVG_FORBIDDEN = re.compile(
-    rb"<\s*script|foreignObject|\son[a-z]+\s*=|javascript:", flags=re.IGNORECASE
+_STORED_NAME_PATTERN = re.compile(
+    r"^[0-9a-f]{16}\.(?:png|jpe?g|gif|webp|svg)$",
+    flags=re.IGNORECASE,
 )
+_SVG_NUMBER_PATTERN = re.compile(
+    r"^[+]?(?:\d+(?:\.\d*)?|\.\d+)(?:px)?$",
+    flags=re.IGNORECASE,
+)
+_SVG_UNSAFE_TEXT = re.compile(
+    r"javascript:|data:|file:|https?:|//|url\s*\(|@import|expression\s*\(",
+    flags=re.IGNORECASE,
+)
+_SVG_FORBIDDEN_TAGS = {
+    "animate",
+    "animatemotion",
+    "animatetransform",
+    "audio",
+    "discard",
+    "script",
+    "set",
+    "video",
+    "foreignobject",
+    "iframe",
+    "object",
+    "embed",
+    "image",
+    "style",
+}
 
 EMPTY_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -68,7 +106,13 @@ MEME_SEND_SCHEMA: dict[str, Any] = {
         "query": {
             "type": "string",
             "maxLength": 120,
-            "description": "用户想要的表情包内容，例如“摸摸头”“累瘫”“点赞”。",
+            "description": "用户想要的表情内容，例如“摸摸头”“累瘫”“点赞”。",
+        },
+        "source": {
+            "type": "string",
+            "enum": ["auto", "user", "system"],
+            "default": "auto",
+            "description": "auto 优先匹配用户上传，未匹配时使用系统默认在线来源。",
         },
     },
     "additionalProperties": False,
@@ -94,7 +138,10 @@ UPDATE_MEME_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "meme_id": {"type": "string", "minLength": 1, "maxLength": 64},
-        "action": {"type": "string", "enum": ["enable", "disable", "delete", "rename"]},
+        "action": {
+            "type": "string",
+            "enum": ["enable", "disable", "delete", "rename"],
+        },
         "name": {"type": "string", "maxLength": _MAX_NAME},
         "tags": {
             "type": "array",
@@ -111,30 +158,175 @@ def _clean_text(value: Any, limit: int) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
 
 
+def _clean_tags(value: Any) -> list[str]:
+    cleaned: list[str] = []
+    if not isinstance(value, list):
+        return cleaned
+    for tag in value:
+        text = _clean_text(tag, _MAX_TAG_LEN)
+        if text and text not in cleaned:
+            cleaned.append(text)
+        if len(cleaned) >= _MAX_TAGS:
+            break
+    return cleaned
+
+
+def _canonical_extension(value: str) -> str:
+    lowered = value.lower()
+    return _CANONICAL_EXTENSION.get(lowered, lowered)
+
+
 def _detect_extension(filename: str, data: bytes) -> str:
-    ext = Path(filename).suffix.lower()
-    if ext == ".svg":
-        head = data[:512].lstrip()
-        if head.startswith(b"<") and b"<svg" in head[:256].lower():
-            return ext
+    provided = _canonical_extension(Path(filename).suffix)
+    if provided not in {_canonical_extension(item) for item in _ALLOWED_EXTENSIONS}:
+        raise SdkError("仅支持 PNG / JPEG / GIF / WebP / SVG 图片")
+
+    stripped = data[:1024].lstrip()
+    if stripped.startswith(b"<") and b"<svg" in stripped[:512].lower():
+        actual = ".svg"
+    elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+        actual = ".png"
+    elif data.startswith(b"\xff\xd8\xff"):
+        actual = ".jpg"
+    elif data.startswith((b"GIF87a", b"GIF89a")):
+        actual = ".gif"
+    elif len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        actual = ".webp"
+    else:
+        raise SdkError("图片内容与支持的格式不匹配")
+
+    if provided != actual:
+        raise SdkError("文件扩展名与实际图片格式不一致")
+    return actual
+
+
+def _svg_number(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not _SVG_NUMBER_PATTERN.fullmatch(text):
+        return None
+    if text.lower().endswith("px"):
+        text = text[:-2]
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _validate_dimensions(width: float, height: float) -> tuple[int, int]:
+    if width <= 0 or height <= 0:
+        raise SdkError("图片尺寸必须大于 0")
+    if width > _MAX_IMAGE_DIMENSION or height > _MAX_IMAGE_DIMENSION:
+        raise SdkError(f"图片边长不能超过 {_MAX_IMAGE_DIMENSION}px")
+    if width * height > _MAX_IMAGE_PIXELS:
+        raise SdkError("图片像素总量过大")
+    return int(round(width)), int(round(height))
+
+
+def _validate_svg(data: bytes) -> tuple[int, int]:
+    lowered = data.lower()
+    if b"<!doctype" in lowered or b"<!entity" in lowered:
+        raise SdkError("SVG 不允许包含 DTD 或实体声明")
+    try:
+        text = data.decode("utf-8", errors="strict")
+        without_declaration = re.sub(
+            r"^\s*<\?xml(?:\s[^?]*)?\?>",
+            "",
+            text,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        if "<?" in without_declaration:
+            raise SdkError("SVG 不允许包含处理指令")
+        root = ElementTree.fromstring(text)
+    except (UnicodeDecodeError, ElementTree.ParseError) as exc:
+        raise SdkError("SVG 内容无效") from exc
+
+    root_name = str(root.tag).rsplit("}", 1)[-1].lower()
+    if root_name != "svg":
         raise SdkError("SVG 内容无效")
-    for magic, magic_ext in _IMAGE_MAGIC:
-        if data.startswith(magic):
-            return ext if ext in _ALLOWED_EXTENSIONS else magic_ext
-    if ext in _ALLOWED_EXTENSIONS and ext != ".svg":
-        return ext
-    raise SdkError("仅支持 PNG / JPEG / GIF / WebP / SVG 图片")
+
+    for element in root.iter():
+        tag_name = str(element.tag).rsplit("}", 1)[-1].lower()
+        if tag_name in _SVG_FORBIDDEN_TAGS:
+            raise SdkError("SVG 不允许包含脚本、外部资源或活动内容")
+        for raw_name, raw_value in element.attrib.items():
+            attr_name = str(raw_name).rsplit("}", 1)[-1].lower()
+            attr_value = str(raw_value or "").strip()
+            if attr_name.startswith("on"):
+                raise SdkError("SVG 不允许包含事件属性")
+            if attr_name in {"base", "style"}:
+                raise SdkError("SVG 不允许包含外部资源或活动样式")
+            if attr_name == "href" and attr_value and not attr_value.startswith("#"):
+                raise SdkError("SVG 不允许引用外部资源")
+            if _SVG_UNSAFE_TEXT.search(attr_value):
+                raise SdkError("SVG 不允许包含外部资源或活动内容")
+
+    width = _svg_number(root.attrib.get("width"))
+    height = _svg_number(root.attrib.get("height"))
+    if width is None or height is None:
+        view_box = (
+            str(root.attrib.get("viewBox") or root.attrib.get("viewbox") or "")
+            .replace(",", " ")
+            .split()
+        )
+        if len(view_box) == 4:
+            try:
+                width = abs(float(view_box[2]))
+                height = abs(float(view_box[3]))
+            except ValueError:
+                width = height = None
+    if width is None or height is None:
+        raise SdkError("SVG 必须声明可验证的 width/height 或 viewBox")
+    return _validate_dimensions(width, height)
 
 
-def _validate_image_bytes(filename: str, data: bytes) -> str:
+def _validate_raster(data: bytes, expected_ext: str) -> tuple[int, int]:
+    format_extensions = {
+        "PNG": ".png",
+        "JPEG": ".jpg",
+        "GIF": ".gif",
+        "WEBP": ".webp",
+    }
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(data)) as image:
+                actual_ext = format_extensions.get(str(image.format or "").upper())
+                if actual_ext != expected_ext:
+                    raise SdkError("图片 MIME 与实际解码格式不一致")
+                width, height = _validate_dimensions(*image.size)
+                frame_count = int(getattr(image, "n_frames", 1) or 1)
+                if frame_count > _MAX_ANIMATION_FRAMES:
+                    raise SdkError(f"动图帧数不能超过 {_MAX_ANIMATION_FRAMES} 帧")
+                image.verify()
+                return width, height
+    except SdkError:
+        raise
+    except (
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+        UnidentifiedImageError,
+        OSError,
+        ValueError,
+    ) as exc:
+        raise SdkError("图片无法安全解码") from exc
+
+
+def _validate_image_payload(filename: str, data: bytes) -> tuple[str, int, int]:
     if not data:
         raise SdkError("图片内容为空")
     if len(data) > _MAX_IMAGE_BYTES:
         raise SdkError(f"图片超过 {_MAX_IMAGE_BYTES // 1024 // 1024}MB 上限")
     ext = _detect_extension(filename, data)
-    if ext == ".svg" and _SVG_FORBIDDEN.search(data):
-        raise SdkError("SVG 不允许包含脚本或事件属性")
-    return ext
+    if ext == ".svg":
+        width, height = _validate_svg(data)
+    else:
+        width, height = _validate_raster(data, ext)
+    return ext, width, height
+
+
+def _validate_image_bytes(filename: str, data: bytes) -> str:
+    return _validate_image_payload(filename, data)[0]
 
 
 def _matches(meme: Mapping[str, Any], query: str) -> bool:
@@ -146,34 +338,399 @@ def _matches(meme: Mapping[str, Any], query: str) -> bool:
     return any(query_lower in hay.lower() for hay in haystacks)
 
 
+def _plugin_server_base() -> str:
+    for variable in (
+        "NEKO_PLUGIN_SERVER_ORIGIN",
+        "NEKO_USER_PLUGIN_SERVER_ORIGIN",
+        "NEKO_SERVER_ORIGIN",
+    ):
+        raw_origin = os.getenv(variable, "").strip().rstrip("/")
+        try:
+            parsed = urlsplit(raw_origin)
+            if (
+                parsed.scheme in {"http", "https"}
+                and parsed.hostname
+                and parsed.username is None
+                and parsed.password is None
+                and parsed.path in {"", "/"}
+                and not parsed.query
+                and not parsed.fragment
+            ):
+                _ = parsed.port
+                return raw_origin
+        except ValueError:
+            continue
+
+    raw_port = os.getenv("NEKO_USER_PLUGIN_SERVER_PORT", "").strip()
+    port = 48916
+    valid_port = False
+    if raw_port:
+        try:
+            candidate = int(raw_port)
+            if 0 < candidate <= 65535:
+                port = candidate
+                valid_port = True
+        except ValueError:
+            pass
+    if not valid_port:
+        try:
+            from config import USER_PLUGIN_SERVER_PORT
+
+            candidate = int(USER_PLUGIN_SERVER_PORT)
+            if 0 < candidate <= 65535:
+                port = candidate
+        except (ImportError, TypeError, ValueError):
+            pass
+    return f"http://127.0.0.1:{port}"
+
+
+def _main_server_base() -> str:
+    raw_origin = os.getenv("NEKO_MAIN_SERVER_ORIGIN", "").strip().rstrip("/")
+    try:
+        parsed = urlsplit(raw_origin)
+        if (
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.path in {"", "/"}
+            and not parsed.query
+            and not parsed.fragment
+        ):
+            _ = parsed.port
+            return raw_origin
+    except ValueError:
+        pass
+
+    port = 48911
+    for variable in ("NEKO_MAIN_SERVER_PORT", "MAIN_SERVER_PORT"):
+        raw_port = os.getenv(variable, "").strip()
+        if not raw_port:
+            continue
+        try:
+            candidate = int(raw_port)
+            if 0 < candidate <= 65535:
+                port = candidate
+                break
+        except ValueError:
+            continue
+    else:
+        try:
+            from config import MAIN_SERVER_PORT
+
+            candidate = int(MAIN_SERVER_PORT)
+            if 0 < candidate <= 65535:
+                port = candidate
+        except (ImportError, TypeError, ValueError):
+            pass
+    return f"http://127.0.0.1:{port}"
+
+
+def _safe_stored_name(value: Any) -> str | None:
+    name = str(value or "")
+    if Path(name).name != name or not _STORED_NAME_PATTERN.fullmatch(name):
+        return None
+    return name.lower()
+
+
+def _public_path(meme: Mapping[str, Any]) -> str:
+    stored_name = _safe_stored_name(meme.get("stored_name"))
+    if stored_name is None:
+        raise SdkError("表情包文件路径无效")
+    return f"/plugin/{PLUGIN_ID}/ui/memes/{quote(stored_name, safe='')}"
+
+
 def _public_url(meme: Mapping[str, Any]) -> str:
-    return f"/plugin/{PLUGIN_ID}/ui/memes/{meme['stored_name']}"
+    return f"{_plugin_server_base()}{_public_path(meme)}"
+
+
+def _system_proxy_url(remote_url: str) -> str:
+    return f"/api/meme/proxy-image?url={quote(remote_url, safe='')}"
+
+
+def _system_sources() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": _SYSTEM_SOURCE_ID,
+            "name": "N.E.K.O 系统默认",
+            "kind": "online_search",
+            "origin": "system_default",
+            "source": "utils.meme_fetcher.fetch_meme_content",
+            "providers": ["斗图啦", "发表情", "Imgflip"],
+            "selection": "按语言和地区自动选择，在线按需搜索",
+            "description": (
+                "沿用猫娘原本的在线搜索（斗图啦、发表情、Imgflip）；"
+                "图片会经过系统安全检查和代理加载。"
+            ),
+            "read_only": True,
+            "can_delete": False,
+            "can_edit": False,
+            "can_toggle": False,
+            "enabled": True,
+            "available": None,
+            "availability": "on_demand",
+        }
+    ]
+
+
+def _is_allowed_system_url(url: str) -> bool:
+    try:
+        from utils.meme_fetcher import MEME_ALLOWED_HOSTS
+
+        parsed = urlsplit(url)
+    except Exception:
+        return False
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    hostname = (parsed.hostname or "").strip(".").lower()
+    if not hostname:
+        return False
+    return any(
+        hostname == str(allowed).lower()
+        or hostname.endswith("." + str(allowed).lower())
+        for allowed in MEME_ALLOWED_HOSTS
+    )
+
+
+def _store_enabled_setting(config: Any) -> bool | None:
+    if not isinstance(config, Mapping):
+        return None
+    wrapped = config.get("config")
+    if isinstance(wrapped, Mapping):
+        nested = _store_enabled_setting(wrapped)
+        if nested is not None:
+            return nested
+    plugin_cfg = config.get("plugin")
+    if not isinstance(plugin_cfg, Mapping):
+        return None
+    store_cfg = plugin_cfg.get("store")
+    if not isinstance(store_cfg, Mapping):
+        return None
+    enabled = store_cfg.get("enabled")
+    return enabled if type(enabled) is bool else None
+
+
+def _markdown_alt(value: Any) -> str:
+    return _clean_text(value, _MAX_NAME).replace("[", "（").replace("]", "）")
 
 
 @neko_plugin
 class MemeManagerPlugin(NekoPluginBase):
-    """User-managed meme library with an LLM send tool."""
+    """Persistent user memes bridged with the host online meme catalog."""
 
     def __init__(self, ctx: Any) -> None:
         super().__init__(ctx)
+        self._library_lock = threading.RLock()
         self._meme_dir: Path | None = None
+        self._runtime_ui_dir: Path | None = None
+        self._effective_config: dict[str, Any] = {}
+
+    # ------------------------------------------------------------------
+    # Effective config and runtime assets
+    # ------------------------------------------------------------------
+
+    def refresh_runtime_config(
+        self,
+        effective_config: dict[str, object] | None = None,
+    ) -> None:
+        raw_config: Any = effective_config
+        if not isinstance(raw_config, Mapping):
+            raw_config = getattr(self.ctx, "_effective_config", None)
+        if not isinstance(raw_config, Mapping):
+            raw_config = getattr(
+                getattr(self, "_host_ctx", None), "_effective_config", None
+            )
+        config = dict(raw_config) if isinstance(raw_config, Mapping) else {}
+        super().refresh_runtime_config(config)
+        self.store.enabled = _store_enabled_setting(config) is True
+        self._effective_config = config
+
+    async def _reconcile_store_from_effective_config(self) -> dict[str, Any]:
+        candidates: list[Mapping[str, Any]] = []
+        try:
+            dumped = await self.config.dump(timeout=5.0)
+            if isinstance(dumped, Mapping):
+                candidates.append(dumped)
+        except Exception as exc:
+            self.logger.warning("meme_manager effective config read failed: {}", exc)
+
+        for context in (
+            self.ctx,
+            getattr(self, "_host_ctx", None),
+            getattr(self.ctx, "_host_ctx", None),
+        ):
+            effective = getattr(context, "_effective_config", None)
+            if isinstance(effective, Mapping):
+                candidates.append(effective)
+            direct_config = getattr(context, "config", None)
+            if isinstance(direct_config, Mapping):
+                candidates.append(direct_config)
+
+        selected: dict[str, Any] = {}
+        store_enabled = False
+        for candidate in candidates:
+            if not selected:
+                selected = dict(candidate)
+            setting = _store_enabled_setting(candidate)
+            if setting is not None:
+                store_enabled = setting is True
+                selected = dict(candidate)
+                break
+        self.store.enabled = store_enabled
+        self._effective_config = selected
+        return selected
+
+    @staticmethod
+    def _atomic_write(path: Path, data: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            temporary.write_bytes(data)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _prepare_runtime_ui(self) -> bool:
+        source_index = self.config_dir / "static" / "index.html"
+        if not source_index.is_file():
+            raise SdkError("管理面板资源缺失")
+
+        runtime_ui = self.data_path("ui")
+        meme_dir = runtime_ui / "memes"
+        runtime_ui.mkdir(parents=True, exist_ok=True)
+        meme_dir.mkdir(parents=True, exist_ok=True)
+
+        target_index = runtime_ui / "index.html"
+        source_bytes = source_index.read_bytes()
+        if not target_index.is_file() or target_index.read_bytes() != source_bytes:
+            self._atomic_write(target_index, source_bytes)
+
+        self._runtime_ui_dir = runtime_ui
+        self._meme_dir = meme_dir
+        if not self.register_static_ui(
+            str(runtime_ui),
+            cache_control="private, max-age=300",
+        ):
+            raise SdkError("管理面板注册失败")
+        return True
+
+    def _migrate_legacy_assets(self) -> None:
+        if self._meme_dir is None:
+            return
+        legacy_dir = self.config_dir / "static" / "memes"
+        if not legacy_dir.is_dir() or legacy_dir.resolve() == self._meme_dir.resolve():
+            return
+        with self._library_lock:
+            library = self._load_library()
+            for meme in library["memes"]:
+                stored_name = _safe_stored_name(meme.get("stored_name"))
+                if stored_name is None:
+                    continue
+                source = legacy_dir / stored_name
+                target = self._meme_dir / stored_name
+                if target.exists() or not source.is_file():
+                    continue
+                try:
+                    data = source.read_bytes()
+                    _validate_image_payload(stored_name, data)
+                    self._atomic_write(target, data)
+                except (OSError, SdkError) as exc:
+                    self.logger.warning(
+                        "meme_manager legacy asset migration skipped: {}", exc
+                    )
 
     # ------------------------------------------------------------------
     # Store helpers
     # ------------------------------------------------------------------
 
+    def _normalize_meme(self, raw: Any) -> dict[str, Any] | None:
+        if not isinstance(raw, Mapping):
+            return None
+        meme_id = _clean_text(raw.get("id"), 64)
+        name = _clean_text(raw.get("name"), _MAX_NAME)
+        stored_name = _safe_stored_name(raw.get("stored_name"))
+        if not meme_id or not name or stored_name is None:
+            return None
+        try:
+            size_bytes = max(0, int(raw.get("size_bytes") or 0))
+        except (TypeError, ValueError):
+            size_bytes = 0
+        try:
+            created_at = float(raw.get("created_at") or 0)
+        except (TypeError, ValueError):
+            created_at = 0.0
+        try:
+            width = max(0, int(raw.get("width") or 0))
+            height = max(0, int(raw.get("height") or 0))
+        except (TypeError, ValueError):
+            width = height = 0
+        return {
+            "id": meme_id,
+            "name": name,
+            "tags": _clean_tags(raw.get("tags")),
+            "enabled": bool(raw.get("enabled", True)),
+            "stored_name": stored_name,
+            "mime": _MIME_BY_EXT.get(Path(stored_name).suffix.lower(), ""),
+            "size_bytes": size_bytes,
+            "width": width,
+            "height": height,
+            "created_at": created_at,
+        }
+
     def _load_library(self) -> dict[str, Any]:
         if not self.store.enabled:
             return {"memes": []}
         raw = self.store._read_value(_STORE_KEY, {"memes": []})
-        if not isinstance(raw, dict) or not isinstance(raw.get("memes"), list):
+        if not isinstance(raw, Mapping) or not isinstance(raw.get("memes"), list):
             return {"memes": []}
-        return raw
+        memes: list[dict[str, Any]] = []
+        for item in raw["memes"]:
+            normalized = self._normalize_meme(item)
+            if normalized is not None:
+                memes.append(normalized)
+        return {"memes": memes}
 
     def _save_library(self, library: Mapping[str, Any]) -> None:
         if not self.store.enabled:
-            raise SdkError("PluginStore 不可用，无法保存表情包库")
-        self.store._write_value(_STORE_KEY, dict(library))
+            raise SdkError("PluginStore 不可用，无法持久化用户上传")
+        raw_memes = library.get("memes")
+        if not isinstance(raw_memes, list):
+            raise SdkError("表情包目录数据无效")
+        self.store._write_value(_STORE_KEY, {"memes": raw_memes})
+
+    def _asset_path(self, stored_name: Any) -> Path:
+        if self._meme_dir is None:
+            raise SdkError("插件尚未启动完成")
+        safe_name = _safe_stored_name(stored_name)
+        if safe_name is None:
+            raise SdkError("表情包文件路径无效")
+        target = self._meme_dir / safe_name
+        if target.parent.resolve() != self._meme_dir.resolve():
+            raise SdkError("表情包文件路径无效")
+        return target
+
+    def _public_user_item(self, meme: Mapping[str, Any]) -> dict[str, Any]:
+        target = self._asset_path(meme.get("stored_name"))
+        return {
+            "id": meme["id"],
+            "name": meme["name"],
+            "tags": list(meme.get("tags") or []),
+            "enabled": bool(meme.get("enabled", True)),
+            "url": _public_path(meme),
+            "origin": "user_upload",
+            "kind": "image",
+            "source": "用户上传",
+            "read_only": False,
+            "can_delete": True,
+            "can_edit": True,
+            "can_toggle": True,
+            "available": target.is_file(),
+            "created_at": meme.get("created_at", 0),
+            "size_bytes": meme.get("size_bytes", 0),
+            "width": meme.get("width", 0),
+            "height": meme.get("height", 0),
+            "mime": meme.get("mime", ""),
+        }
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -181,17 +738,31 @@ class MemeManagerPlugin(NekoPluginBase):
 
     @lifecycle(id="startup")
     async def startup(self, **_: Any):
+        await self._reconcile_store_from_effective_config()
         try:
-            meme_dir = self.config_dir / "static" / "memes"
-            meme_dir.mkdir(parents=True, exist_ok=True)
-            self._meme_dir = meme_dir
-            self.register_static_ui("static")
-        except Exception as exc:
-            self.logger.warning("meme_manager startup degraded: {}", exc)
-        return Ok({"started": True})
+            self._prepare_runtime_ui()
+            self._migrate_legacy_assets()
+        except (OSError, SdkError) as exc:
+            self.logger.warning("meme_manager startup failed: {}", exc)
+            raise SdkError(str(exc)) from exc
+        return Ok(
+            {
+                "started": True,
+                "store_ready": bool(self.store.enabled),
+                "system_source_count": len(_system_sources()),
+            }
+        )
 
     @lifecycle(id="shutdown")
     async def shutdown(self, **_: Any):
+        try:
+            result = await self.store.close()
+        except Exception as exc:
+            self.logger.warning("meme_manager store close failed: {}", exc)
+            return Err(SdkError("PluginStore 关闭失败"))
+        if result.is_err():
+            self.logger.warning("meme_manager store close failed: {}", result.error)
+            return Err(SdkError("PluginStore 关闭失败"))
         return Ok({"stopped": True})
 
     # ------------------------------------------------------------------
@@ -200,8 +771,8 @@ class MemeManagerPlugin(NekoPluginBase):
 
     @plugin_entry(
         id="get_panel_state",
-        name="读取表情包面板状态",
-        description="列出表情包、统计和上限，供管理面板渲染。",
+        name="读取统一表情包目录",
+        description="列出系统默认来源、用户上传、统计和安全上限。",
         input_schema={
             "type": "object",
             "properties": {"query": {"type": "string", "maxLength": 120}},
@@ -212,41 +783,49 @@ class MemeManagerPlugin(NekoPluginBase):
     async def get_panel_state(self, query: Any = "", **_: Any):
         try:
             query_text = _clean_text(query, 120)
-            library = self._load_library()
-            memes = []
-            for meme in library["memes"]:
-                if not isinstance(meme, dict):
-                    continue
-                if not _matches(meme, query_text):
-                    continue
-                memes.append({
-                    "id": meme["id"],
-                    "name": meme["name"],
-                    "tags": list(meme.get("tags") or []),
-                    "enabled": bool(meme.get("enabled", True)),
-                    "url": _public_url(meme),
-                    "created_at": meme.get("created_at", 0),
-                    "size_bytes": meme.get("size_bytes", 0),
-                })
-            memes.sort(key=lambda item: -float(item.get("created_at") or 0))
-            enabled_count = sum(1 for item in library["memes"] if item.get("enabled", True))
-            return Ok({
-                "memes": memes,
-                "total": len(library["memes"]),
-                "enabled_count": enabled_count,
-                "max_memes": _MAX_MEMES,
-                "max_image_bytes": _MAX_IMAGE_BYTES,
-                "store_ready": self.store.enabled,
-            })
+            with self._library_lock:
+                library = self._load_library()
+                user_memes = [
+                    self._public_user_item(meme)
+                    for meme in library["memes"]
+                    if _matches(meme, query_text)
+                ]
+                user_memes.sort(key=lambda item: -float(item.get("created_at") or 0))
+                enabled_count = sum(
+                    1 for item in library["memes"] if item.get("enabled", True)
+                )
+                total = len(library["memes"])
+            system_sources = _system_sources()
+            return Ok(
+                {
+                    "system_sources": system_sources,
+                    "user_memes": user_memes,
+                    "memes": user_memes,
+                    "catalog": [*system_sources, *user_memes],
+                    "catalog_total": len(system_sources) + total,
+                    "total": total,
+                    "enabled_count": enabled_count,
+                    "max_memes": _MAX_MEMES,
+                    "max_image_bytes": _MAX_IMAGE_BYTES,
+                    "max_image_dimension": _MAX_IMAGE_DIMENSION,
+                    "store_ready": bool(self.store.enabled),
+                    "status_message": (
+                        "系统默认来源已接入（在线按需搜索）；用户上传会持久保存。"
+                        if self.store.enabled
+                        else "系统默认来源已接入（在线按需搜索）；用户上传存储当前未启用。"
+                    ),
+                }
+            )
         except SdkError as exc:
             return Err(exc)
-        except Exception:
-            return Err(SdkError("表情包面板状态暂时不可用"))
+        except Exception as exc:
+            self.logger.warning("meme_manager panel state failed: {}", exc)
+            return Err(SdkError("表情包目录暂时不可用"))
 
     @plugin_entry(
         id="add_meme",
-        name="添加表情包",
-        description="上传一张图片到表情包库（base64，最大 2MB）。",
+        name="添加用户表情包",
+        description="上传一张经过格式、解码、尺寸和路径校验的图片。",
         input_schema=ADD_MEME_SCHEMA,
         timeout=30.0,
     )
@@ -258,57 +837,77 @@ class MemeManagerPlugin(NekoPluginBase):
         tags: Any = None,
         **_: Any,
     ):
+        created_file = False
+        target: Path | None = None
         try:
             if self._meme_dir is None:
                 raise SdkError("插件尚未启动完成")
-            library = self._load_library()
-            if len(library["memes"]) >= _MAX_MEMES:
-                raise SdkError(f"表情包库已满（{_MAX_MEMES} 张）")
             clean_name = _clean_text(name, _MAX_NAME)
             if not clean_name:
                 raise SdkError("名称不能为空")
             clean_filename = Path(str(filename or "")).name[:128]
             if not clean_filename:
                 raise SdkError("文件名无效")
+            encoded = str(data_base64 or "")
+            if len(encoded) > ((_MAX_IMAGE_BYTES * 4) // 3) + 4096:
+                raise SdkError(f"图片超过 {_MAX_IMAGE_BYTES // 1024 // 1024}MB 上限")
             try:
-                data = base64.b64decode(str(data_base64), validate=True)
+                data = base64.b64decode(encoded, validate=True)
             except (binascii.Error, ValueError) as exc:
                 raise SdkError("图片数据不是有效的 base64") from exc
-            ext = _validate_image_bytes(clean_filename, data)
+            ext, width, height = _validate_image_payload(clean_filename, data)
             digest = hashlib.sha256(data).hexdigest()[:16]
-            meme_id = f"meme-{int(time.time())}-{digest[:8]}"
             stored_name = f"{digest}{ext}"
-            target = self._meme_dir / stored_name
-            if not target.exists():
-                target.write_bytes(data)
-            clean_tags = []
-            for tag in (tags if isinstance(tags, list) else []):
-                text = _clean_text(tag, _MAX_TAG_LEN)
-                if text and text not in clean_tags:
-                    clean_tags.append(text)
-                if len(clean_tags) >= _MAX_TAGS:
-                    break
-            meme = {
-                "id": meme_id,
-                "name": clean_name,
-                "tags": clean_tags,
-                "enabled": True,
-                "stored_name": stored_name,
-                "size_bytes": len(data),
-                "created_at": time.time(),
-            }
-            library["memes"].append(meme)
-            self._save_library(library)
-            return Ok({"saved": True, "meme": {**meme, "url": _public_url(meme)}})
+            target = self._asset_path(stored_name)
+
+            with self._library_lock:
+                library = self._load_library()
+                if len(library["memes"]) >= _MAX_MEMES:
+                    raise SdkError(f"用户上传已满（{_MAX_MEMES} 张）")
+                if not target.exists():
+                    self._atomic_write(target, data)
+                    created_file = True
+                meme = {
+                    "id": f"meme-{uuid4().hex}",
+                    "name": clean_name,
+                    "tags": _clean_tags(tags),
+                    "enabled": True,
+                    "stored_name": stored_name,
+                    "mime": _MIME_BY_EXT[ext],
+                    "size_bytes": len(data),
+                    "width": width,
+                    "height": height,
+                    "created_at": time.time(),
+                }
+                library["memes"].append(meme)
+                try:
+                    self._save_library(library)
+                except Exception:
+                    if created_file:
+                        target.unlink(missing_ok=True)
+                    raise
+            return Ok(
+                {
+                    "saved": True,
+                    "message": "已保存到用户上传，刷新或重启后仍会保留。",
+                    "meme": {
+                        **self._public_user_item(meme),
+                        "stored_name": stored_name,
+                    },
+                }
+            )
         except SdkError as exc:
             return Err(exc)
-        except Exception:
+        except Exception as exc:
+            if created_file and target is not None:
+                target.unlink(missing_ok=True)
+            self.logger.warning("meme_manager add failed: {}", exc)
             return Err(SdkError("表情包保存失败"))
 
     @plugin_entry(
         id="update_meme",
-        name="管理表情包",
-        description="启用、禁用、删除或重命名一张表情包。",
+        name="管理用户表情包",
+        description="启用、禁用、删除或编辑一张用户上传表情包。",
         input_schema=UPDATE_MEME_SCHEMA,
         timeout=15.0,
     )
@@ -321,111 +920,381 @@ class MemeManagerPlugin(NekoPluginBase):
         **_: Any,
     ):
         try:
-            meme_id = _clean_text(meme_id, 64)
-            action = _clean_text(action, 16)
-            library = self._load_library()
-            target = next(
-                (item for item in library["memes"] if item.get("id") == meme_id),
-                None,
-            )
-            if target is None:
-                raise SdkError("没有找到这张表情包")
-            if action == "delete":
-                library["memes"] = [
-                    item for item in library["memes"] if item.get("id") != meme_id
-                ]
-                if self._meme_dir is not None:
+            meme_id_text = _clean_text(meme_id, 64)
+            action_text = _clean_text(action, 16)
+            if meme_id_text.startswith("system:"):
+                raise SdkError("系统默认来源为只读，不能删除、编辑或关闭")
+
+            victim: Path | None = None
+            updated_item: dict[str, Any] | None = None
+            with self._library_lock:
+                library = self._load_library()
+                target = next(
+                    (
+                        item
+                        for item in library["memes"]
+                        if item.get("id") == meme_id_text
+                    ),
+                    None,
+                )
+                if target is None:
+                    raise SdkError("没有找到这张用户上传表情包")
+                if action_text == "delete":
+                    library["memes"] = [
+                        item
+                        for item in library["memes"]
+                        if item.get("id") != meme_id_text
+                    ]
                     still_used = any(
                         item.get("stored_name") == target.get("stored_name")
                         for item in library["memes"]
                     )
-                    victim = self._meme_dir / str(target.get("stored_name") or "")
-                    if not still_used and victim.is_file() and victim.parent == self._meme_dir:
-                        victim.unlink(missing_ok=True)
-            elif action in {"enable", "disable"}:
-                target["enabled"] = action == "enable"
-            elif action == "rename":
-                clean_name = _clean_text(name, _MAX_NAME)
-                if not clean_name:
-                    raise SdkError("名称不能为空")
-                target["name"] = clean_name
-                if isinstance(tags, list):
-                    clean_tags = []
-                    for tag in tags:
-                        text = _clean_text(tag, _MAX_TAG_LEN)
-                        if text and text not in clean_tags:
-                            clean_tags.append(text)
-                        if len(clean_tags) >= _MAX_TAGS:
-                            break
-                    target["tags"] = clean_tags
-            else:
-                raise SdkError("不支持的操作")
-            self._save_library(library)
-            return Ok({"updated": True, "action": action, "meme_id": meme_id})
+                    if not still_used:
+                        victim = self._asset_path(target.get("stored_name"))
+                elif action_text in {"enable", "disable"}:
+                    target["enabled"] = action_text == "enable"
+                    updated_item = target
+                elif action_text == "rename":
+                    clean_name = _clean_text(name, _MAX_NAME)
+                    if not clean_name:
+                        raise SdkError("名称不能为空")
+                    target["name"] = clean_name
+                    if isinstance(tags, list):
+                        target["tags"] = _clean_tags(tags)
+                    updated_item = target
+                else:
+                    raise SdkError("不支持的操作")
+                self._save_library(library)
+
+            if victim is not None:
+                try:
+                    victim.unlink(missing_ok=True)
+                except OSError as exc:
+                    self.logger.warning("meme_manager orphan cleanup failed: {}", exc)
+            return Ok(
+                {
+                    "updated": True,
+                    "action": action_text,
+                    "meme_id": meme_id_text,
+                    "message": (
+                        "用户上传已删除。"
+                        if action_text == "delete"
+                        else "更改已保存，刷新或重启后仍会保留。"
+                    ),
+                    "meme": (
+                        self._public_user_item(updated_item)
+                        if updated_item is not None
+                        else None
+                    ),
+                }
+            )
         except SdkError as exc:
             return Err(exc)
-        except Exception:
+        except Exception as exc:
+            self.logger.warning("meme_manager update failed: {}", exc)
             return Err(SdkError("表情包更新失败"))
 
+    @plugin_entry(
+        id="restore_defaults",
+        name="恢复系统默认目录",
+        description="删除全部用户上传，只保留不可修改的系统默认在线来源。",
+        input_schema=EMPTY_SCHEMA,
+        timeout=20.0,
+    )
+    async def restore_defaults(self, **_: Any):
+        try:
+            victims: set[Path] = set()
+            with self._library_lock:
+                library = self._load_library()
+                for meme in library["memes"]:
+                    victims.add(self._asset_path(meme.get("stored_name")))
+                removed = len(library["memes"])
+                self._save_library({"memes": []})
+            cleanup_failures = 0
+            for victim in victims:
+                try:
+                    victim.unlink(missing_ok=True)
+                except OSError as exc:
+                    cleanup_failures += 1
+                    self.logger.warning("meme_manager reset cleanup failed: {}", exc)
+            return Ok(
+                {
+                    "restored": True,
+                    "removed": removed,
+                    "cleanup_failures": cleanup_failures,
+                    "message": (f"已移除 {removed} 个用户上传，系统默认来源保持不变。"),
+                }
+            )
+        except SdkError as exc:
+            return Err(exc)
+        except Exception as exc:
+            self.logger.warning("meme_manager restore defaults failed: {}", exc)
+            return Err(SdkError("恢复系统默认目录失败"))
+
     # ------------------------------------------------------------------
-    # LLM capability
+    # System source bridge and LLM capability
     # ------------------------------------------------------------------
+
+    async def _fetch_system_content(self, query: str) -> Mapping[str, Any]:
+        from utils.meme_fetcher import fetch_meme_content
+
+        return await asyncio.wait_for(
+            fetch_meme_content(keyword=query, limit=_MAX_SYSTEM_CANDIDATES),
+            timeout=_SYSTEM_FETCH_TIMEOUT_SECONDS,
+        )
+
+    async def _moderate_system_candidate(
+        self,
+        candidate: Mapping[str, Any],
+    ) -> bool:
+        from utils.meme_moderation import moderate_meme_image_url
+
+        url = str(candidate.get("url") or "").strip()
+        if not _is_allowed_system_url(url):
+            return False
+        try:
+            moderation = await asyncio.wait_for(
+                moderate_meme_image_url(url, fail_closed=False),
+                timeout=_SYSTEM_MODERATION_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "meme_manager system candidate moderation failed: {}", exc
+            )
+            return False
+        return bool(getattr(moderation, "allowed", False))
+
+    async def _system_candidate_fetchable(self, url: str) -> bool:
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(
+                timeout=_SYSTEM_PROXY_PREFLIGHT_TIMEOUT_SECONDS,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                response = await client.get(
+                    f"{_main_server_base()}/api/meme/proxy-image",
+                    params={"url": url},
+                )
+        except Exception as exc:
+            self.logger.warning(
+                "meme_manager system candidate proxy preflight failed: {}", exc
+            )
+            return False
+        media_type = str(response.headers.get("content-type") or "").lower()
+        fetchable = (
+            200 <= response.status_code < 300
+            and media_type.startswith("image/")
+            and bool(response.content)
+        )
+        if not fetchable:
+            self.logger.warning(
+                "meme_manager system candidate proxy rejected: status={} mime={} bytes={}",
+                response.status_code,
+                media_type or "missing",
+                len(response.content),
+            )
+        return bool(fetchable)
+
+    async def _pick_system_candidate(
+        self,
+        query: str,
+    ) -> tuple[dict[str, Any] | None, Mapping[str, Any] | None]:
+        try:
+            result = await self._fetch_system_content(query)
+        except Exception as exc:
+            self.logger.warning("meme_manager system fetch failed: {}", exc)
+            return None, None
+        if not isinstance(result, Mapping) or not result.get("success"):
+            return None, result if isinstance(result, Mapping) else None
+        candidates = result.get("data")
+        if not isinstance(candidates, list):
+            return None, result
+        for raw_candidate in candidates[:_MAX_SYSTEM_CANDIDATES]:
+            if not isinstance(raw_candidate, Mapping):
+                continue
+            remote_url = str(raw_candidate.get("url") or "").strip()
+            if not _is_allowed_system_url(remote_url):
+                continue
+            if not await self._moderate_system_candidate(raw_candidate):
+                continue
+            if not await self._system_candidate_fetchable(remote_url):
+                continue
+            candidate = {
+                "title": _clean_text(
+                    raw_candidate.get("title") or "系统表情包",
+                    _MAX_NAME,
+                ),
+                "url": remote_url,
+                "source": _clean_text(
+                    raw_candidate.get("source") or result.get("source") or "系统默认",
+                    32,
+                ),
+                "type": _clean_text(raw_candidate.get("type") or "meme", 12),
+            }
+            return candidate, result
+        return None, result
+
+    def _send_markdown(self, markdown: str) -> bool:
+        try:
+            self.push_message(
+                visibility=["chat"],
+                ai_behavior="blind",
+                parts=[{"type": "text", "text": markdown}],
+            )
+            return True
+        except Exception as exc:
+            self.logger.warning("meme_manager push failed: {}", exc)
+            return False
+
+    def _user_send_result(
+        self,
+        meme: Mapping[str, Any],
+        *,
+        exact_match: bool,
+        fallback_reason: str = "",
+    ) -> dict[str, Any]:
+        url = _public_url(meme)
+        markdown = f"![{_markdown_alt(meme.get('name'))}]({url})"
+        sent = self._send_markdown(markdown)
+        if fallback_reason:
+            message = f"{fallback_reason}，改用用户上传的「{meme['name']}」。"
+        elif exact_match:
+            message = f"已从用户上传中找到「{meme['name']}」。"
+        else:
+            message = f"已从用户上传中选择「{meme['name']}」。"
+        if not sent:
+            message += " 图片已找到，但发送到聊天未完成。"
+        return {
+            "sent": sent,
+            "message": message,
+            "image_url": url,
+            "display_markdown": markdown,
+            "source_kind": "user_upload",
+            "source": "用户上传",
+            "meme_id": meme.get("id"),
+        }
 
     @llm_tool(
         name="meme_send",
         description=(
-            "从用户的表情包库中挑一张合适的表情包发到聊天里。"
-            "用户说“发个表情”“来个摸摸头”“给我个累瘫的表情”“发个点赞”等时调用。"
-            "query 描述想要的表情内容；找不到完全匹配时会挑一张最相近的。"
+            "发送一张表情包。优先匹配用户上传；没有匹配时沿用 N.E.K.O "
+            "系统默认在线表情包来源，并通过系统安全检查与图片代理加载。"
         ),
         parameters=MEME_SEND_SCHEMA,
-        timeout=20.0,
+        timeout=35.0,
     )
     @plugin_entry(
         id="meme_send",
         name="发送表情包",
-        description="从启用的表情包中选一张，以图片 Markdown 形式发到聊天。",
+        description="从统一目录选择一张表情包发到聊天，并明确实际来源。",
         input_schema=MEME_SEND_SCHEMA,
-        timeout=20.0,
-        llm_result_fields=["message", "image_url", "display_markdown"],
+        timeout=35.0,
+        llm_result_fields=[
+            "message",
+            "image_url",
+            "display_markdown",
+            "source_kind",
+            "source",
+        ],
     )
-    async def meme_send(self, query: Any = "", **_: Any):
+    async def meme_send(
+        self,
+        query: Any = "",
+        source: Any = "auto",
+        **_: Any,
+    ):
         try:
             query_text = _clean_text(query, 120)
-            library = self._load_library()
-            enabled = [
-                item for item in library["memes"]
-                if isinstance(item, dict) and item.get("enabled", True)
-            ]
-            if not enabled:
-                return Ok({
-                    "sent": False,
-                    "message": "表情包库是空的，主人可以先在管理面板里添加几张。",
-                })
+            source_mode = _clean_text(source, 16).lower() or "auto"
+            if source_mode not in {"auto", "user", "system"}:
+                raise SdkError("来源必须是 auto、user 或 system")
+            with self._library_lock:
+                library = self._load_library()
+                enabled = [
+                    item
+                    for item in library["memes"]
+                    if item.get("enabled", True)
+                    and self._asset_path(item.get("stored_name")).is_file()
+                ]
             matches = [item for item in enabled if _matches(item, query_text)]
-            pick = (matches or enabled)[0]
-            url = _public_url(pick)
-            markdown = f"![{pick['name']}]({url})"
-            try:
-                self.push_message(
-                    visibility=["chat"],
-                    ai_behavior="blind",
-                    parts=[{"type": "text", "text": markdown}],
+
+            if source_mode != "system" and matches:
+                return Ok(self._user_send_result(matches[0], exact_match=True))
+            if source_mode == "user":
+                if enabled:
+                    return Ok(self._user_send_result(enabled[0], exact_match=False))
+                return Ok(
+                    {
+                        "sent": False,
+                        "message": "当前没有已启用的用户上传表情包。",
+                        "source_kind": "user_upload",
+                        "source": "用户上传",
+                    }
                 )
-                sent = True
-            except Exception:
-                sent = False
-            if matches:
-                message = f"找到了「{pick['name']}」，已经发给主人。"
-            else:
-                message = f"没有完全匹配的表情，挑了一张「{pick['name']}」发给主人。"
-            return Ok({
-                "sent": sent,
-                "message": message,
-                "image_url": url,
-                "display_markdown": markdown,
-            })
+
+            try:
+                candidate, system_result = await asyncio.wait_for(
+                    self._pick_system_candidate(query_text),
+                    timeout=_SYSTEM_SELECTION_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                self.logger.warning("meme_manager system selection timed out")
+                candidate, system_result = None, {"error": "selection_timeout"}
+            if candidate is not None:
+                proxy_url = _system_proxy_url(candidate["url"])
+                markdown = f"![{_markdown_alt(candidate['title'])}]({proxy_url})"
+                sent = self._send_markdown(markdown)
+                source_name = candidate["source"] or "系统默认"
+                message = (
+                    f"已从系统默认在线来源 {source_name} 找到「{candidate['title']}」。"
+                )
+                if not sent:
+                    message += " 图片已找到，但发送到聊天未完成。"
+                return Ok(
+                    {
+                        "sent": sent,
+                        "message": message,
+                        "image_url": proxy_url,
+                        "display_markdown": markdown,
+                        "source_kind": "system_default",
+                        "source": source_name,
+                        "region": (
+                            system_result.get("region")
+                            if isinstance(system_result, Mapping)
+                            else None
+                        ),
+                        "keyword_used": (
+                            system_result.get("keyword_used")
+                            if isinstance(system_result, Mapping)
+                            else query_text
+                        ),
+                    }
+                )
+
+            if source_mode == "auto" and enabled:
+                return Ok(
+                    self._user_send_result(
+                        enabled[0],
+                        exact_match=False,
+                        fallback_reason=(
+                            "没有匹配的用户上传，系统默认在线来源本次暂不可用"
+                        ),
+                    )
+                )
+            return Ok(
+                {
+                    "sent": False,
+                    "message": (
+                        "没有匹配的用户上传；系统默认在线来源本次暂不可用，请稍后再试。"
+                    ),
+                    "source_kind": "system_default",
+                    "source": "N.E.K.O 系统默认",
+                }
+            )
         except SdkError as exc:
             return Err(exc)
-        except Exception:
+        except Exception as exc:
+            self.logger.warning("meme_manager send failed: {}", exc)
             return Err(SdkError("表情包发送失败"))
