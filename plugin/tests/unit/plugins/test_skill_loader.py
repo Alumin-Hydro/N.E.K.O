@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,8 @@ payload = {
     "cwd": str(Path.cwd()),
     "root": os.environ["NEKO_SKILL_ROOT"],
     "secret": os.environ.get("UNIT_TEST_SECRET"),
+    "stdout_encoding": sys.stdout.encoding,
+    "utf8_mode": sys.flags.utf8_mode,
 }
 (output_dir / "result.json").write_text(
     json.dumps(payload, ensure_ascii=False),
@@ -300,6 +303,165 @@ def _assert_error(result: Any, code: str) -> SdkError:
     return result.error
 
 
+_FAILURE_STDERR_JSON_LIMIT = 10_000
+_FAILURE_STDOUT_JSON_LIMIT = 3_000
+_FAILURE_DIAGNOSTIC_JSON_LIMIT = 4_000
+_FAILURE_ARTIFACT_JSON_LIMIT = 4_000
+_FAILURE_TOTAL_LIMIT = 24_000
+_FAILURE_ARTIFACT_LIMIT = 8
+
+
+def _middle_truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    marker = "...[middle truncated]..."
+    available = limit - len(marker)
+    if available <= 0:
+        return marker[:limit]
+    head = available // 2
+    tail = available - head
+    return text[:head] + marker + (text[-tail:] if tail else "")
+
+
+def _contains_forbidden_text(value: object, forbidden_values: tuple[str, ...]) -> bool:
+    if isinstance(value, str):
+        return any(token and token in value for token in forbidden_values)
+    if isinstance(value, Mapping):
+        return any(
+            _contains_forbidden_text(key, forbidden_values)
+            or _contains_forbidden_text(item, forbidden_values)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(
+            _contains_forbidden_text(item, forbidden_values) for item in value
+        )
+    return False
+
+
+def _sanitize_failure_text(value: object, forbidden_values: tuple[str, ...]) -> str:
+    if isinstance(value, str):
+        text = value
+    elif value is None:
+        text = ""
+    elif isinstance(value, (bool, int, float)):
+        text = str(value)
+    else:
+        text = f"<{type(value).__name__}>"
+    text = _redact(text.replace("\r\n", "\n").replace("\r", "\n"))
+    for token in forbidden_values:
+        if token:
+            text = text.replace(token, "[redacted]")
+    return text
+
+
+def _bounded_json(value: object, limit: int) -> str:
+    rendered = json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _middle_truncate(rendered, limit)
+
+
+def _script_failure_diagnostic(
+    error: object,
+    *,
+    forbidden_values: tuple[str, ...] = (),
+) -> str:
+    details = error.details if isinstance(error, SdkError) else None
+    details = details if isinstance(details, Mapping) else {}
+    if _contains_forbidden_text(details, forbidden_values):
+        pytest.fail(
+            "runner result details exposed the scrubbed test secret; "
+            "diagnostic suppressed",
+            pytrace=False,
+        )
+
+    raw_diagnostic = details.get("diagnostic")
+    if isinstance(raw_diagnostic, Mapping):
+        diagnostic = {
+            key: _sanitize_failure_text(raw_diagnostic.get(key), forbidden_values)
+            for key in ("code", "message", "operation", "module")
+            if raw_diagnostic.get(key) is not None
+        }
+    else:
+        diagnostic = {
+            "value": _sanitize_failure_text(raw_diagnostic, forbidden_values)
+        }
+
+    raw_artifacts = details.get("artifacts")
+    artifact_records: list[dict[str, object]] = []
+    if isinstance(raw_artifacts, list):
+        for item in raw_artifacts:
+            if not isinstance(item, Mapping):
+                continue
+            size_bytes = item.get("size_bytes")
+            artifact_records.append(
+                {
+                    "relative_path": _middle_truncate(
+                        _sanitize_failure_text(
+                            item.get("relative_path"), forbidden_values
+                        ),
+                        256,
+                    ),
+                    "size_bytes": (
+                        size_bytes
+                        if isinstance(size_bytes, int)
+                        and not isinstance(size_bytes, bool)
+                        else None
+                    ),
+                }
+            )
+    artifact_records.sort(
+        key=lambda item: (str(item["relative_path"]), str(item["size_bytes"]))
+    )
+    shown_artifacts = artifact_records[:_FAILURE_ARTIFACT_LIMIT]
+
+    def bounded_integer(value: object) -> int | None:
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    status = _bounded_json(
+        _sanitize_failure_text(details.get("status"), forbidden_values),
+        256,
+    )
+    exit_code = _bounded_json(
+        bounded_integer(details.get("exit_code")),
+        128,
+    )
+    stdout_summary = {
+        "bytes": bounded_integer(details.get("stdout_bytes")),
+        "text": _sanitize_failure_text(details.get("stdout"), forbidden_values),
+        "truncated": details.get("stdout_truncated") is True,
+    }
+    artifact_summary = {
+        "bytes": bounded_integer(details.get("artifact_bytes")),
+        "count": bounded_integer(details.get("artifact_count")),
+        "records": shown_artifacts,
+        "records_shown": len(shown_artifacts),
+        "records_truncated": len(artifact_records) > len(shown_artifacts),
+    }
+    stderr_summary = {
+        "bytes": bounded_integer(details.get("stderr_bytes")),
+        "text": _sanitize_failure_text(details.get("stderr"), forbidden_values),
+        "truncated": details.get("stderr_truncated") is True,
+    }
+    lines = [
+        "skill_loader bounded/redacted result details:",
+        f"status={status}",
+        f"exit_code={exit_code}",
+        "diagnostic="
+        + _bounded_json(diagnostic, _FAILURE_DIAGNOSTIC_JSON_LIMIT),
+        "stdout_summary="
+        + _bounded_json(stdout_summary, _FAILURE_STDOUT_JSON_LIMIT),
+        "artifact_summary="
+        + _bounded_json(artifact_summary, _FAILURE_ARTIFACT_JSON_LIMIT),
+        "stderr=" + _bounded_json(stderr_summary, _FAILURE_STDERR_JSON_LIMIT),
+    ]
+    return _middle_truncate("\n".join(lines), _FAILURE_TOTAL_LIMIT)
+
+
 def test_parse_frontmatter_and_redact() -> None:
     parsed = parse_skill_markdown(_SKILL_MD)
     assert parsed["name"] == "Fixture Deck Skill"
@@ -310,6 +472,76 @@ def test_parse_frontmatter_and_redact() -> None:
     assert "sk-abcdefgh1234" not in redacted
     assert "hunter2" not in redacted
     assert "api_keys.json" not in redacted
+
+
+def test_script_failure_diagnostic_is_bounded_redacted_and_deterministic() -> None:
+    details = {
+        "status": "failed",
+        "exit_code": 1,
+        "stderr": (
+            "TRACEBACK-HEAD password: hunter2\r\n"
+            + "x" * 20_000
+            + "\r\nTRACEBACK-TAIL"
+        ),
+        "stderr_bytes": 20_100,
+        "stderr_truncated": True,
+        "stdout": "sk-abcdefgh1234 " + "y" * 8_000,
+        "stdout_bytes": 8_018,
+        "stdout_truncated": True,
+        "diagnostic": {
+            "code": "script_failed",
+            "message": "token=diagnostic-secret",
+            "ignored_environment": "ENV-MUST-NOT-PRINT",
+        },
+        "artifact_count": 12,
+        "artifact_bytes": 78,
+        "artifacts": [
+            {
+                "path": f"ABSOLUTE-MUST-NOT-PRINT/{index}",
+                "relative_path": f"result-{index:02d}.json",
+                "size_bytes": index + 1,
+            }
+            for index in range(12)
+        ],
+        "environment": {"UNIT_TEST_SECRET": "ENV-MUST-NOT-PRINT"},
+    }
+    error = SdkError("generic", code="script_failed", details=details)
+
+    first = _script_failure_diagnostic(error)
+    second = _script_failure_diagnostic(error)
+
+    assert first == second
+    assert len(first) <= _FAILURE_TOTAL_LIMIT
+    assert 'status="failed"' in first
+    assert "exit_code=1" in first
+    assert 'diagnostic={"code":"script_failed"' in first
+    assert "stdout_summary=" in first
+    assert "artifact_summary=" in first
+    assert "stderr=" in first
+    assert "TRACEBACK-HEAD" in first
+    assert "TRACEBACK-TAIL" in first
+    assert "[redacted]" in first
+    assert "hunter2" not in first
+    assert "sk-abcdefgh1234" not in first
+    assert "diagnostic-secret" not in first
+    assert "ENV-MUST-NOT-PRINT" not in first
+    assert "ABSOLUTE-MUST-NOT-PRINT" not in first
+    assert '"records_shown":8' in first
+    assert "result-07.json" in first
+    assert "result-08.json" not in first
+
+    scrubbed_test_secret = "literal-secret-not-matched-by-redaction"
+    unsafe_error = SdkError(
+        "generic",
+        code="script_failed",
+        details={"stderr": scrubbed_test_secret},
+    )
+    with pytest.raises(pytest.fail.Exception) as exc_info:
+        _script_failure_diagnostic(
+            unsafe_error,
+            forbidden_values=(scrubbed_test_secret,),
+        )
+    assert scrubbed_test_secret not in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
@@ -1005,7 +1237,8 @@ async def test_authorized_script_uses_argv_only_fixed_cwd_and_managed_artifact(
         authorized=True,
     )
     assert authorized.is_ok()
-    monkeypatch.setenv("UNIT_TEST_SECRET", "must-not-be-inherited")
+    test_secret = "must-not-be-inherited"
+    monkeypatch.setenv("UNIT_TEST_SECRET", test_secret)
     original_popen = runner_module.subprocess.Popen
     popen_calls: list[dict[str, Any]] = []
 
@@ -1022,13 +1255,18 @@ async def test_authorized_script_uses_argv_only_fixed_cwd_and_managed_artifact(
         timeout_seconds=10,
     )
 
-    assert result.is_ok(), result
+    assert result.is_ok(), _script_failure_diagnostic(
+        result.error if result.is_err() else None,
+        forbidden_values=(test_secret,),
+    )
     assert result.value["status"] == "succeeded"
     payload = json.loads(result.value["stdout"])
     assert payload["argv"] == [literal_arg, "猫"]
     assert payload["cwd"] == result.value["cwd"]
     assert payload["root"] == result.value["cwd"]
     assert payload["secret"] is None
+    assert payload["utf8_mode"] == 1
+    assert payload["stdout_encoding"].lower().replace("-", "") == "utf8"
     managed_root = plugin._managed_root.resolve()
     Path(result.value["cwd"]).resolve().relative_to(managed_root)
     output_dir = Path(result.value["output_dir"]).resolve()
@@ -1043,6 +1281,12 @@ async def test_authorized_script_uses_argv_only_fixed_cwd_and_managed_artifact(
     call = popen_calls[0]
     assert call["shell"] is False
     assert isinstance(call["args"], list)
+    flags = list(runner_module._PYTHON_SANDBOX_FLAGS)
+    assert call["args"][1 : 1 + len(flags)] == flags
+    assert (
+        Path(call["args"][1 + len(flags)]).resolve()
+        == Path(sandbox_runner_module.__file__).resolve()
+    )
     assert literal_arg in call["args"]
     assert call["cwd"] == result.value["cwd"]
     assert "UNIT_TEST_SECRET" not in call["env"]

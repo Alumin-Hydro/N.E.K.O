@@ -99,6 +99,9 @@ class RunnerLimits:
 
 
 DEFAULT_RUNNER_LIMITS = RunnerLimits()
+# ``-I`` ignores PYTHONIOENCODING/PYTHONUTF8, so UTF-8 must be explicit for
+# Windows pipes and the runner's UTF-8 bounded-output protocol.
+_PYTHON_SANDBOX_FLAGS = ("-I", "-B", "-u", "-X", "utf8")
 
 
 class RunnerError(RuntimeError):
@@ -218,7 +221,7 @@ def detect_python_runtime() -> dict[str, object]:
             f"{sys.version_info.major}.{sys.version_info.minor}."
             f"{sys.version_info.micro}"
         ),
-        "isolated_flags": ["-I", "-B", "-u"],
+        "isolated_flags": list(_PYTHON_SANDBOX_FLAGS),
         "message": "Python script execution is available in the isolated runtime.",
     }
 
@@ -920,9 +923,7 @@ def _run_python_script_sync(
 
     command = [
         str(executable),
-        "-I",
-        "-B",
-        "-u",
+        *_PYTHON_SANDBOX_FLAGS,
         str(sandbox_entry),
         "--skill-root",
         str(resolved_root),
