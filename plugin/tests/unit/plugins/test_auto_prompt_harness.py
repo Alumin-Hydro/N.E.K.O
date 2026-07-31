@@ -8,7 +8,9 @@ import inspect
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import threading
 import time
 import tomllib
@@ -30,6 +32,7 @@ from plugin.plugins.auto_prompt_harness.bindings import (
     card_fingerprint,
     is_managed_overlay,
     normalize_adaptation_text,
+    overlay_integrity_fingerprint,
     prompt_storage_mode,
     provenance_fingerprint,
     provenance_for,
@@ -506,12 +509,19 @@ async def test_start_deep_copies_original_and_marks_unique_overlay(
         "overlay_name_created": overlay_name,
         "original_card_fingerprint": card_fingerprint(original_snapshot),
         "base_prompt_fingerprint": started["base_prompt_fingerprint"],
+        "overlay_integrity_fingerprint": provenance[
+            "overlay_integrity_fingerprint"
+        ],
         "managed_prompt_composition_required": False,
         "prompt_storage_mode": PROMPT_STORAGE_SYSTEM,
         "persona_materialized": True,
         "created_at": provenance["created_at"],
     }
     assert re.fullmatch(r"[a-f0-9]{24}", provenance["binding_id"])
+    assert (
+        provenance["overlay_integrity_fingerprint"]
+        == overlay_integrity_fingerprint(overlay)
+    )
     assert overlay is not original_snapshot
     assert overlay["喜欢的事物"] is not original_snapshot["喜欢的事物"]
     assert any(path == "/api/characters/reload" for _, path, _ in host.calls)
@@ -899,6 +909,47 @@ async def test_legacy_restore_reloads_after_404_and_skips_new_user_choice(
     assert restored["preserved_user_choice"] is True
     assert (await manager.aload_characters())["当前猫娘"] == "第三张卡"
     assert manager.save_calls == saves_before + 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_restore_card_race_fails_before_plugin_save(
+    tmp_path: Path,
+) -> None:
+    plugin, _store, manager, host, started = await start_plugin(tmp_path)
+    overlay_name = started["overlay_name"]
+    saves_after_race = -1
+
+    async def racing_legacy_host(
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None,
+    ) -> tuple[int, dict[str, Any]]:
+        nonlocal saves_after_race
+        if path == "/api/characters/managed-overlay/restore-original":
+            await mutate_characters(
+                manager,
+                lambda value: value["猫娘"][overlay_name][
+                    "性格特点"
+                ].append("用户并发修改"),
+            )
+            saves_after_race = manager.save_calls
+            return 404, {"detail": "Not Found"}
+        return await host(method, path, payload)
+
+    from plugin.plugins.auto_prompt_harness.bindings import CharacterConfigBridge
+
+    plugin._character_bridge = CharacterConfigBridge(
+        manager,
+        request_handler=racing_legacy_host,
+    )
+    restored = await plugin.restore_original()
+    after = await manager.aload_characters()
+
+    assert error_code(restored) == "overlay_changed"
+    assert saves_after_race >= 0
+    assert manager.save_calls == saves_after_race
+    assert after["当前猫娘"] == overlay_name
+    assert "用户并发修改" in after["猫娘"][overlay_name]["性格特点"]
 
 
 @pytest.mark.asyncio
@@ -1380,6 +1431,217 @@ async def test_package_only_legacy_host_full_binding_lifecycle(
     assert "_AUTO_PROMPT_HARNESS_ADAPTATION_START" not in persona_source
 
 
+def test_copied_plugin_tree_runs_legacy_character_adapter(
+    tmp_path: Path,
+) -> None:
+    isolated_plugins_root = tmp_path / "isolated-host" / "plugin" / "plugins"
+    isolated_plugin = isolated_plugins_root / PLUGIN_ID
+    shutil.copytree(
+        PLUGIN_DIR,
+        isolated_plugin,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
+    runner = r"""
+import asyncio
+import copy
+import json
+import os
+from pathlib import Path
+
+import plugin.plugins
+
+isolated_plugins_root = Path(
+    os.environ["APH_ISOLATED_PLUGINS_ROOT"]
+).resolve()
+plugin.plugins.__path__ = [str(isolated_plugins_root)]
+
+from plugin.plugins.auto_prompt_harness import bindings
+
+loaded_from = Path(bindings.__file__).resolve()
+expected_plugin = isolated_plugins_root / "auto_prompt_harness"
+assert loaded_from.is_relative_to(expected_plugin)
+
+
+class MemoryManager:
+    def __init__(self, characters):
+        self.characters = copy.deepcopy(characters)
+        self.save_calls = 0
+
+    async def aload_characters(self):
+        return copy.deepcopy(self.characters)
+
+    async def asave_characters(self, characters):
+        self.save_calls += 1
+        self.characters = copy.deepcopy(characters)
+
+
+async def main():
+    original = {
+        "名字": "小白",
+        "性格": "原始性格",
+        "_reserved": {
+            "system_prompt": "你是小白。回答真实、简洁。",
+            "persona_override": {
+                "preset_id": "",
+                "prompt_guidance": "始终先给结论。",
+                "profile": {
+                    "性格": "温柔而可靠",
+                    "口癖": "只在自然语境偶尔说喵",
+                },
+            },
+        },
+    }
+    original_snapshot = copy.deepcopy(original)
+    binding_id = "0123456789abcdef01234567"
+    overlay, base_prompt = bindings.build_overlay(
+        original_name="小白",
+        overlay_name="小白（自适应）",
+        original_card=original,
+        binding_id=binding_id,
+        at=1.0,
+    )
+    assert original == original_snapshot
+    assert overlay["性格"] == "温柔而可靠"
+    assert overlay["口癖"] == "只在自然语境偶尔说喵"
+    assert "persona_override" not in overlay["_reserved"]
+    assert base_prompt.count("Additional role guidance:") == 1
+
+    binding = bindings.create_binding(
+        original_name="小白",
+        overlay_name="小白（自适应）",
+        original_card=original,
+        overlay_card=overlay,
+        base_prompt=base_prompt,
+        binding_id=binding_id,
+        at=1.0,
+    )
+    manager = MemoryManager(
+        {
+            "主人": {},
+            "猫娘": {
+                "小白": original,
+                "小白（自适应）": overlay,
+                "第三张卡": {
+                    "名字": "第三张卡",
+                    "_reserved": {"system_prompt": "你是第三张卡。"},
+                },
+            },
+            "当前猫娘": "小白（自适应）",
+        }
+    )
+    managed_calls = []
+    reload_calls = 0
+
+    async def legacy_host(method, path, payload):
+        nonlocal reload_calls
+        assert method == "POST"
+        if path.startswith("/api/characters/managed-overlay/"):
+            managed_calls.append(path)
+            return 404, {"detail": "Not Found"}
+        if path == "/api/characters/reload":
+            reload_calls += 1
+            return 200, {"success": True}
+        raise AssertionError(path)
+
+    bridge = bindings.CharacterConfigBridge(
+        manager,
+        request_handler=legacy_host,
+    )
+    restored = await bridge.restore_original_if_overlay(binding=binding)
+    assert restored["switched"] is True
+    assert manager.characters["当前猫娘"] == "小白"
+
+    persisted_overlay = manager.characters["猫娘"]["小白（自适应）"]
+    await bridge.delete_character(
+        name="小白（自适应）",
+        binding_id=binding_id,
+        expected_provenance_fingerprint=(
+            bindings.provenance_fingerprint(persisted_overlay)
+        ),
+        expected_card_fingerprint=bindings.card_fingerprint(
+            persisted_overlay
+        ),
+    )
+    assert "小白（自适应）" not in manager.characters["猫娘"]
+    assert manager.characters["猫娘"]["小白"] == original_snapshot
+
+    racing_manager = MemoryManager(
+        {
+            "主人": {},
+            "猫娘": {
+                "小白": original,
+                "小白（自适应）": overlay,
+                "第三张卡": {
+                    "名字": "第三张卡",
+                    "_reserved": {"system_prompt": "你是第三张卡。"},
+                },
+            },
+            "当前猫娘": "小白（自适应）",
+        }
+    )
+
+    async def racing_legacy_host(method, path, payload):
+        assert method == "POST"
+        if path == "/api/characters/managed-overlay/restore-original":
+            racing_manager.characters["当前猫娘"] = "第三张卡"
+            return 404, {}
+        if path == "/api/characters/reload":
+            raise AssertionError("race must not write or reload")
+        raise AssertionError(path)
+
+    racing_bridge = bindings.CharacterConfigBridge(
+        racing_manager,
+        request_handler=racing_legacy_host,
+    )
+    skipped = await racing_bridge.restore_original_if_overlay(
+        binding=binding
+    )
+    assert skipped == {
+        "switched": False,
+        "preserved_user_choice": True,
+    }
+    assert racing_manager.save_calls == 0
+    assert racing_manager.characters["当前猫娘"] == "第三张卡"
+
+    print(
+        json.dumps(
+            {
+                "loaded_from": str(loaded_from),
+                "managed_calls": managed_calls,
+                "reload_calls": reload_calls,
+                "save_calls": manager.save_calls,
+                "race_save_calls": racing_manager.save_calls,
+            }
+        )
+    )
+
+
+asyncio.run(main())
+"""
+    env = os.environ.copy()
+    env["APH_ISOLATED_PLUGINS_ROOT"] = str(isolated_plugins_root)
+    completed = subprocess.run(
+        [sys.executable, "-c", runner],
+        cwd=PLUGIN_DIR.parents[2],
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        errors="strict",
+        check=True,
+        timeout=30,
+    )
+    result = json.loads(completed.stdout.splitlines()[-1])
+
+    assert Path(result["loaded_from"]).is_relative_to(isolated_plugin)
+    assert result["managed_calls"] == [
+        "/api/characters/managed-overlay/restore-original",
+        "/api/characters/managed-overlay/delete",
+    ]
+    assert result["reload_calls"] == 2
+    assert result["save_calls"] == 2
+    assert result["race_save_calls"] == 0
+
+
 @pytest.mark.asyncio
 async def test_binding_cannot_change_provenance_prompt_storage_mode(
     tmp_path: Path,
@@ -1526,6 +1788,41 @@ async def test_restart_recovers_binding_from_overlay_provenance_when_state_lost(
             is False
         )
     assert first._runtime_started is True
+
+
+@pytest.mark.asyncio
+async def test_restart_state_loss_rejects_tampered_overlay_integrity(
+    tmp_path: Path,
+) -> None:
+    _first, shared, manager, host, started = await start_plugin(tmp_path)
+    overlay_name = started["overlay_name"]
+    del shared.data[STATE_KEY]
+    await mutate_characters(
+        manager,
+        lambda value: value["猫娘"][overlay_name]["性格特点"].append(
+            "状态丢失前被外部修改"
+        ),
+    )
+    saves_after_tamper = manager.save_calls
+
+    second = AutoPromptHarnessPlugin(FakeContext())
+    second.store = FakeStore(shared.data)
+    from plugin.plugins.auto_prompt_harness.bindings import CharacterConfigBridge
+
+    second._character_bridge = CharacterConfigBridge(
+        manager,
+        request_handler=host,
+    )
+    startup = ok_value(await second.startup())
+    panel = ok_value(await second.get_panel_state())
+
+    assert startup["reconciliation_error"] == ""
+    assert panel["binding"] is None
+    assert panel["unbound_managed_overlays"] == [overlay_name]
+    assert manager.save_calls == saves_after_tamper
+    assert error_code(
+        await second.start_adaptation("小白")
+    ) == "ambiguous_managed_overlays"
 
 
 @pytest.mark.asyncio
@@ -1796,6 +2093,49 @@ async def test_managed_delete_never_deletes_same_name_replacement(
 
 
 @pytest.mark.asyncio
+async def test_legacy_delete_full_card_race_fails_before_plugin_save(
+    tmp_path: Path,
+) -> None:
+    plugin, _store, manager, host, started = await start_plugin(tmp_path)
+    overlay_name = started["overlay_name"]
+    ok_value(await plugin.restore_original())
+    saves_after_race = -1
+
+    async def racing_legacy_host(
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None,
+    ) -> tuple[int, dict[str, Any]]:
+        nonlocal saves_after_race
+        if path == "/api/characters/managed-overlay/delete":
+            await mutate_characters(
+                manager,
+                lambda value: value["猫娘"][overlay_name][
+                    "性格特点"
+                ].append("删除前并发修改"),
+            )
+            saves_after_race = manager.save_calls
+            return 404, {}
+        return await host(method, path, payload)
+
+    from plugin.plugins.auto_prompt_harness.bindings import CharacterConfigBridge
+
+    plugin._character_bridge = CharacterConfigBridge(
+        manager,
+        request_handler=racing_legacy_host,
+    )
+    deleted = await plugin.delete_overlay("DELETE")
+    after = await manager.aload_characters()
+
+    assert error_code(deleted) == "overlay_card_changed"
+    assert saves_after_race >= 0
+    assert manager.save_calls == saves_after_race
+    assert after["当前猫娘"] == "小白"
+    assert overlay_name in after["猫娘"]
+    assert "删除前并发修改" in after["猫娘"][overlay_name]["性格特点"]
+
+
+@pytest.mark.asyncio
 async def test_legacy_host_deletes_exact_overlay_without_name_only_route(
     tmp_path: Path,
 ) -> None:
@@ -1845,6 +2185,7 @@ async def test_ambiguous_managed_orphans_block_creation_and_can_be_deleted(
             binding_id=f"{index + 1:024x}",
         )
         characters["猫娘"][name] = overlay
+    characters["当前猫娘"] = names[1]
     await manager.asave_characters(characters)
     ok_value(await plugin.startup())
 
@@ -2412,6 +2753,10 @@ def test_panel_is_utf8_single_script_and_has_novice_card_language() -> None:
     assert "自适应副本" in html
     assert "清理未绑定的受控副本" in html
     assert "delete_orphan_overlay" in html
+    assert "Package-only 兼容" in html
+    assert "<code>.neko-plugin</code>" in html
+    assert "无需为旧宿主应用 core 补丁" in html
+    assert "managed-overlay route 只是可选快路" in html
     assert "profile_id" not in html.casefold()
     assert "档案" not in html
 

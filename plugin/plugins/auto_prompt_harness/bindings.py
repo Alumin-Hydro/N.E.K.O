@@ -984,6 +984,16 @@ def create_binding(
 
     timestamp = now_ts(at)
     binding_id = binding_id or uuid.uuid4().hex[:24]
+    integrity_fingerprint = overlay_integrity_fingerprint(overlay_card)
+    provenance = provenance_for(overlay_card) or {}
+    if (
+        provenance.get("overlay_integrity_fingerprint")
+        != integrity_fingerprint
+    ):
+        raise CharacterOperationError(
+            "自适应副本的创建完整性校验失败。",
+            code="overlay_integrity_invalid",
+        )
     version = {
         "version": 0,
         "prompt": base_prompt,
@@ -999,7 +1009,7 @@ def create_binding(
         "original_card_fingerprint": card_fingerprint(original_card),
         "base_prompt": base_prompt,
         "base_prompt_fingerprint": text_fingerprint(base_prompt),
-        "overlay_integrity_fingerprint": overlay_integrity_fingerprint(overlay_card),
+        "overlay_integrity_fingerprint": integrity_fingerprint,
         "provenance_fingerprint": provenance_fingerprint(overlay_card),
         "created_at": timestamp,
         "updated_at": timestamp,
@@ -1085,6 +1095,14 @@ def build_overlay(
     }
     if dynamic_default:
         provenance["base_prompt_snapshot"] = base_prompt
+    set_reserved(
+        overlay,
+        PROVENANCE_KEY,
+        provenance,
+    )
+    provenance["overlay_integrity_fingerprint"] = (
+        overlay_integrity_fingerprint(overlay)
+    )
     set_reserved(
         overlay,
         PROVENANCE_KEY,
@@ -1181,6 +1199,11 @@ def inspect_binding(
         != binding.get("original_card_fingerprint")
         or provenance.get("base_prompt_fingerprint")
         != binding.get("base_prompt_fingerprint")
+        or (
+            provenance.get("overlay_integrity_fingerprint") is not None
+            and provenance.get("overlay_integrity_fingerprint")
+            != binding.get("overlay_integrity_fingerprint")
+        )
         or provenance.get("managed_prompt_composition_required") is not False
         or bool(binding.get("managed_prompt_composition_required", True))
         or provenance.get("persona_materialized") is not True
@@ -1270,18 +1293,22 @@ def recover_binding(
     ]
     if not overlays:
         return None, []
-    current = str(characters.get("当前猫娘") or "")
-    selected = ""
-    if preferred_overlay in overlays:
-        selected = preferred_overlay
-    elif current in overlays:
-        selected = current
-    elif len(overlays) == 1:
-        selected = overlays[0]
-    if not selected:
+    if len(overlays) != 1:
         return None, overlays
+    selected = overlays[0]
+    if preferred_overlay and preferred_overlay != selected:
+        return None, overlays
+    current = str(characters.get("当前猫娘") or "")
     overlay = cards[selected]
     provenance = provenance_for(overlay) or {}
+    integrity_fingerprint = overlay_integrity_fingerprint(overlay)
+    if (
+        _clean_fingerprint(
+            provenance.get("overlay_integrity_fingerprint")
+        )
+        != integrity_fingerprint
+    ):
+        return None, overlays
     storage_mode = provenance.get(
         "prompt_storage_mode",
         PROMPT_STORAGE_SYSTEM,
@@ -1317,7 +1344,7 @@ def recover_binding(
         "base_prompt_fingerprint": str(
             provenance.get("base_prompt_fingerprint") or text_fingerprint(base_prompt)
         ),
-        "overlay_integrity_fingerprint": overlay_integrity_fingerprint(overlay),
+        "overlay_integrity_fingerprint": integrity_fingerprint,
         "provenance_fingerprint": provenance_fingerprint(overlay),
         "created_at": timestamp,
         "updated_at": now_ts(),
@@ -1512,6 +1539,11 @@ class CharacterConfigBridge:
             != binding.get("original_card_fingerprint")
             or provenance_fingerprint(overlay_card)
             != binding.get("provenance_fingerprint")
+            or (
+                provenance.get("overlay_integrity_fingerprint") is not None
+                and provenance.get("overlay_integrity_fingerprint")
+                != binding.get("overlay_integrity_fingerprint")
+            )
         ):
             raise CharacterOperationError(
                 "自适应副本的来源标记已变化。",

@@ -767,7 +767,7 @@ class AutoPromptHarnessPlugin(NekoPluginBase):
                                 append_history(
                                     binding,
                                     action="shutdown_restored",
-                                    summary=f"关闭前已原子切回「{original}」。",
+                                    summary=f"关闭前已按条件切回「{original}」。",
                                 )
                         elif current and current != original:
                             skipped_user_choice = True

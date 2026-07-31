@@ -92,8 +92,8 @@ overlay，但旧宿主没有带完整卡片条件的公开接口来同步清理�
 ## 开发验证
 
 ```bash
-export NEKO_STORAGE_SELECTED_ROOT=/tmp/neko-gate-auto-prompt-harness
-export NEKO_STORAGE_ANCHOR_ROOT=/tmp/neko-gate-auto-prompt-harness
+export NEKO_STORAGE_SELECTED_ROOT=/tmp/neko-gate-auto-prompt-harness-package-only
+export NEKO_STORAGE_ANCHOR_ROOT=/tmp/neko-gate-auto-prompt-harness-package-only
 export PYTHONDONTWRITEBYTECODE=1
 export PYDANTIC_DISABLE_PLUGINS=1
 
