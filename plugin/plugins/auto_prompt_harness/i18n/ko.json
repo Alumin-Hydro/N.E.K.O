@@ -1,0 +1,14 @@
+{
+  "action.approve": "승인하고 적용",
+  "action.delete_overlay": "적응 복사본 삭제",
+  "action.refresh": "새로고침",
+  "action.reject": "거절",
+  "action.restore_original": "원본 캐릭터 복원",
+  "action.rollback": "마지막 변경 되돌리기",
+  "action.start": "적응 시작",
+  "binding.original": "원본 캐릭터 카드",
+  "binding.overlay": "적응 복사본",
+  "history.title": "변경 기록",
+  "plugin.description": "기존 캐릭터 카드의 관리 복사본에 승인된 대화 적응을 적용하며 원본은 변경하지 않습니다.",
+  "plugin.name": "캐릭터 카드 적응"
+}

@@ -1,0 +1,14 @@
+{
+  "action.approve": "承認して適用",
+  "action.delete_overlay": "適応コピーを削除",
+  "action.refresh": "更新",
+  "action.reject": "拒否",
+  "action.restore_original": "元のキャラクターに戻す",
+  "action.rollback": "直前の変更を戻す",
+  "action.start": "適応を開始",
+  "binding.original": "元のキャラクターカード",
+  "binding.overlay": "適応コピー",
+  "history.title": "変更履歴",
+  "plugin.description": "既存キャラクターカードの管理コピーに承認済みの会話適応を適用し、元カードは変更しません。",
+  "plugin.name": "キャラクターカード適応"
+}

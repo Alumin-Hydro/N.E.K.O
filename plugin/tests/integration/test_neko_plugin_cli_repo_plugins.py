@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 
@@ -10,6 +11,7 @@ from plugin.neko_plugin_cli.public import inspect_package, build_plugin, install
 from plugin.neko_plugin_cli.public.plugin_source import load_plugin_source
 
 REPO_PLUGINS_ROOT = Path(__file__).resolve().parents[2] / "plugins"
+AUTO_PROMPT_HARNESS_DIR = REPO_PLUGINS_ROOT / "auto_prompt_harness"
 
 
 def _repo_plugin_dirs() -> list[Path]:
@@ -105,3 +107,48 @@ def test_cli_batch_smoke_can_build_current_repo_plugin_packages(tmp_path: Path) 
         inspect_result = inspect_package(package_path)
         assert inspect_result.package_type == "plugin"
         assert inspect_result.payload_hash_verified is True
+
+
+@pytest.mark.plugin_integration
+def test_auto_prompt_harness_package_contains_no_host_core_files(
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "auto_prompt_harness.neko-plugin"
+    build_plugin(AUTO_PROMPT_HARNESS_DIR, package_path)
+
+    with ZipFile(package_path) as package:
+        names = set(package.namelist())
+        assert names
+        assert all(
+            name in {
+                "manifest.toml",
+                "metadata.toml",
+                "payload/dependencies.toml",
+                "payload/profiles/default.toml",
+            }
+            or name.startswith(
+                "payload/plugins/auto_prompt_harness/",
+            )
+            for name in names
+        )
+        assert not any(
+            segment in name
+            for name in names
+            for segment in (
+                "main_routers/",
+                "utils/config_manager/",
+                "tests/",
+            )
+        )
+        for relative_path in (
+            "__init__.py",
+            "bindings.py",
+            "static/index.html",
+        ):
+            archived = package.read(
+                "payload/plugins/auto_prompt_harness/"
+                f"{relative_path}"
+            )
+            assert archived == (
+                AUTO_PROMPT_HARNESS_DIR / relative_path
+            ).read_bytes()

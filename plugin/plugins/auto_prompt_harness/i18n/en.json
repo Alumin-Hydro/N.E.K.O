@@ -1,0 +1,14 @@
+{
+  "action.approve": "Approve and apply",
+  "action.delete_overlay": "Delete adaptive copy",
+  "action.refresh": "Refresh",
+  "action.reject": "Reject",
+  "action.restore_original": "Restore original character",
+  "action.rollback": "Roll back last change",
+  "action.start": "Start adaptation",
+  "binding.original": "Original character card",
+  "binding.overlay": "Adaptive copy",
+  "history.title": "Change history",
+  "plugin.description": "Apply approved communication adaptations to a managed copy of an existing character card while keeping the original unchanged.",
+  "plugin.name": "Character Card Adaptation"
+}

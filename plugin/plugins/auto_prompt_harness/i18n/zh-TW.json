@@ -1,0 +1,14 @@
+{
+  "action.approve": "確認並套用",
+  "action.delete_overlay": "刪除自適應副本",
+  "action.refresh": "重新整理",
+  "action.reject": "拒絕",
+  "action.restore_original": "恢復原角色",
+  "action.rollback": "回復上次修改",
+  "action.start": "開始自適應",
+  "binding.original": "原角色卡",
+  "binding.overlay": "自適應副本",
+  "history.title": "修改記錄",
+  "plugin.description": "將核准後的溝通適配套用到現有角色卡的受控副本，原卡始終不變。",
+  "plugin.name": "角色卡自適應"
+}

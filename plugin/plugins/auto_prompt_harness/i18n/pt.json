@@ -1,0 +1,14 @@
+{
+  "action.approve": "Aprovar e aplicar",
+  "action.delete_overlay": "Excluir cópia adaptativa",
+  "action.refresh": "Atualizar",
+  "action.reject": "Rejeitar",
+  "action.restore_original": "Restaurar personagem original",
+  "action.rollback": "Desfazer última alteração",
+  "action.start": "Iniciar adaptação",
+  "binding.original": "Cartão de personagem original",
+  "binding.overlay": "Cópia adaptativa",
+  "history.title": "Histórico de alterações",
+  "plugin.description": "Aplica adaptações de comunicação aprovadas a uma cópia controlada de um cartão existente sem alterar o original.",
+  "plugin.name": "Adaptação de cartão de personagem"
+}

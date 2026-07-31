@@ -1,0 +1,1507 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; worker-src 'none'">
+  <title>角色卡自适应</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page: #f4f6fb;
+      --surface: #ffffff;
+      --surface-soft: #f7f9fc;
+      --ink: #172033;
+      --muted: #667085;
+      --line: #dce3ee;
+      --primary: #3856d6;
+      --primary-hover: #2945bd;
+      --primary-soft: #edf1ff;
+      --good: #087a55;
+      --good-soft: #e9f8f1;
+      --warn: #9a5a04;
+      --warn-soft: #fff5df;
+      --danger: #b42331;
+      --danger-hover: #951c28;
+      --danger-soft: #fff0f1;
+      --shadow: 0 18px 50px rgba(25, 38, 72, .10);
+      --focus: 0 0 0 3px rgba(56, 86, 214, .24);
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --page: #101521;
+        --surface: #1b2231;
+        --surface-soft: #222b3d;
+        --ink: #f0f4fb;
+        --muted: #b2bdce;
+        --line: #374359;
+        --primary: #91a9ff;
+        --primary-hover: #b1c0ff;
+        --primary-soft: #28365d;
+        --good: #68d6a4;
+        --good-soft: #183c2e;
+        --warn: #ffc66d;
+        --warn-soft: #49371e;
+        --danger: #ff8b95;
+        --danger-hover: #ffb0b7;
+        --danger-soft: #49272d;
+        --shadow: 0 18px 54px rgba(0, 0, 0, .28);
+      }
+    }
+
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html { scroll-behavior: smooth; }
+    body {
+      min-width: 280px;
+      min-height: 100vh;
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% -8%, rgba(77, 105, 221, .17), transparent 32rem),
+        radial-gradient(circle at 96% 8%, rgba(22, 157, 119, .10), transparent 27rem),
+        var(--page);
+      line-height: 1.55;
+    }
+
+    button, input, select, textarea { font: inherit; }
+    button, select, input[type="checkbox"], input[type="range"] { cursor: pointer; }
+    button:disabled, input:disabled, select:disabled, textarea:disabled {
+      cursor: not-allowed;
+      opacity: .55;
+    }
+    button:focus-visible, input:focus-visible, select:focus-visible,
+    textarea:focus-visible, summary:focus-visible {
+      outline: none;
+      box-shadow: var(--focus);
+    }
+
+    .shell {
+      width: min(1120px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 28px 0 64px;
+    }
+
+    .hero {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
+      align-items: center;
+      overflow: hidden;
+      padding: 30px;
+      border-radius: 24px;
+      color: #fff;
+      background: linear-gradient(125deg, #3e5ddd, #2e48b5 53%, #087c69);
+      box-shadow: var(--shadow);
+    }
+    .hero::after {
+      position: absolute;
+      top: -150px;
+      right: -95px;
+      width: 280px;
+      height: 280px;
+      border: 48px solid rgba(255, 255, 255, .08);
+      border-radius: 50%;
+      content: "";
+    }
+    .eyebrow {
+      margin: 0 0 7px;
+      font-size: .75rem;
+      font-weight: 800;
+      letter-spacing: .13em;
+      opacity: .78;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(1.75rem, 4vw, 2.65rem);
+      line-height: 1.14;
+      letter-spacing: -.035em;
+    }
+    .hero p {
+      max-width: 750px;
+      margin: 12px 0 0;
+      color: rgba(255, 255, 255, .84);
+    }
+    .hero-actions {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+
+    .button {
+      min-height: 42px;
+      padding: 9px 15px;
+      border: 1px solid transparent;
+      border-radius: 11px;
+      color: #fff;
+      background: var(--primary);
+      font-weight: 750;
+      transition: background .16s ease, transform .16s ease, border-color .16s ease;
+    }
+    .button:hover:not(:disabled) {
+      background: var(--primary-hover);
+      transform: translateY(-1px);
+    }
+    .button.secondary {
+      border-color: var(--line);
+      color: var(--ink);
+      background: var(--surface);
+    }
+    .button.secondary:hover:not(:disabled) { background: var(--surface-soft); }
+    .button.ghost {
+      border-color: rgba(255, 255, 255, .38);
+      color: #fff;
+      background: rgba(255, 255, 255, .12);
+      backdrop-filter: blur(5px);
+    }
+    .button.ghost:hover:not(:disabled) { background: rgba(255, 255, 255, .2); }
+    .button.danger { color: #fff; background: var(--danger); }
+    .button.danger:hover:not(:disabled) { background: var(--danger-hover); }
+    .button.small { min-height: 36px; padding: 6px 11px; font-size: .9rem; }
+
+    .runtime-badge, .tag {
+      display: inline-flex;
+      gap: 7px;
+      align-items: center;
+      width: max-content;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: .78rem;
+      font-weight: 750;
+    }
+    .runtime-badge {
+      border: 1px solid rgba(255, 255, 255, .28);
+      background: rgba(255, 255, 255, .13);
+    }
+    .runtime-badge::before {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      content: "";
+    }
+    .tag { color: var(--muted); background: var(--surface-soft); }
+    .tag.good { color: var(--good); background: var(--good-soft); }
+    .tag.warn { color: var(--warn); background: var(--warn-soft); }
+    .tag.bad { color: var(--danger); background: var(--danger-soft); }
+
+    .notice {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      margin-top: 16px;
+      padding: 13px 15px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      color: var(--muted);
+      background: var(--surface);
+      box-shadow: 0 5px 18px rgba(25, 38, 72, .05);
+    }
+    .notice strong { color: var(--ink); }
+    .notice.warn { border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); background: var(--warn-soft); }
+    .notice.bad { border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); background: var(--danger-soft); }
+    .notice-mark {
+      display: grid;
+      flex: 0 0 auto;
+      place-items: center;
+      width: 25px;
+      height: 25px;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--primary);
+      font-size: .78rem;
+      font-weight: 900;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 18px;
+    }
+    .card {
+      grid-column: span 12;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: color-mix(in srgb, var(--surface) 96%, transparent);
+      box-shadow: 0 8px 28px rgba(25, 38, 72, .06);
+    }
+    .card.half { grid-column: span 6; }
+    .card-header {
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 17px;
+    }
+    .card h2, .card h3 { margin: 0; line-height: 1.25; }
+    .card h2 { font-size: 1.16rem; }
+    .card h3 { font-size: 1rem; }
+    .card-description {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: .91rem;
+    }
+    .section-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .choice-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: end;
+    }
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: .88rem;
+      font-weight: 720;
+    }
+    select, input[type="text"], input[type="number"], textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      color: var(--ink);
+      background: var(--surface);
+    }
+    select, input[type="text"], input[type="number"] {
+      min-height: 42px;
+      padding: 8px 11px;
+    }
+    textarea {
+      min-height: 82px;
+      padding: 10px 11px;
+      resize: vertical;
+      line-height: 1.5;
+    }
+    .help {
+      display: block;
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: .82rem;
+    }
+
+    .facts {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 11px;
+      margin: 0;
+    }
+    .fact {
+      min-width: 0;
+      padding: 13px;
+      border-radius: 12px;
+      background: var(--surface-soft);
+    }
+    .fact dt {
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: .78rem;
+    }
+    .fact dd {
+      overflow-wrap: anywhere;
+      margin: 0;
+      font-weight: 760;
+    }
+    .adaptations {
+      margin: 15px 0 0;
+      padding: 14px 14px 14px 32px;
+      border-radius: 12px;
+      background: var(--primary-soft);
+    }
+    .adaptations li + li { margin-top: 6px; }
+
+    .empty {
+      margin: 0;
+      padding: 25px 16px;
+      border: 1px dashed var(--line);
+      border-radius: 12px;
+      color: var(--muted);
+      text-align: center;
+      background: var(--surface-soft);
+    }
+    .stack { display: grid; gap: 12px; }
+    .item {
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--surface-soft);
+    }
+    .item-head {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .item-title { margin: 0; font-size: .98rem; overflow-wrap: anywhere; }
+    .item-meta {
+      display: flex;
+      gap: 7px;
+      align-items: center;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: .79rem;
+    }
+    .item p { margin: 7px 0 0; }
+    .item-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    .evidence {
+      margin: 10px 0 0;
+      padding: 10px 12px;
+      border-left: 3px solid var(--line);
+      color: var(--muted);
+      background: var(--surface);
+      white-space: pre-wrap;
+    }
+    .change {
+      display: grid;
+      grid-template-columns: 68px minmax(0, 1fr);
+      gap: 12px;
+    }
+    .change-time { color: var(--muted); font-size: .78rem; }
+    .change-body { min-width: 0; }
+    .change-body p { margin: 2px 0 0; overflow-wrap: anywhere; }
+    .diff {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 9px;
+    }
+    .diff div {
+      padding: 9px;
+      border-radius: 9px;
+      background: var(--surface);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-size: .82rem;
+    }
+    .diff strong { display: block; margin-bottom: 4px; color: var(--muted); }
+
+    details {
+      border-top: 1px solid var(--line);
+      margin-top: 19px;
+      padding-top: 15px;
+    }
+    summary {
+      width: max-content;
+      border-radius: 8px;
+      font-weight: 760;
+      cursor: pointer;
+    }
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 13px 18px;
+      margin-top: 16px;
+    }
+    .toggle {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      margin: 0;
+      padding: 11px;
+      border-radius: 10px;
+      background: var(--surface-soft);
+    }
+    .toggle input { flex: 0 0 auto; margin-top: 4px; }
+    .toggle span { font-weight: 700; }
+    .toggle small { display: block; color: var(--muted); font-weight: 400; }
+    .settings-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 14px;
+    }
+    .danger-zone {
+      margin-top: 16px;
+      padding: 15px;
+      border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
+      border-radius: 12px;
+      background: var(--danger-soft);
+    }
+    .danger-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 9px;
+      align-items: end;
+      margin-top: 10px;
+    }
+
+    .toast {
+      position: fixed;
+      z-index: 20;
+      right: 20px;
+      bottom: 20px;
+      max-width: min(430px, calc(100% - 40px));
+      padding: 12px 15px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      color: var(--ink);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .toast.good { border-color: color-mix(in srgb, var(--good) 42%, var(--line)); }
+    .toast.bad { border-color: color-mix(in srgb, var(--danger) 42%, var(--line)); }
+
+    @media (max-width: 800px) {
+      .hero { grid-template-columns: 1fr; }
+      .hero-actions { justify-content: flex-start; }
+      .card.half { grid-column: span 12; }
+    }
+    @media (max-width: 580px) {
+      .shell { width: min(100% - 20px, 1120px); padding-top: 10px; }
+      .hero, .card { padding: 18px; border-radius: 16px; }
+      .choice-row, .danger-row, .facts, .settings-grid, .diff { grid-template-columns: 1fr; }
+      .choice-row .button, .danger-row .button { width: 100%; }
+      .card-header { align-items: stretch; flex-direction: column; }
+      .section-actions { justify-content: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">N.E.K.O · AUTO PROMPT HARNESS</p>
+        <h1>角色卡自适应</h1>
+        <p>选择已有角色卡后，插件会创建一个明确标记的受控副本。原角色卡始终保持不变，只有你确认的沟通建议会写入副本。</p>
+        <p><strong>Package-only 兼容：</strong>仅安装 <code>.neko-plugin</code> 即可，无需为旧宿主应用 core 补丁。managed-overlay route 只是可选快路；route 缺失或返回普通 404 时，插件会使用内置的条件校验 fallback。</p>
+      </div>
+      <div class="hero-actions">
+        <span id="runtime-badge" class="runtime-badge">正在连接</span>
+        <button id="refresh-button" class="button ghost" type="button">刷新状态</button>
+      </div>
+    </header>
+
+    <div id="status-notice" class="notice" role="status" aria-live="polite">
+      <span class="notice-mark" aria-hidden="true">i</span>
+      <div>
+        <strong id="status-title">正在读取角色卡</strong>
+        <div id="status-message">请稍候。</div>
+      </div>
+    </div>
+
+    <main id="app" class="grid" hidden>
+      <section class="card" aria-labelledby="choose-title">
+        <div class="card-header">
+          <div>
+            <h2 id="choose-title">1. 选择角色卡</h2>
+            <p class="card-description">列表来自 N.E.K.O 当前角色配置；插件自己创建的副本不会出现在这里。</p>
+          </div>
+          <span id="character-count" class="tag">0 张可选</span>
+        </div>
+        <div class="choice-row">
+          <div>
+            <label for="character-selector">要保留原样的角色卡</label>
+            <select id="character-selector">
+              <option value="">暂无可用角色卡</option>
+            </select>
+            <span class="help">开始后会自动切换到新副本；不会覆盖所选原卡的任何字段。</span>
+          </div>
+          <button id="start-adaptation-button" class="button" type="button">开始自适应</button>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="binding-title">
+        <div class="card-header">
+          <div>
+            <h2 id="binding-title">2. 当前绑定</h2>
+            <p class="card-description">一眼确认原卡、副本和当前真正使用的角色。</p>
+          </div>
+          <div class="section-actions">
+            <span id="binding-effective" class="tag">尚未绑定</span>
+            <button id="resume-button" class="button small" type="button" hidden>重新启用副本</button>
+            <button id="restore-original-button" class="button secondary small" type="button" disabled>恢复原角色</button>
+          </div>
+        </div>
+        <div id="binding-empty" class="empty">选择上方角色卡并开始后，这里会显示绑定详情。</div>
+        <div id="binding-details" hidden>
+          <dl class="facts">
+            <div class="fact">
+              <dt>原角色卡</dt>
+              <dd id="original-name">—</dd>
+            </div>
+            <div class="fact">
+              <dt>自适应副本</dt>
+              <dd id="overlay-name">—</dd>
+            </div>
+            <div class="fact">
+              <dt>当前角色</dt>
+              <dd id="current-character">—</dd>
+            </div>
+            <div class="fact">
+              <dt>基础提示词指纹</dt>
+              <dd id="base-fingerprint">—</dd>
+            </div>
+          </dl>
+          <ul id="active-adaptations" class="adaptations"></ul>
+          <p id="no-active-adaptations" class="help">目前还没有已批准的自适应内容。</p>
+          <div id="binding-warning" class="notice warn" hidden>
+            <span class="notice-mark" aria-hidden="true">!</span>
+            <div>
+              <strong>需要人工检查</strong>
+              <div id="binding-warning-message"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card half" aria-labelledby="proposal-title">
+        <div class="card-header">
+          <div>
+            <h2 id="proposal-title">3. 待确认建议</h2>
+            <p class="card-description"><span id="evidence-count">0</span> 条脱敏证据已进入有界窗口。</p>
+          </div>
+          <button id="reflect-button" class="button secondary small" type="button">现在检查</button>
+        </div>
+        <div id="proposal-list" class="stack"></div>
+        <p id="proposal-empty" class="empty">暂无待确认建议。插件不会在你拒绝时修改角色卡。</p>
+      </section>
+
+      <section class="card half" aria-labelledby="history-title">
+        <div class="card-header">
+          <div>
+            <h2 id="history-title">4. 修改记录</h2>
+            <p class="card-description">记录绑定、确认、拒绝、回滚和恢复操作。</p>
+          </div>
+          <button id="rollback-button" class="button secondary small" type="button" disabled>回滚上次修改</button>
+        </div>
+        <div id="history-list" class="stack"></div>
+        <p id="history-empty" class="empty">还没有修改记录。</p>
+      </section>
+
+      <section class="card" aria-labelledby="control-title">
+        <div class="card-header">
+          <div>
+            <h2 id="control-title">控制与清理</h2>
+            <p class="card-description">恢复只在当前仍使用自适应副本时切回原卡；如果你已切到其他角色，插件不会抢切。</p>
+          </div>
+        </div>
+
+        <details>
+          <summary>高级设置</summary>
+          <form id="settings-form">
+            <div class="settings-grid">
+              <label class="toggle">
+                <input id="setting-learning" type="checkbox">
+                <span>收集脱敏证据<small>关闭后停止接收新的沟通偏好证据。</small></span>
+              </label>
+              <label class="toggle">
+                <input id="setting-automatic" type="checkbox">
+                <span>自动生成建议<small>达到证据条数后尝试生成一条待确认建议。</small></span>
+              </label>
+              <label class="toggle">
+                <input id="setting-auto-apply" type="checkbox">
+                <span>自动批准低风险建议<small>默认关闭；开启前请确认你接受自动写入受控副本。</small></span>
+              </label>
+              <label class="toggle">
+                <input id="setting-show-evidence" type="checkbox">
+                <span>显示脱敏摘录<small>只影响面板展示，不恢复原始聊天内容。</small></span>
+              </label>
+              <div>
+                <label for="setting-threshold">生成建议所需证据条数</label>
+                <input id="setting-threshold" type="number" min="1" max="12" step="1">
+              </div>
+              <div>
+                <label for="setting-window">证据窗口大小</label>
+                <input id="setting-window" type="number" min="2" max="12" step="1">
+              </div>
+              <div>
+                <label for="setting-confidence">自动批准最低置信度</label>
+                <input id="setting-confidence" type="number" min="0.5" max="0.95" step="0.05">
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button id="reset-settings-button" class="button secondary small" type="button">恢复默认设置</button>
+              <button id="save-settings-button" class="button small" type="submit">保存设置</button>
+            </div>
+          </form>
+        </details>
+
+        <div id="orphan-cleanup" class="danger-zone" hidden>
+          <h3>清理未绑定的受控副本</h3>
+          <p class="card-description">这些角色卡带有本插件来源标记，但无法与当前绑定唯一对应。请选择明确名称后手动删除；当前正在使用的角色不会被删除。</p>
+          <div class="danger-row">
+            <div>
+              <label for="orphan-selector">未绑定副本</label>
+              <select id="orphan-selector"></select>
+            </div>
+            <div>
+              <label for="orphan-confirmation">输入 DELETE 确认</label>
+              <input id="orphan-confirmation" type="text" maxlength="6" autocomplete="off" spellcheck="false">
+            </div>
+            <button id="delete-orphan-button" class="button danger" type="button" disabled>删除所选副本</button>
+          </div>
+        </div>
+
+        <div class="danger-zone">
+          <h3>手动删除自适应副本</h3>
+          <p class="card-description">副本默认保留，方便再次启用。删除前会先安全恢复；只有来源标记匹配时才会删除。</p>
+          <div class="danger-row">
+            <div>
+              <label for="delete-confirmation">输入 DELETE 确认</label>
+              <input id="delete-confirmation" type="text" maxlength="6" autocomplete="off" spellcheck="false">
+            </div>
+            <button id="delete-overlay-button" class="button danger" type="button" disabled>删除副本</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script>
+  (() => {
+    "use strict";
+
+    const root = globalThis;
+    const runtimeWindow = root.window && typeof root.window === "object" ? root.window : root;
+    const runtimeLocation = runtimeWindow.location || root.location || {};
+    const pathMatch = String(runtimeLocation.pathname || "").match(/\/plugin\/([^/]+)\/ui(?:\/|$)/);
+    const pluginId = pathMatch ? decodeURIComponent(pathMatch[1]) : "auto_prompt_harness";
+    const RUNS_URL = "/runs";
+    const DEFAULT_TIMEOUT_MS = 30000;
+    const DEFAULT_POLL_MS = 180;
+
+    function hasOwn(value, key) {
+      return Object.prototype.hasOwnProperty.call(value || {}, key);
+    }
+
+    function isRecord(value) {
+      return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+    }
+
+    function cleanText(value, fallback = "") {
+      return typeof value === "string" ? value.trim() : fallback;
+    }
+
+    function humanError(value, fallback = "操作失败，请稍后重试。") {
+      if (typeof value === "string" && value.trim()) return value.trim();
+      if (!value || typeof value !== "object") return fallback;
+      if (hasOwn(value, "error") && value.error !== value) {
+        const nested = humanError(value.error, "");
+        if (nested) return nested;
+      }
+      if (typeof value.message === "string" && value.message.trim()) {
+        return value.message.trim();
+      }
+      if (hasOwn(value, "detail") && value.detail !== value) {
+        const nested = humanError(value.detail, "");
+        if (nested) return nested;
+      }
+      if (hasOwn(value, "details") && value.details !== value) {
+        const nested = humanError(value.details, "");
+        if (nested) return nested;
+      }
+      if (typeof value.code === "string" && value.code.trim()) {
+        return `操作失败（${value.code.trim()}）`;
+      }
+      return fallback;
+    }
+
+    function unwrapEntryPayload(payload) {
+      if (!isRecord(payload)) return payload ?? {};
+      if (payload.success === false) {
+        throw new Error(humanError(payload, "插件拒绝了这次操作。"));
+      }
+      if (payload.success === true && hasOwn(payload, "data")) {
+        return payload.data ?? {};
+      }
+      if (payload.error) {
+        throw new Error(humanError(payload, "插件拒绝了这次操作。"));
+      }
+      return payload;
+    }
+
+    function extractRunResult(exportPayload) {
+      const items = Array.isArray(exportPayload && exportPayload.items)
+        ? exportPayload.items
+        : [];
+      const item = items.find((candidate) => candidate && candidate.type === "json")
+        || items.find((candidate) =>
+          candidate && candidate.type === "text" && typeof candidate.text === "string"
+        );
+      if (!item) throw new Error("任务没有返回可读取的结果。");
+
+      let payload;
+      if (hasOwn(item, "json")) payload = item.json;
+      else if (hasOwn(item, "payload")) payload = item.payload;
+      else if (hasOwn(item, "value")) payload = item.value;
+      else if (typeof item.text === "string") {
+        try {
+          payload = JSON.parse(item.text);
+        } catch (_error) {
+          throw new Error("任务结果不是有效 JSON。");
+        }
+      }
+      return unwrapEntryPayload(payload);
+    }
+
+    async function responsePayload(response) {
+      if (!response) throw new Error("宿主没有返回响应。");
+      if (typeof response.json === "function") {
+        try {
+          return await response.json();
+        } catch (_error) {
+          // A short text body is still useful for an HTTP error.
+        }
+      }
+      if (typeof response.text === "function") {
+        const text = await response.text();
+        if (!text) return {};
+        try {
+          return JSON.parse(text);
+        } catch (_error) {
+          return { message: text.slice(0, 300) };
+        }
+      }
+      return {};
+    }
+
+    async function requestJson(fetchFn, url, options) {
+      const response = await fetchFn(url, options);
+      const payload = await responsePayload(response);
+      if (response && response.ok === false) {
+        throw new Error(humanError(payload, `请求失败（HTTP ${response.status || "?"}）`));
+      }
+      return payload;
+    }
+
+    async function callEntry(entryId, args = {}, options = {}) {
+      const config = typeof options === "number" ? { timeoutMs: options } : (options || {});
+      const fetchFn = config.fetchFn || config.fetch || root.fetch || runtimeWindow.fetch;
+      if (typeof fetchFn !== "function") throw new Error("当前环境不能发送请求。");
+      const timeoutMs = Math.max(1000, Number(config.timeoutMs) || DEFAULT_TIMEOUT_MS);
+      const pollMs = Math.max(0, Number(config.pollMs ?? config.pollDelayMs) || DEFAULT_POLL_MS);
+      const now = typeof config.now === "function" ? config.now : Date.now;
+      const sleep = typeof config.sleep === "function"
+        ? config.sleep
+        : (milliseconds) => new Promise((resolve) => runtimeWindow.setTimeout(resolve, milliseconds));
+      const deadline = now() + timeoutMs;
+      const created = await requestJson(fetchFn, RUNS_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          plugin_id: pluginId,
+          entry_id: String(entryId || ""),
+          args: isRecord(args) ? args : {}
+        })
+      });
+      const runId = cleanText(created && (created.run_id || created.id));
+      if (!runId) throw new Error("宿主没有返回 run_id。");
+
+      let record = created;
+      while (now() < deadline) {
+        let status = cleanText(record && record.status).toLowerCase();
+        if (["succeeded", "completed", "success"].includes(status)) {
+          const exported = await requestJson(
+            fetchFn,
+            `${RUNS_URL}/${encodeURIComponent(runId)}/export`,
+            { headers: { Accept: "application/json" } }
+          );
+          return extractRunResult(exported);
+        }
+        if (["failed", "canceled", "cancelled", "timeout", "timed_out"].includes(status)) {
+          throw new Error(humanError(record, `任务未完成（${status}）。`));
+        }
+        if (pollMs > 0) await sleep(Math.min(pollMs, Math.max(0, deadline - now())));
+        record = await requestJson(
+          fetchFn,
+          `${RUNS_URL}/${encodeURIComponent(runId)}`,
+          { headers: { Accept: "application/json" } }
+        );
+      }
+      throw new Error("插件调用超时。");
+    }
+
+    function normalizePanelState(input) {
+      const possible = isRecord(input) ? input : {};
+      const source = isRecord(possible.data) && !Array.isArray(possible.characters)
+        ? possible.data
+        : possible;
+      const seenNames = new Set();
+      const characters = [];
+      for (const raw of Array.isArray(source.characters) ? source.characters : []) {
+        if (!isRecord(raw)) continue;
+        const name = cleanText(raw.name);
+        if (!name || seenNames.has(name)) continue;
+        seenNames.add(name);
+        characters.push({
+          name,
+          current: raw.current === true,
+          bound: raw.bound === true
+        });
+      }
+
+      let binding = null;
+      if (isRecord(source.binding)) {
+        const raw = source.binding;
+        binding = {
+          binding_id: cleanText(raw.binding_id),
+          original_name: cleanText(raw.original_name),
+          overlay_name: cleanText(raw.overlay_name),
+          base_prompt_fingerprint: cleanText(raw.base_prompt_fingerprint),
+          status: cleanText(raw.status),
+          desired_enabled: raw.desired_enabled === true,
+          effective: raw.effective === true,
+          healthy: raw.healthy === true,
+          conflict_code: cleanText(raw.conflict_code),
+          message: cleanText(raw.message),
+          current_character: cleanText(raw.current_character),
+          current_version: Number.isInteger(raw.current_version) ? raw.current_version : 0,
+          active_adaptations: Array.isArray(raw.active_adaptations)
+            ? raw.active_adaptations.filter((item) => typeof item === "string").slice(-8)
+            : [],
+          prompt_fingerprint: cleanText(raw.prompt_fingerprint),
+          runtime_refresh_mode: cleanText(raw.runtime_refresh_mode),
+          history: Array.isArray(raw.history)
+            ? raw.history.filter(isRecord).slice(-100)
+            : [],
+          overlay_retention: cleanText(raw.overlay_retention)
+        };
+      }
+
+      const proposals = (Array.isArray(source.proposals) ? source.proposals : [])
+        .filter(isRecord)
+        .map((raw) => ({
+          id: cleanText(raw.id),
+          status: cleanText(raw.status),
+          trigger: cleanText(raw.trigger),
+          evidence_summary: cleanText(raw.evidence_summary),
+          preference: cleanText(raw.preference),
+          proposed_prompt: cleanText(raw.proposed_prompt),
+          applied_prompt: cleanText(raw.applied_prompt),
+          confidence: Number.isFinite(Number(raw.confidence)) ? Number(raw.confidence) : 0,
+          risk: cleanText(raw.risk),
+          created_at: Number(raw.created_at) || 0,
+          resolved_at: Number(raw.resolved_at) || 0,
+          evidence_excerpt: Array.isArray(raw.evidence_excerpt)
+            ? raw.evidence_excerpt.filter((item) => typeof item === "string").slice(-4)
+            : []
+        }))
+        .filter((item) => item.id);
+
+      const settingsSource = isRecord(source.settings) ? source.settings : {};
+      const settings = {
+        learning_enabled: settingsSource.learning_enabled !== false,
+        automatic_reflection: settingsSource.automatic_reflection === true,
+        auto_apply_low_risk: settingsSource.auto_apply_low_risk === true,
+        reflection_threshold: Number.isInteger(settingsSource.reflection_threshold)
+          ? settingsSource.reflection_threshold : 4,
+        minimum_confidence: Number.isFinite(Number(settingsSource.minimum_confidence))
+          ? Number(settingsSource.minimum_confidence) : 0.75,
+        evidence_window: Number.isInteger(settingsSource.evidence_window)
+          ? settingsSource.evidence_window : 12,
+        show_evidence_excerpts: settingsSource.show_evidence_excerpts !== false
+      };
+
+      return {
+        status: cleanText(source.status, "degraded"),
+        persistence_ready: source.persistence_ready === true,
+        characters,
+        current_character: cleanText(source.current_character),
+        binding,
+        proposals,
+        settings,
+        evidence_count: Number.isInteger(source.evidence_count)
+          ? Math.max(0, source.evidence_count) : 0,
+        stats: isRecord(source.stats) ? source.stats : {},
+        unbound_managed_overlays: Array.isArray(source.unbound_managed_overlays)
+          ? source.unbound_managed_overlays.slice(0, 20)
+          : [],
+        invalid_managed_overlays: Array.isArray(source.invalid_managed_overlays)
+          ? source.invalid_managed_overlays.slice(0, 20)
+          : [],
+        policy: isRecord(source.policy) ? source.policy : {}
+      };
+    }
+
+    const hooks = Object.freeze({
+      humanError,
+      extractRunResult,
+      callEntry,
+      normalizePanelState
+    });
+    root.__APH_TEST_HOOKS__ = hooks;
+    if (runtimeWindow !== root) runtimeWindow.__APH_TEST_HOOKS__ = hooks;
+    if (root.__APH_TEST_MODE__ || runtimeWindow.__APH_TEST_MODE__) return;
+
+    const document = root.document || runtimeWindow.document;
+    if (!document) return;
+
+    const ui = {
+      app: document.getElementById("app"),
+      runtimeBadge: document.getElementById("runtime-badge"),
+      refreshButton: document.getElementById("refresh-button"),
+      statusNotice: document.getElementById("status-notice"),
+      statusTitle: document.getElementById("status-title"),
+      statusMessage: document.getElementById("status-message"),
+      characterCount: document.getElementById("character-count"),
+      characterSelector: document.getElementById("character-selector"),
+      startButton: document.getElementById("start-adaptation-button"),
+      bindingEffective: document.getElementById("binding-effective"),
+      bindingEmpty: document.getElementById("binding-empty"),
+      bindingDetails: document.getElementById("binding-details"),
+      originalName: document.getElementById("original-name"),
+      overlayName: document.getElementById("overlay-name"),
+      currentCharacter: document.getElementById("current-character"),
+      baseFingerprint: document.getElementById("base-fingerprint"),
+      activeAdaptations: document.getElementById("active-adaptations"),
+      noActiveAdaptations: document.getElementById("no-active-adaptations"),
+      bindingWarning: document.getElementById("binding-warning"),
+      bindingWarningMessage: document.getElementById("binding-warning-message"),
+      resumeButton: document.getElementById("resume-button"),
+      restoreButton: document.getElementById("restore-original-button"),
+      evidenceCount: document.getElementById("evidence-count"),
+      reflectButton: document.getElementById("reflect-button"),
+      proposalList: document.getElementById("proposal-list"),
+      proposalEmpty: document.getElementById("proposal-empty"),
+      rollbackButton: document.getElementById("rollback-button"),
+      historyList: document.getElementById("history-list"),
+      historyEmpty: document.getElementById("history-empty"),
+      settingsForm: document.getElementById("settings-form"),
+      settingLearning: document.getElementById("setting-learning"),
+      settingAutomatic: document.getElementById("setting-automatic"),
+      settingAutoApply: document.getElementById("setting-auto-apply"),
+      settingShowEvidence: document.getElementById("setting-show-evidence"),
+      settingThreshold: document.getElementById("setting-threshold"),
+      settingWindow: document.getElementById("setting-window"),
+      settingConfidence: document.getElementById("setting-confidence"),
+      saveSettingsButton: document.getElementById("save-settings-button"),
+      resetSettingsButton: document.getElementById("reset-settings-button"),
+      orphanCleanup: document.getElementById("orphan-cleanup"),
+      orphanSelector: document.getElementById("orphan-selector"),
+      orphanConfirmation: document.getElementById("orphan-confirmation"),
+      deleteOrphanButton: document.getElementById("delete-orphan-button"),
+      deleteConfirmation: document.getElementById("delete-confirmation"),
+      deleteButton: document.getElementById("delete-overlay-button"),
+      toast: document.getElementById("toast")
+    };
+
+    const view = {
+      data: normalizePanelState({}),
+      loading: false,
+      toastTimer: 0
+    };
+
+    function setText(node, value) {
+      if (node) node.textContent = String(value ?? "");
+    }
+
+    function formatDate(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number) || number <= 0) return "—";
+      const milliseconds = number < 10_000_000_000 ? number * 1000 : number;
+      try {
+        return new Intl.DateTimeFormat("zh-CN", {
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit"
+        }).format(new Date(milliseconds));
+      } catch (_error) {
+        return "—";
+      }
+    }
+
+    function shortFingerprint(value) {
+      const text = cleanText(value);
+      return text ? `${text.slice(0, 12)}…` : "—";
+    }
+
+    function showToast(message, kind = "good") {
+      setText(ui.toast, message);
+      ui.toast.className = `toast ${kind}`;
+      ui.toast.hidden = false;
+      runtimeWindow.clearTimeout(view.toastTimer);
+      view.toastTimer = runtimeWindow.setTimeout(() => {
+        ui.toast.hidden = true;
+      }, 4200);
+    }
+
+    function setBusy(busy) {
+      view.loading = busy;
+      document.querySelectorAll("button, select, input, textarea").forEach((node) => {
+        if (busy) {
+          node.dataset.wasDisabled = node.disabled ? "1" : "0";
+          node.disabled = true;
+        } else if (node.dataset.wasDisabled !== "1") {
+          node.disabled = false;
+        }
+        if (!busy) delete node.dataset.wasDisabled;
+      });
+      if (!busy) updateControls();
+    }
+
+    function showStatus(title, message, kind = "") {
+      setText(ui.statusTitle, title);
+      setText(ui.statusMessage, message);
+      ui.statusNotice.className = `notice ${kind}`.trim();
+    }
+
+    function updateControls() {
+      const data = view.data;
+      const binding = data.binding;
+      const usableBinding = binding && binding.status !== "overlay_deleted";
+      const ready = data.persistence_ready && !view.loading;
+      const invalidManagedCards = data.invalid_managed_overlays.length > 0;
+      ui.characterSelector.disabled = !ready || Boolean(usableBinding)
+        || invalidManagedCards;
+      ui.startButton.disabled = !ready || Boolean(usableBinding)
+        || invalidManagedCards || !ui.characterSelector.value;
+      ui.restoreButton.disabled = !ready || !usableBinding;
+      ui.resumeButton.disabled = !ready || !usableBinding || !binding.healthy;
+      ui.reflectButton.disabled = !ready || !usableBinding || !binding.healthy;
+      ui.rollbackButton.disabled = !ready || !usableBinding || !binding.healthy
+        || binding.current_version <= 0;
+      ui.saveSettingsButton.disabled = !ready;
+      ui.resetSettingsButton.disabled = !ready;
+      ui.orphanSelector.disabled = !ready || !view.data.unbound_managed_overlays.length;
+      ui.orphanConfirmation.disabled = !ready
+        || !view.data.unbound_managed_overlays.length;
+      ui.deleteOrphanButton.disabled = !ready
+        || !view.data.unbound_managed_overlays.length
+        || ui.orphanConfirmation.value !== "DELETE";
+      ui.deleteConfirmation.disabled = !ready || !usableBinding;
+      ui.deleteButton.disabled = !ready || !usableBinding
+        || ui.deleteConfirmation.value !== "DELETE";
+    }
+
+    function renderCharacters() {
+      const data = view.data;
+      const previous = ui.characterSelector.value;
+      ui.characterSelector.replaceChildren();
+      if (!data.characters.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "暂无可用角色卡";
+        ui.characterSelector.append(option);
+      } else {
+        for (const item of data.characters) {
+          const option = document.createElement("option");
+          option.value = item.name;
+          option.textContent = `${item.name}${item.current ? "（当前）" : ""}`;
+          ui.characterSelector.append(option);
+        }
+        const names = new Set(data.characters.map((item) => item.name));
+        const preferred = names.has(previous)
+          ? previous
+          : (data.characters.find((item) => item.current) || data.characters[0]).name;
+        ui.characterSelector.value = preferred;
+      }
+      setText(ui.characterCount, `${data.characters.length} 张可选`);
+    }
+
+    function renderBinding() {
+      const binding = view.data.binding;
+      ui.bindingEmpty.hidden = Boolean(binding);
+      ui.bindingDetails.hidden = !binding;
+      ui.restoreButton.disabled = !binding;
+      ui.resumeButton.hidden = !binding || binding.status === "overlay_deleted"
+        || binding.effective || !binding.healthy;
+      if (!binding) {
+        setText(ui.bindingEffective, "尚未绑定");
+        ui.bindingEffective.className = "tag";
+        return;
+      }
+      setText(ui.originalName, binding.original_name || "—");
+      setText(ui.overlayName, binding.overlay_name || "—");
+      setText(ui.currentCharacter, binding.current_character || view.data.current_character || "—");
+      setText(ui.baseFingerprint, shortFingerprint(binding.base_prompt_fingerprint));
+      ui.activeAdaptations.replaceChildren();
+      for (const adaptation of binding.active_adaptations) {
+        const item = document.createElement("li");
+        item.textContent = adaptation;
+        ui.activeAdaptations.append(item);
+      }
+      ui.activeAdaptations.hidden = !binding.active_adaptations.length;
+      ui.noActiveAdaptations.hidden = Boolean(binding.active_adaptations.length);
+
+      let label = "当前未生效";
+      let className = "tag warn";
+      if (binding.status === "overlay_deleted") {
+        label = "副本已删除";
+        className = "tag";
+      } else if (!binding.healthy) {
+        label = "绑定有冲突";
+        className = "tag bad";
+      } else if (binding.effective) {
+        label = "正在生效";
+        className = "tag good";
+      } else if (binding.status === "restored" || !binding.desired_enabled) {
+        label = "已恢复原角色";
+      }
+      setText(ui.bindingEffective, label);
+      ui.bindingEffective.className = className;
+
+      const warning = !binding.healthy || Boolean(binding.message);
+      ui.bindingWarning.hidden = !warning;
+      setText(
+        ui.bindingWarningMessage,
+        binding.message || (binding.conflict_code
+          ? `检测到冲突：${binding.conflict_code}。插件不会猜测或覆盖。`
+          : "")
+      );
+    }
+
+    function riskLabel(value) {
+      return value === "high" ? "高风险" : value === "medium" ? "中风险" : "低风险";
+    }
+
+    function renderProposals() {
+      const pending = view.data.proposals.filter((item) => item.status === "pending");
+      ui.proposalList.replaceChildren();
+      ui.proposalEmpty.hidden = Boolean(pending.length);
+      for (const proposal of pending.slice().reverse()) {
+        const card = document.createElement("article");
+        card.className = "item";
+
+        const head = document.createElement("div");
+        head.className = "item-head";
+        const heading = document.createElement("h3");
+        heading.className = "item-title";
+        heading.textContent = proposal.preference || "沟通方式建议";
+        const meta = document.createElement("div");
+        meta.className = "item-meta";
+        const risk = document.createElement("span");
+        risk.className = proposal.risk === "high" ? "tag bad"
+          : proposal.risk === "medium" ? "tag warn" : "tag good";
+        risk.textContent = riskLabel(proposal.risk);
+        const confidence = document.createElement("span");
+        confidence.textContent = `置信度 ${Math.round(proposal.confidence * 100)}%`;
+        meta.append(risk, confidence);
+        head.append(heading, meta);
+        card.append(head);
+
+        if (proposal.evidence_summary) {
+          const summary = document.createElement("p");
+          summary.textContent = proposal.evidence_summary;
+          card.append(summary);
+        }
+
+        const label = document.createElement("label");
+        label.textContent = "批准后写入副本的内容";
+        const textarea = document.createElement("textarea");
+        textarea.maxLength = 400;
+        textarea.value = proposal.proposed_prompt;
+        textarea.setAttribute("aria-label", "可编辑的自适应建议");
+        label.append(textarea);
+        card.append(label);
+
+        for (const excerptText of proposal.evidence_excerpt) {
+          const excerpt = document.createElement("blockquote");
+          excerpt.className = "evidence";
+          excerpt.textContent = excerptText;
+          card.append(excerpt);
+        }
+
+        const actions = document.createElement("div");
+        actions.className = "item-actions";
+        const reject = document.createElement("button");
+        reject.type = "button";
+        reject.className = "button secondary small";
+        reject.textContent = "拒绝";
+        reject.addEventListener("click", () => mutate(
+          "resolve_proposal",
+          { proposal_id: proposal.id, action: "reject" },
+          "建议已拒绝，角色卡没有变化。"
+        ));
+        const approve = document.createElement("button");
+        approve.type = "button";
+        approve.className = "button small";
+        approve.textContent = "批准并应用";
+        approve.addEventListener("click", () => mutate(
+          "resolve_proposal",
+          {
+            proposal_id: proposal.id,
+            action: "approve",
+            edited_prompt: textarea.value.trim()
+          },
+          "建议已写入自适应副本。"
+        ));
+        actions.append(reject, approve);
+        card.append(actions);
+        ui.proposalList.append(card);
+      }
+    }
+
+    const actionNames = {
+      bound: "已创建绑定",
+      activated: "已启用",
+      approved: "已批准",
+      rejected: "已拒绝",
+      rolled_back: "已回滚",
+      restored: "已恢复",
+      shutdown_restored: "关闭时恢复",
+      recovered: "重启后恢复绑定",
+      overlay_renamed: "已识别副本改名",
+      overlay_deleted: "已删除副本",
+      conflict: "检测到冲突"
+    };
+
+    function renderHistory() {
+      const binding = view.data.binding;
+      const history = binding ? binding.history : [];
+      ui.historyList.replaceChildren();
+      ui.historyEmpty.hidden = Boolean(history.length);
+      for (const change of history.slice().reverse()) {
+        const item = document.createElement("article");
+        item.className = "item change";
+        const time = document.createElement("time");
+        time.className = "change-time";
+        time.textContent = formatDate(change.at);
+        const body = document.createElement("div");
+        body.className = "change-body";
+        const title = document.createElement("strong");
+        title.textContent = actionNames[cleanText(change.action)] || cleanText(change.action, "状态变化");
+        const summary = document.createElement("p");
+        summary.textContent = cleanText(change.summary, "—");
+        body.append(title, summary);
+        if (cleanText(change.before) || cleanText(change.after)) {
+          const diff = document.createElement("div");
+          diff.className = "diff";
+          const before = document.createElement("div");
+          const beforeTitle = document.createElement("strong");
+          beforeTitle.textContent = "修改前";
+          before.append(beforeTitle, document.createTextNode(cleanText(change.before, "无")));
+          const after = document.createElement("div");
+          const afterTitle = document.createElement("strong");
+          afterTitle.textContent = "修改后";
+          after.append(afterTitle, document.createTextNode(cleanText(change.after, "无")));
+          diff.append(before, after);
+          body.append(diff);
+        }
+        item.append(time, body);
+        ui.historyList.append(item);
+      }
+    }
+
+    function renderSettings() {
+      const settings = view.data.settings;
+      ui.settingLearning.checked = settings.learning_enabled;
+      ui.settingAutomatic.checked = settings.automatic_reflection;
+      ui.settingAutoApply.checked = settings.auto_apply_low_risk;
+      ui.settingShowEvidence.checked = settings.show_evidence_excerpts;
+      ui.settingThreshold.value = String(settings.reflection_threshold);
+      ui.settingWindow.value = String(settings.evidence_window);
+      ui.settingConfidence.value = String(settings.minimum_confidence);
+    }
+
+    function renderOrphans() {
+      const names = view.data.unbound_managed_overlays;
+      const previous = ui.orphanSelector.value;
+      ui.orphanCleanup.hidden = !names.length;
+      ui.orphanSelector.replaceChildren();
+      for (const name of names) {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        ui.orphanSelector.append(option);
+      }
+      if (names.includes(previous)) ui.orphanSelector.value = previous;
+    }
+
+    function render() {
+      const data = view.data;
+      ui.app.hidden = false;
+      setText(ui.evidenceCount, data.evidence_count);
+      setText(ui.runtimeBadge, data.status === "running" ? "插件运行中" : "运行受限");
+      if (!data.persistence_ready) {
+        showStatus("本地存储不可用", "为避免产生无法追踪的副本，写入操作已暂停。", "bad");
+      } else if (data.binding && !data.binding.healthy) {
+        showStatus(
+          "角色卡状态需要检查",
+          data.binding.message || "原卡或副本发生了无法安全判断的变化，插件不会自动覆盖。",
+          "warn"
+        );
+      } else if (data.invalid_managed_overlays.length) {
+        showStatus(
+          "发现来源标记损坏的自适应副本",
+          `请先在角色管理中检查：${data.invalid_managed_overlays.join("、")}。插件不会把它当成原角色继续复制。`,
+          "warn"
+        );
+      } else if (data.unbound_managed_overlays.length) {
+        showStatus(
+          "发现未绑定的受控副本",
+          "这些副本带有本插件标记，但无法与当前绑定唯一对应；请在角色管理中检查。",
+          "warn"
+        );
+      } else if (data.binding && data.binding.status === "overlay_deleted") {
+        showStatus("自适应副本已删除", "可以重新选择任意原角色卡开始自适应。");
+      } else if (data.binding && data.binding.effective) {
+        showStatus("自适应副本正在生效", `当前使用「${data.binding.overlay_name}」，原卡保持不变。`);
+      } else if (data.binding) {
+        showStatus("绑定已保留", "当前没有使用自适应副本，可随时重新启用或手动删除。");
+      } else {
+        showStatus("请选择一张角色卡", "开始后会创建明确标记的受控副本，并自动切换过去。");
+      }
+      renderCharacters();
+      renderBinding();
+      renderProposals();
+      renderHistory();
+      renderSettings();
+      renderOrphans();
+      updateControls();
+    }
+
+    async function loadState() {
+      const payload = await callEntry("get_panel_state");
+      view.data = normalizePanelState(payload);
+      render();
+      return view.data;
+    }
+
+    async function refresh(showSuccess = false) {
+      setBusy(true);
+      try {
+        await loadState();
+        if (showSuccess) showToast("已按后台最新状态刷新。");
+      } catch (error) {
+        ui.app.hidden = false;
+        showStatus("暂时无法读取状态", humanError(error), "bad");
+        showToast(humanError(error), "bad");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function mutate(entryId, args, successMessage) {
+      setBusy(true);
+      try {
+        await callEntry(entryId, args);
+        await loadState();
+        showToast(successMessage);
+      } catch (error) {
+        showToast(humanError(error), "bad");
+        try {
+          await loadState();
+        } catch (_refreshError) {
+          // Keep the last confirmed view when a follow-up read also fails.
+        }
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    ui.refreshButton.addEventListener("click", () => refresh(true));
+    ui.characterSelector.addEventListener("change", updateControls);
+    ui.startButton.addEventListener("click", () => {
+      const originalName = ui.characterSelector.value;
+      if (!originalName) {
+        showToast("请先选择一张角色卡。", "bad");
+        return;
+      }
+      mutate(
+        "start_adaptation",
+        { original_name: originalName },
+        "自适应副本已创建并启用，原角色卡未修改。"
+      );
+    });
+    ui.resumeButton.addEventListener("click", () => {
+      const binding = view.data.binding;
+      if (!binding) return;
+      mutate(
+        "start_adaptation",
+        { original_name: binding.original_name },
+        "已重新切换到自适应副本。"
+      );
+    });
+    ui.restoreButton.addEventListener("click", () => mutate(
+      "restore_original",
+      {},
+      "恢复操作已完成；若你已切到其他角色，插件保留了你的选择。"
+    ));
+    ui.reflectButton.addEventListener("click", () => mutate(
+      "reflect_now",
+      {},
+      "检查完成，待确认建议已刷新。"
+    ));
+    ui.rollbackButton.addEventListener("click", () => mutate(
+      "rollback_last_change",
+      {},
+      "自适应副本已恢复到前一版本。"
+    ));
+    ui.orphanConfirmation.addEventListener("input", updateControls);
+    ui.deleteOrphanButton.addEventListener("click", () => {
+      if (ui.orphanConfirmation.value !== "DELETE") return;
+      const overlayName = ui.orphanSelector.value;
+      if (!overlayName) return;
+      mutate(
+        "delete_orphan_overlay",
+        { overlay_name: overlayName, confirmation: "DELETE" },
+        "所选未绑定副本已删除。"
+      ).finally(() => {
+        ui.orphanConfirmation.value = "";
+        updateControls();
+      });
+    });
+    ui.deleteConfirmation.addEventListener("input", updateControls);
+    ui.deleteButton.addEventListener("click", () => {
+      if (ui.deleteConfirmation.value !== "DELETE") return;
+      mutate(
+        "delete_overlay",
+        { confirmation: "DELETE" },
+        "自适应副本已删除。"
+      ).finally(() => {
+        ui.deleteConfirmation.value = "";
+        updateControls();
+      });
+    });
+    ui.settingsForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const reflectionThreshold = Number(ui.settingThreshold.value);
+      const evidenceWindow = Number(ui.settingWindow.value);
+      if (!Number.isInteger(reflectionThreshold) || !Number.isInteger(evidenceWindow)) {
+        showToast("证据条数必须是整数。", "bad");
+        return;
+      }
+      if (reflectionThreshold > evidenceWindow) {
+        showToast("生成建议所需条数不能大于证据窗口。", "bad");
+        return;
+      }
+      mutate("save_settings", {
+        settings: {
+          learning_enabled: ui.settingLearning.checked,
+          automatic_reflection: ui.settingAutomatic.checked,
+          auto_apply_low_risk: ui.settingAutoApply.checked,
+          reflection_threshold: reflectionThreshold,
+          minimum_confidence: Number(ui.settingConfidence.value),
+          evidence_window: evidenceWindow,
+          show_evidence_excerpts: ui.settingShowEvidence.checked
+        }
+      }, "设置已保存。");
+    });
+    ui.resetSettingsButton.addEventListener("click", () => mutate(
+      "reset_settings",
+      {},
+      "已恢复默认设置。"
+    ));
+
+    refresh(false);
+  })();
+  </script>
+</body>
+</html>

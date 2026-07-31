@@ -1,0 +1,14 @@
+{
+  "action.approve": "确认并应用",
+  "action.delete_overlay": "删除自适应副本",
+  "action.refresh": "刷新",
+  "action.reject": "拒绝",
+  "action.restore_original": "恢复原角色",
+  "action.rollback": "回滚上次修改",
+  "action.start": "开始自适应",
+  "binding.original": "原角色卡",
+  "binding.overlay": "自适应副本",
+  "history.title": "修改记录",
+  "plugin.description": "把批准后的沟通适配应用到现有角色卡的受控副本，原卡始终不改。",
+  "plugin.name": "角色卡自适应"
+}

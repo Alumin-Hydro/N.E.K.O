@@ -1,0 +1,46 @@
+[plugin]
+id = "auto_prompt_harness"
+name = "Auto Prompt Harness"
+description = "绑定现有 N.E.K.O 角色卡，在明确标记的受控副本上审批、应用和回滚沟通风格适配，原卡始终不改。"
+short_description = "Reversible, approved adaptations on managed character-card copies."
+keywords = [
+    "偏好",
+    "表达风格",
+    "adaptive",
+    "preference",
+    "prompt",
+    "privacy",
+]
+passive = true
+version = "0.2.0"
+type = "plugin"
+entry = "plugin.plugins.auto_prompt_harness:AutoPromptHarnessPlugin"
+
+[plugin.author]
+name = "N.E.K.O Team"
+
+[plugin.sdk]
+recommended = ">=0.1.0,<0.2.0"
+supported = ">=0.1.0,<0.3.0"
+
+[plugin.store]
+enabled = true
+
+[plugin.i18n]
+default_locale = "zh-CN"
+locales_dir = "i18n"
+
+[plugin.ui]
+enabled = true
+
+[[plugin.ui.panel]]
+id = "main"
+title = "角色卡自适应"
+entry = "static/index.html"
+mode = "static"
+open_in = "iframe"
+permissions = ["state:read", "action:call", "runs:read"]
+
+[plugin_runtime]
+enabled = true
+auto_start = true
