@@ -28,6 +28,19 @@ pytestmark = pytest.mark.plugin_unit
 
 PLUGIN_DIR = Path(__file__).resolve().parents[3] / "plugins" / "vibe_coding_connector"
 
+
+def _direct_python_executable() -> Path:
+    """Return the base interpreter, never a Windows venv redirector."""
+
+    candidate = getattr(sys, "_base_executable", sys.executable)
+    if not isinstance(candidate, str) or not candidate:
+        raise AssertionError("Python base executable is unavailable")
+    executable = Path(candidate).resolve()
+    if not executable.is_absolute() or not executable.is_file():
+        raise AssertionError("Python base executable is not an absolute file")
+    return executable
+
+
 _FAKE_HAPI = r"""#!/usr/bin/env python3
 import http.server
 import json
@@ -45,6 +58,9 @@ argv_log = Path(os.environ["FAKE_ARGV_LOG"])
 with argv_log.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps({
         "pid": os.getpid(),
+        "ppid": os.getppid(),
+        "sys_executable": sys.executable,
+        "base_executable": getattr(sys, "_base_executable", ""),
         "args": args,
         "env": {
             key: os.environ.get(key)
@@ -59,6 +75,14 @@ with argv_log.open("a", encoding="utf-8") as handle:
             )
         },
     }) + "\n")
+print(json.dumps({
+    "event": "fake-started",
+    "role": role,
+    "pid": os.getpid(),
+    "ppid": os.getppid(),
+    "sys_executable": sys.executable,
+    "base_executable": getattr(sys, "_base_executable", ""),
+}), flush=True)
 
 stop = threading.Event()
 def on_stop(*_):
@@ -74,8 +98,9 @@ if role == "runner":
         for index, value in enumerate(args[:-1])
         if value == "--workspace-root"
     ]
+    child_executable = getattr(sys, "_base_executable", "") or sys.executable
     child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"],
+        [child_executable, "-c", "import time; time.sleep(60)"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -190,7 +215,7 @@ class _WindowsPythonFakeHapiRuntime(ManagedHapiRuntime):
     def _prepare_locked(self) -> Path:
         fake_hapi_script = super()._prepare_locked()
         self._fake_hapi_script = fake_hapi_script
-        self._executable = Path(sys.executable).resolve()
+        self._executable = _direct_python_executable()
         return self._executable
 
     def _expected_argv(
@@ -209,6 +234,65 @@ class _WindowsPythonFakeHapiRuntime(ManagedHapiRuntime):
             workspace_roots=workspace_roots,
         )
         return (base[0], str(fake_hapi_script), *base[1:])
+
+    def _probe_hapi(
+        self,
+        *,
+        port: int,
+        require_runner: bool,
+    ) -> tuple[bool, bool, str]:
+        hub_ready, runner_ready, detail = super()._probe_hapi(
+            port=port,
+            require_runner=require_runner,
+        )
+        if hub_ready and (runner_ready or not require_runner):
+            return hub_ready, runner_ready, detail
+        try:
+            diagnostics = self._fake_diagnostics()
+        except Exception as exc:  # pragma: no cover - diagnostic safety net
+            diagnostics = f"unavailable:{type(exc).__name__}"
+        return (
+            hub_ready,
+            runner_ready,
+            f"{detail}; fake diagnostics: {diagnostics}",
+        )
+
+    def _fake_diagnostics(self) -> str:
+        details: list[str] = []
+        for role in ("hub", "runner"):
+            owned = self._processes.get(role)
+            if owned is None:
+                details.append(f"{role}=missing")
+                continue
+            exit_code = (
+                owned.process.poll() if owned.process is not None else "untracked"
+            )
+            details.append(f"{role}=pid:{owned.pid},exit:{exit_code}")
+
+        ready_value = self._config.extra_env.get("FAKE_RUNNER_READY")
+        if ready_value:
+            try:
+                ready = Path(ready_value).read_text(encoding="utf-8")[-512:]
+                details.append(f"ready={ready}")
+            except FileNotFoundError:
+                details.append("ready=missing")
+            except (OSError, UnicodeError) as exc:
+                details.append(f"ready={type(exc).__name__}")
+
+        for role in ("hub", "runner"):
+            try:
+                tail = (self._logs_dir / f"{role}.log").read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                )[-512:]
+            except OSError:
+                continue
+            tail = "\\n".join(
+                line.strip() for line in tail.splitlines() if line.strip()
+            )
+            if tail:
+                details.append(f"{role}_log={tail}")
+        return " | ".join(details)[:2048]
 
 
 class _Fixture:
@@ -267,16 +351,18 @@ class _Fixture:
         max_restarts: int = 2,
         crash_until: int = 0,
         workspace_roots: tuple[str, ...] | None = None,
+        runtime_class: type[ManagedHapiRuntime] | None = None,
     ) -> ManagedHapiRuntime:
         roots = workspace_roots
         if roots is None:
             roots = (str(self.workspace.resolve()),)
-        runtime_type = (
-            _WindowsPythonFakeHapiRuntime
-            if os.name == "nt"
-            else ManagedHapiRuntime
-        )
-        return runtime_type(
+        if runtime_class is None:
+            runtime_class = (
+                _WindowsPythonFakeHapiRuntime
+                if os.name == "nt"
+                else ManagedHapiRuntime
+            )
+        return runtime_class(
             bundle_root=self.bundle_root,
             data_root=self.data_root,
             config=ManagedHapiConfig(
@@ -351,6 +437,32 @@ def _kill_process_tree(pid: int, create_time: float) -> None:
     psutil.wait_procs(targets, timeout=3.0)
 
 
+def test_direct_fake_interpreter_keeps_popen_process_identity() -> None:
+    executable = _direct_python_executable()
+    process = subprocess.Popen(
+        [
+            str(executable),
+            "-I",
+            "-c",
+            "import os; print(os.getpid(), flush=True)",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+        text=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise
+
+    assert process.returncode == 0, stderr
+    assert int(stdout.strip()) == process.pid
+
+
 def test_runtime_starts_with_exact_argv_and_preferred_port(tmp_path: Path) -> None:
     fixture = _Fixture(tmp_path)
     port = _free_port()
@@ -364,6 +476,11 @@ def test_runtime_starts_with_exact_argv_and_preferred_port(tmp_path: Path) -> No
         records = _argv_records(fixture.argv_log)
         hub = next(item for item in records if item["args"][0] == "hub")
         runner = next(item for item in records if item["args"][0] == "runner")
+        processes = status["processes"]
+        assert hub["pid"] == processes["hub"]["pid"]
+        assert runner["pid"] == processes["runner"]["pid"]
+        ready = json.loads(fixture.runner_ready.read_text(encoding="utf-8"))
+        assert ready["pid"] == processes["runner"]["pid"]
         assert hub["args"] == [
             "hub",
             "--host",
@@ -394,6 +511,47 @@ def test_runtime_starts_with_exact_argv_and_preferred_port(tmp_path: Path) -> No
             assert environment["HAPI_LISTEN_PORT"] == str(port)
             assert isinstance(environment["CLI_API_TOKEN"], str)
             assert len(environment["CLI_API_TOKEN"]) >= 32
+    finally:
+        runtime.stop()
+
+
+def test_fake_readiness_diagnostics_expose_identity_without_token(
+    tmp_path: Path,
+) -> None:
+    fixture = _Fixture(tmp_path)
+    runtime = fixture.runtime(
+        preferred_port=_free_port(),
+        runtime_class=_WindowsPythonFakeHapiRuntime,
+    )
+    try:
+        started = runtime.start()
+        ready = json.loads(fixture.runner_ready.read_text(encoding="utf-8"))
+        ready["pid"] = int(ready["pid"]) + 1
+        fixture.runner_ready.write_text(json.dumps(ready), encoding="utf-8")
+        _wait_for(
+            lambda: all(
+                (runtime._logs_dir / f"{role}.log").is_file()
+                and (runtime._logs_dir / f"{role}.log").stat().st_size > 0
+                for role in ("hub", "runner")
+            )
+        )
+
+        hub_ready, runner_ready, detail = runtime._probe_hapi(
+            port=int(started["actual_port"]),
+            require_runner=True,
+        )
+
+        assert hub_ready is True
+        assert runner_ready is False
+        for role in ("hub", "runner"):
+            pid = started["processes"][role]["pid"]
+            assert f"{role}=pid:{pid},exit:None" in detail
+            assert f"{role}_log=" in detail
+        assert "fake-started" in detail
+        assert f'"pid": {ready["pid"]}' in detail
+        token = runtime.access_token
+        assert token
+        assert token not in detail
     finally:
         runtime.stop()
 
