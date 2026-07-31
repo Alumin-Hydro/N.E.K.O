@@ -507,6 +507,7 @@ def test_lifecycle_metadata(method_name: str, lifecycle_id: str) -> None:
     "method_name",
     [
         "get_panel_state",
+        "get_secret_envelope",
         "save_settings",
         "reset_settings",
         "clear_api_key",
@@ -558,6 +559,39 @@ async def test_startup_registers_writable_static_ui_and_shutdown(
     assert ctx.status_updates[-1] == {"status": "shutdown"}
     assert store.data["api_key"] == SECRET
     assert not (PLUGIN_DIR / "static" / "generated").exists()
+
+
+@pytest.mark.asyncio
+async def test_effective_config_enables_runtime_store_before_encrypted_save(
+    tmp_path: Path,
+) -> None:
+    store = FakeStore(enabled=False)
+    plugin, _ctx, _store = make_plugin(store=store, config=effective_config())
+
+    started = await plugin.startup()
+    prepare_asset_cache(plugin, tmp_path)
+    envelope_result = await plugin.get_secret_envelope()
+    assert envelope_result.is_ok()
+    envelope = envelope_result.value["secret_envelope"]
+    saved = await plugin.save_settings(
+        encrypted_payload=encrypt_save_document(
+            save_payload(api_key=SECRET, model="host-shaped-model"),
+            envelope,
+        ),
+        key_id=envelope["key_id"],
+    )
+    state = await plugin.get_panel_state()
+
+    assert started.is_ok()
+    assert store.enabled is True
+    assert saved.is_ok()
+    assert store.data["settings"]["model"] == "host-shaped-model"
+    assert store.data["api_key"] == SECRET
+    assert state.is_ok()
+    assert state.value["settings"]["model"] == "host-shaped-model"
+    assert state.value["api_key_configured"] is True
+    assert SECRET not in json.dumps(state.value, ensure_ascii=False)
+    await plugin.shutdown()
 
 
 @pytest.mark.asyncio
@@ -743,6 +777,51 @@ async def test_save_key_empty_keep_explicit_clear_and_panel_redaction(
     assert "api_key" not in store.data
     assert cleared.value["api_key_configured"] is False
     assert "api_key_hint" not in cleared.value
+
+
+@pytest.mark.asyncio
+async def test_cross_instance_stale_envelope_is_rejected_then_fresh_one_saves(
+    tmp_path: Path,
+) -> None:
+    shared_store = FakeStore()
+    stale_plugin, _stale_ctx, _ = make_plugin(store=shared_store)
+    active_plugin, _active_ctx, _ = make_plugin(store=shared_store)
+    prepare_asset_cache(active_plugin, tmp_path)
+
+    stale_result = await stale_plugin.get_secret_envelope()
+    assert stale_result.is_ok()
+    stale_envelope = stale_result.value["secret_envelope"]
+    stale_args = {
+        "encrypted_payload": encrypt_save_document(
+            save_payload(api_key=SECRET, model="stale-envelope-model"),
+            stale_envelope,
+        ),
+        "key_id": stale_envelope["key_id"],
+    }
+
+    rejected = await active_plugin.save_settings(**stale_args)
+    assert rejected.is_err()
+    assert "过期或已使用" in str(rejected.error)
+    assert shared_store.data == {}
+
+    fresh_result = await active_plugin.get_secret_envelope()
+    assert fresh_result.is_ok()
+    fresh_envelope = fresh_result.value["secret_envelope"]
+    fresh_args = {
+        "encrypted_payload": encrypt_save_document(
+            save_payload(api_key=SECRET, model="fresh-envelope-model"),
+            fresh_envelope,
+        ),
+        "key_id": fresh_envelope["key_id"],
+    }
+    saved = await active_plugin.save_settings(**fresh_args)
+    replayed = await active_plugin.save_settings(**fresh_args)
+
+    assert saved.is_ok()
+    assert replayed.is_err()
+    assert "过期或已使用" in str(replayed.error)
+    assert shared_store.data["settings"]["model"] == "fresh-envelope-model"
+    assert shared_store.data["api_key"] == SECRET
 
 
 @pytest.mark.asyncio
@@ -2185,6 +2264,7 @@ def test_static_panel_is_self_contained_accessible_and_calls_real_entries() -> N
     assert "/export" in html
     for entry_id in (
         "get_panel_state",
+        "get_secret_envelope",
         "save_settings",
         "reset_settings",
         "clear_api_key",
@@ -2197,9 +2277,10 @@ def test_static_panel_is_self_contained_accessible_and_calls_real_entries() -> N
             html,
         ), entry_id
     assert "encryptSavePayload" in html
+    assert "requestFreshSecretEnvelope" in html
     assert "window.crypto.subtle.importKey" in html
     assert "window.crypto.subtle.encrypt" in html
-    assert "currentState.secret_envelope" in html
+    assert "currentState.secret_envelope" not in html
     assert "encrypted_payload:" in html
     assert "wrapped_key:" in html
     assert "callPlugin('save_settings', encryptedArgs)" in html
@@ -2251,6 +2332,8 @@ def test_static_panel_inline_javascript_passes_node_syntax_check() -> None:
         [node, "--check", "-"],
         input=scripts[0],
         text=True,
+        encoding="utf-8",
+        errors="strict",
         capture_output=True,
         check=False,
         timeout=15,
@@ -2317,6 +2400,8 @@ validateCacheCapacity(10, 20);
             ]
         ),
         text=True,
+        encoding="utf-8",
+        errors="strict",
         capture_output=True,
         check=False,
         timeout=15,

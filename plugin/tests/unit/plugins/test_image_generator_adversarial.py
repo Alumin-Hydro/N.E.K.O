@@ -518,6 +518,7 @@ async def test_generation_snapshot_cannot_mix_old_settings_with_new_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     old_settings = copy.deepcopy(DEFAULT_SETTINGS)
+    old_settings["provider"] = "custom"
     old_settings["api_base_url"] = "https://old-provider.example/v1"
     old_settings["model"] = "old-model"
     store = BarrierStore({"settings": old_settings, "api_key": OLD_SECRET})
@@ -527,6 +528,7 @@ async def test_generation_snapshot_cannot_mix_old_settings_with_new_key(
         save_args = await encrypted_save_args(
             plugin,
             secret=NEW_SECRET,
+            provider="custom",
             api_base_url="https://new-provider.example/v1",
             model="new-model",
         )
@@ -586,6 +588,7 @@ async def test_generation_waits_for_atomic_settings_and_key_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     old_settings = copy.deepcopy(DEFAULT_SETTINGS)
+    old_settings["provider"] = "custom"
     old_settings["api_base_url"] = "https://old-provider.example/v1"
     old_settings["model"] = "old-model"
     store = BarrierStore({"settings": old_settings, "api_key": OLD_SECRET})
@@ -595,6 +598,7 @@ async def test_generation_waits_for_atomic_settings_and_key_save(
         save_args = await encrypted_save_args(
             plugin,
             secret=NEW_SECRET,
+            provider="custom",
             api_base_url="https://new-provider.example/v1",
             model="new-model",
         )
@@ -780,6 +784,7 @@ async def test_direct_clear_rejects_poisoned_settings_then_scrubs_history() -> N
 @pytest.mark.asyncio
 async def test_save_fails_closed_when_current_store_snapshot_cannot_be_read() -> None:
     old_settings = copy.deepcopy(DEFAULT_SETTINGS)
+    old_settings["provider"] = "custom"
     old_settings["api_base_url"] = "https://old-provider.example/v1"
     old_settings["model"] = "old-model"
     old_history = [
@@ -805,6 +810,7 @@ async def test_save_fails_closed_when_current_store_snapshot_cannot_be_read() ->
         replacement_args = await encrypted_save_args(
             plugin,
             secret=NEW_SECRET,
+            provider="custom",
             api_base_url="https://new-provider.example/v1",
             model="new-model",
         )
@@ -835,6 +841,7 @@ async def test_save_fails_closed_when_current_store_snapshot_cannot_be_read() ->
 @pytest.mark.asyncio
 async def test_save_crash_cannot_pair_new_endpoint_with_old_api_key() -> None:
     old_settings = copy.deepcopy(DEFAULT_SETTINGS)
+    old_settings["provider"] = "custom"
     old_settings["api_base_url"] = "https://old-provider.example/v1"
 
     class CrashAfterSettingsCommitStore(MemoryStore):
@@ -864,6 +871,7 @@ async def test_save_crash_cannot_pair_new_endpoint_with_old_api_key() -> None:
             **await encrypted_save_args(
                 plugin,
                 secret="",
+                provider="custom",
                 api_base_url="https://new-provider.example/v1",
             )
         )
@@ -881,6 +889,7 @@ async def test_save_crash_cannot_pair_new_endpoint_with_old_api_key() -> None:
 @pytest.mark.asyncio
 async def test_save_cancellation_after_key_commit_cannot_mix_runtime_config() -> None:
     old_settings = copy.deepcopy(DEFAULT_SETTINGS)
+    old_settings["provider"] = "custom"
     old_settings["api_base_url"] = "https://old-provider.example/v1"
 
     class CancelAfterKeyCommitStore(MemoryStore):
@@ -908,6 +917,7 @@ async def test_save_cancellation_after_key_commit_cannot_mix_runtime_config() ->
                 **await encrypted_save_args(
                     plugin,
                     secret=NEW_SECRET,
+                    provider="custom",
                     api_base_url="https://new-provider.example/v1",
                 )
             )
@@ -925,6 +935,7 @@ async def test_save_cancellation_after_key_commit_cannot_mix_runtime_config() ->
 @pytest.mark.asyncio
 async def test_save_cancellation_during_key_rollback_cannot_mix_runtime_config() -> None:
     old_settings = copy.deepcopy(DEFAULT_SETTINGS)
+    old_settings["provider"] = "custom"
     old_settings["api_base_url"] = "https://old-provider.example/v1"
 
     class CancelAfterRollbackKeyCommitStore(MemoryStore):
@@ -956,6 +967,7 @@ async def test_save_cancellation_during_key_rollback_cannot_mix_runtime_config()
                 **await encrypted_save_args(
                     plugin,
                     secret=NEW_SECRET,
+                    provider="custom",
                     api_base_url="https://new-provider.example/v1",
                 )
             )
@@ -973,6 +985,7 @@ async def test_save_cancellation_during_key_rollback_cannot_mix_runtime_config()
 @pytest.mark.asyncio
 async def test_ambiguous_key_commit_and_failed_delete_keep_matching_runtime() -> None:
     old_settings = copy.deepcopy(DEFAULT_SETTINGS)
+    old_settings["provider"] = "custom"
     old_settings["api_base_url"] = "https://old-provider.example/v1"
 
     class AmbiguousKeyCommitStore(MemoryStore):
@@ -1007,6 +1020,7 @@ async def test_ambiguous_key_commit_and_failed_delete_keep_matching_runtime() ->
             **await encrypted_save_args(
                 plugin,
                 secret=NEW_SECRET,
+                provider="custom",
                 api_base_url="https://new-provider.example/v1",
             )
         )
@@ -1207,6 +1221,7 @@ async def test_generation_waits_for_atomic_reset_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     old_settings = copy.deepcopy(DEFAULT_SETTINGS)
+    old_settings["provider"] = "custom"
     old_settings["api_base_url"] = "https://old-provider.example/v1"
     old_settings["model"] = "old-model"
     store = BarrierStore({"settings": old_settings, "api_key": OLD_SECRET})
@@ -1398,6 +1413,7 @@ async def test_real_http_provider_cached_static_asset_and_markdown_contract(
             {"data": [{"url": (f"http://127.0.0.1:{port}/should-not-fetch.png")}]}
         )
         settings = copy.deepcopy(DEFAULT_SETTINGS)
+        settings["provider"] = "local_compatible"
         settings["api_base_url"] = f"http://127.0.0.1:{port}/v1"
         settings["model"] = "portable-image-model"
         store = MemoryStore({"settings": settings, "api_key": OLD_SECRET})

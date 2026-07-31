@@ -1334,6 +1334,14 @@
       const MAX_ERROR_TEXT = 420;
       const SECRET_ENVELOPE_ALGORITHM = 'RSA-OAEP-256+A256GCM';
       const SECRET_ENVELOPE_BINDING_PREFIX = `${PLUGIN_ID}:`;
+      const SECRET_ENVELOPE_SERVER_ERROR_PATTERNS = Object.freeze([
+        /加密设置载荷格式无效/,
+        /加密设置载荷已过期或已使用/,
+        /无法解密设置载荷/,
+        /密钥信封.*(?:无效|过期|已使用)/,
+        /\benvelope\b.*\b(?:invalid|expired|already used|used)\b/i,
+        /\bencrypted settings payload\b.*\b(?:invalid|expired|already used|used|decrypt)\b/i,
+      ]);
       const GENERATED_ASSET_PREFIX = `/plugin/${PLUGIN_ID}/ui/generated/`;
       const PROVIDER_PRESETS = Object.freeze({
         openai: {
@@ -1521,16 +1529,50 @@
         return text;
       }
 
-      function errorMessage(error) {
-        if (error && typeof error === 'object' && typeof error.message === 'string') {
-          return redactText(error.message);
+      function extractErrorText(value, seen = new Set()) {
+        if (typeof value === 'string') return value.trim();
+        if (typeof value === 'number' || typeof value === 'boolean') {
+          return String(value);
         }
-        return redactText(error) || t('error.plugin_call', '插件调用失败');
+        if (!value || typeof value !== 'object' || seen.has(value)) return '';
+        seen.add(value);
+        for (const key of ['message', 'detail', 'error']) {
+          if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+          const candidate = extractErrorText(value[key], seen);
+          if (candidate) return candidate;
+        }
+        if (Array.isArray(value)) {
+          for (const item of value) {
+            const candidate = extractErrorText(item, seen);
+            if (candidate) return candidate;
+          }
+        }
+        return '';
+      }
+
+      function errorMessage(error) {
+        return redactText(extractErrorText(error))
+          || t('error.plugin_call', '插件调用失败');
+      }
+
+      class PluginRunError extends Error {
+        constructor(value, fallback) {
+          super(redactText(extractErrorText(value)) || fallback);
+          this.name = 'PluginRunError';
+        }
+      }
+
+      function isRetryableSecretEnvelopeError(error) {
+        if (!(error instanceof PluginRunError)) return false;
+        const message = extractErrorText(error);
+        return SECRET_ENVELOPE_SERVER_ERROR_PATTERNS.some(
+          (pattern) => pattern.test(message),
+        );
       }
 
       function showToast(message, tone = 'info') {
         clearTimeout(toastTimer);
-        elements.toast.textContent = redactText(message);
+        elements.toast.textContent = errorMessage(message);
         elements.toast.dataset.tone = tone;
         elements.toast.dataset.visible = 'true';
         toastTimer = window.setTimeout(() => {
@@ -1586,10 +1628,12 @@
             }
             const pluginResponse = item.json;
             if (pluginResponse.success === false || pluginResponse.error) {
-              const message = pluginResponse.error && typeof pluginResponse.error === 'object'
-                ? pluginResponse.error.message
-                : (pluginResponse.error || pluginResponse.message);
-              throw new Error(redactText(message) || t('error.plugin_call', '插件调用失败'));
+              const pluginError = extractErrorText(pluginResponse.error)
+                || extractErrorText(pluginResponse.message);
+              throw new PluginRunError(
+                pluginError,
+                t('error.plugin_call', '插件调用失败'),
+              );
             }
             return pluginResponse.data && typeof pluginResponse.data === 'object'
               ? pluginResponse.data
@@ -1615,9 +1659,12 @@
           cache: 'no-store',
         }, deadline);
         if (!createResponse.ok) {
-          throw new Error(t('error.create_run', '创建任务失败（HTTP {status}）', {
+          const createError = await readJson(createResponse);
+          const fallback = t('error.create_run', '创建任务失败（HTTP {status}）', {
             status: createResponse.status,
-          }));
+          });
+          const message = redactText(extractErrorText(createError));
+          throw new Error(message || fallback);
         }
 
         const createPayload = await readJson(createResponse);
@@ -1641,10 +1688,14 @@
             return await exportRun(runId, deadline);
           }
           if (['failed', 'canceled', 'timeout'].includes(record.status)) {
-            const message = record.error && typeof record.error === 'object'
-              ? record.error.message
-              : (record.message || record.status);
-            throw new Error(redactText(message) || t('error.plugin_call', '插件调用失败'));
+            const runError = extractErrorText(record.error)
+              || extractErrorText(record.detail)
+              || extractErrorText(record.message)
+              || extractErrorText(record.status);
+            throw new PluginRunError(
+              runError,
+              t('error.plugin_call', '插件调用失败'),
+            );
           }
         }
         throw new Error(t('error.timeout', '插件调用超时'));
@@ -1703,8 +1754,7 @@
         return Number.isFinite(parsed) ? parsed : 0;
       }
 
-      async function encryptSavePayload(savePayload) {
-        const envelope = currentState.secret_envelope;
+      async function encryptSavePayload(savePayload, envelope) {
         if (!envelope || typeof envelope !== 'object'
           || envelope.algorithm !== SECRET_ENVELOPE_ALGORITHM
           || typeof envelope.key_id !== 'string'
@@ -1778,6 +1828,26 @@
           plaintext.fill(0);
           if (rawContentKey) rawContentKey.fill(0);
         }
+      }
+
+      async function requestFreshSecretEnvelope() {
+        const result = await callPlugin('get_secret_envelope');
+        const envelope = result && typeof result === 'object'
+          ? result.secret_envelope
+          : null;
+        if (!envelope || typeof envelope !== 'object') {
+          throw new Error(t(
+            'error.secret_envelope',
+            '安全密钥信封无效，请刷新面板后重试',
+          ));
+        }
+        return envelope;
+      }
+
+      async function saveEncryptedSettings(savePayload) {
+        const envelope = await requestFreshSecretEnvelope();
+        const encryptedArgs = await encryptSavePayload(savePayload, envelope);
+        return callPlugin('save_settings', encryptedArgs);
       }
 
       function updateActionAvailability() {
@@ -2321,7 +2391,8 @@
       async function saveSettings(event) {
         event.preventDefault();
         let args;
-        const pendingCredential = elements.apiKey.value;
+        let pendingCredential = elements.apiKey.value;
+        let savePayload = null;
         elements.apiKey.value = '';
         try {
           syncSelects();
@@ -2333,28 +2404,28 @@
 
         setBusy(true);
         try {
-          let encryptedArgs;
+          savePayload = {
+            ...args,
+            api_key: pendingCredential,
+            clear_api_key: false,
+          };
+          let result;
           try {
-            encryptedArgs = await encryptSavePayload({
-              ...args,
-              api_key: pendingCredential,
-              clear_api_key: false,
-            });
+            result = await saveEncryptedSettings(savePayload);
           } catch (error) {
-            showToast(errorMessage(error), 'error');
-            await refreshState();
-            return;
+            if (!isRetryableSecretEnvelopeError(error)) throw error;
+            result = await saveEncryptedSettings(savePayload);
           }
-          const result = await callPlugin('save_settings', encryptedArgs);
           if (!result || typeof result !== 'object') {
             throw new Error(t('error.empty_result', '插件未返回可读取的结果'));
           }
           await refreshState();
           showToast(t('status.saved', '设置已保存'), 'success');
         } catch (error) {
-          showToast(t('error.plugin_call', '设置保存失败，请刷新面板后重试'), 'error');
-          await refreshState();
+          showToast(errorMessage(error), 'error');
         } finally {
+          if (savePayload) savePayload.api_key = '';
+          pendingCredential = '';
           elements.apiKey.value = '';
           setBusy(false);
         }

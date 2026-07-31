@@ -2912,6 +2912,19 @@ class ImageGeneratorPlugin(NekoPluginBase):
     # ------------------------------------------------------------------
 
     @plugin_entry(
+        id="get_secret_envelope",
+        name="创建图片生成器密钥信封",
+        description="为下一次设置保存创建短时、一次性的公钥加密信封。",
+        input_schema=_EMPTY_SCHEMA,
+    )
+    async def get_secret_envelope(self, **_: Any):
+        try:
+            secret_envelope = await self._issue_secret_envelope()
+        except SdkError as exc:
+            return Err(exc)
+        return Ok({"secret_envelope": secret_envelope})
+
+    @plugin_entry(
         id="get_panel_state",
         name="读取图片生成器面板状态",
         description="读取安全设置、运行状态、缓存统计和最近生成记录。",
