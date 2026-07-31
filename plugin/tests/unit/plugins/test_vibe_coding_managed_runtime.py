@@ -54,7 +54,9 @@ from pathlib import Path
 
 args = sys.argv[1:]
 role = args[0] if args else ""
-argv_log = Path(os.environ["FAKE_ARGV_LOG"])
+if role not in {"hub", "runner"}:
+    raise SystemExit(2)
+argv_log = Path(os.environ["FAKE_ARGV_LOG_DIR"]) / f"{role}.jsonl"
 with argv_log.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps({
         "pid": os.getpid(),
@@ -300,12 +302,13 @@ class _Fixture:
         self.bundle_root = root / "bundle"
         self.data_root = root / "data"
         self.workspace = root / "workspace"
-        self.argv_log = root / "argv.jsonl"
+        self.argv_log_dir = root / "argv"
         self.runner_ready = root / "runner.ready"
         self.health_failures = root / "health-failures"
         self.crash_counter = root / "crash-counter"
         self.child_pids = root / "child-pids"
         self.workspace.mkdir(parents=True)
+        self.argv_log_dir.mkdir()
         bundles = self.bundle_root / "bundles"
         bundles.mkdir(parents=True)
         executable_bytes = _FAKE_HAPI.encode("utf-8")
@@ -375,7 +378,7 @@ class _Fixture:
                 max_log_bytes=16_384,
                 log_backups=1,
                 extra_env={
-                    "FAKE_ARGV_LOG": str(self.argv_log),
+                    "FAKE_ARGV_LOG_DIR": str(self.argv_log_dir),
                     "FAKE_RUNNER_READY": str(self.runner_ready),
                     "FAKE_HEALTH_FAILURES": str(self.health_failures),
                     "FAKE_CRASH_COUNTER": str(self.crash_counter),
@@ -411,12 +414,20 @@ def _wait_for(predicate, *, timeout: float = 8.0) -> None:
     raise AssertionError("condition did not become true before timeout")
 
 
-def _argv_records(path: Path) -> list[dict[str, object]]:
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+def _argv_records(directory: Path) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for role in ("hub", "runner"):
+        path = directory / f"{role}.jsonl"
+        if not path.exists():
+            continue
+        role_records = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert all(record["args"][0] == role for record in role_records)
+        records.extend(role_records)
+    return records
 
 
 def _kill_process_tree(pid: int, create_time: float) -> None:
@@ -473,9 +484,13 @@ def test_runtime_starts_with_exact_argv_and_preferred_port(tmp_path: Path) -> No
         assert status["actual_port"] == port
         assert status["hub_ready"] is True
         assert status["runner_ready"] is True
-        records = _argv_records(fixture.argv_log)
-        hub = next(item for item in records if item["args"][0] == "hub")
-        runner = next(item for item in records if item["args"][0] == "runner")
+        assert all(
+            (fixture.argv_log_dir / f"{role}.jsonl").is_file()
+            for role in ("hub", "runner")
+        )
+        records = _argv_records(fixture.argv_log_dir)
+        assert [record["args"][0] for record in records] == ["hub", "runner"]
+        hub, runner = records
         processes = status["processes"]
         assert hub["pid"] == processes["hub"]["pid"]
         assert runner["pid"] == processes["runner"]["pid"]
@@ -669,13 +684,13 @@ def test_runtime_stops_after_finite_restart_budget(tmp_path: Path) -> None:
         stable_counter = int(
             fixture.crash_counter.read_text(encoding="ascii")
         )
-        stable_argv = _argv_records(fixture.argv_log)
+        stable_argv = _argv_records(fixture.argv_log_dir)
         assert stable_counter == 3
         assert runtime.start()["state"] == "failed"
         assert runtime.start()["state"] == "failed"
         time.sleep(0.4)
         assert int(fixture.crash_counter.read_text(encoding="ascii")) == stable_counter
-        assert _argv_records(fixture.argv_log) == stable_argv
+        assert _argv_records(fixture.argv_log_dir) == stable_argv
 
         reset_status = runtime.start(reset_budget=True)
         assert reset_status["state"] == "ready"
@@ -740,7 +755,7 @@ def test_partial_marker_cleanup_kills_surviving_hub_before_new_start(
         if old_hub_handle is not None:
             old_hub_handle.poll()
         _wait_for(lambda: not psutil.pid_exists(old_hub_pid))
-        assert len(_argv_records(fixture.argv_log)) == 4
+        assert len(_argv_records(fixture.argv_log_dir)) == 4
     finally:
         replacement.stop()
         original.stop()
@@ -762,11 +777,11 @@ def test_second_instance_lifecycle_lock_never_spawns(
     )
     try:
         owner_status = owner.start()
-        records_before = _argv_records(fixture.argv_log)
+        records_before = _argv_records(fixture.argv_log_dir)
         with pytest.raises(ManagedHapiError) as caught:
             contender.start()
         assert caught.value.code == "runtime_lifecycle_busy"
-        assert _argv_records(fixture.argv_log) == records_before
+        assert _argv_records(fixture.argv_log_dir) == records_before
         assert owner.status()["processes"] == owner_status["processes"]
         assert owner.status()["state"] == "ready"
         assert (fixture.data_root / "ownership.json").is_file()
@@ -791,7 +806,7 @@ def test_runtime_rejects_checksum_mismatch_before_execution(tmp_path: Path) -> N
     with pytest.raises(ManagedHapiError) as caught:
         runtime.start()
     assert caught.value.code == "checksum_mismatch"
-    assert not fixture.argv_log.exists()
+    assert _argv_records(fixture.argv_log_dir) == []
 
 
 def test_bundled_windows_runtime_uses_absolute_hapi_exe_and_exact_argv(
@@ -858,7 +873,7 @@ def test_runtime_without_workspace_starts_hub_but_not_runner(tmp_path: Path) -> 
         assert status["state"] == "degraded"
         assert status["hub_ready"] is True
         assert status["runner_ready"] is False
-        records = _argv_records(fixture.argv_log)
+        records = _argv_records(fixture.argv_log_dir)
         assert [record["args"][0] for record in records] == ["hub"]
     finally:
         runtime.stop()
