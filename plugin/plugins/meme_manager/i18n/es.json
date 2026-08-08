@@ -6,7 +6,7 @@
   "advanced": "Ajustes avanzados (límites y notas)",
   "empty": "Aún no hay subidas del usuario; las fuentes predeterminadas siguen disponibles.",
   "addTitle": "Añadir meme",
-  "pickImage": "Elige una imagen (PNG / JPEG / GIF / WebP / SVG, máx. 2MB)",
+  "pickImage": "Elige imágenes (selección múltiple o carpeta completa; las grandes se comprimen solas)",
   "name": "Nombre",
   "tags": "Etiquetas (separadas por comas, ayudan a la chica gato)",
   "cancel": "Cancelar",

@@ -1,10 +1,10 @@
 [plugin]
 id = "meme_manager"
 name = "表情包管理器"
-description = "统一展示 N.E.K.O 系统默认在线表情来源与用户上传；支持持久化管理和聊天发送。"
-short_description = "View N.E.K.O's default online meme sources and persistently manage user uploads in one catalog."
+description = "统一展示 N.E.K.O 系统默认在线表情来源与用户上传；支持批量上传整个文件夹、自动压缩大图并持久化管理。"
+short_description = "View N.E.K.O's default online meme sources and persistently manage user uploads in one catalog, with folder batch upload and automatic image compression."
 keywords = ["表情包", "meme", "sticker", "表情", "贴纸", "ミーム", "スタンプ", "밈", "스티커", "мем", "стикер"]
-version = "0.1.1"
+version = "0.2.0"
 entry = "plugin.plugins.meme_manager:MemeManagerPlugin"
 
 [plugin.author]

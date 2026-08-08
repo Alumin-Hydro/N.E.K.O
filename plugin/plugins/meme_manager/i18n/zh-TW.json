@@ -6,7 +6,7 @@
   "advanced": "進階設定（上限與說明）",
   "empty": "還沒有使用者上傳；系統預設來源仍然可用。",
   "addTitle": "新增表情包",
-  "pickImage": "選擇圖片（PNG / JPEG / GIF / WebP / SVG，最大 2MB）",
+  "pickImage": "選擇圖片（可多選或整個資料夾，超限自動壓縮）",
   "name": "名稱",
   "tags": "標籤（逗號分隔，方便貓娘匹配）",
   "cancel": "取消",

@@ -6,7 +6,7 @@
   "advanced": "Advanced (limits and notes)",
   "empty": "No user uploads yet; system default sources are still available.",
   "addTitle": "Add meme",
-  "pickImage": "Pick an image (PNG / JPEG / GIF / WebP / SVG, max 2MB)",
+  "pickImage": "Pick images (multi-select or a whole folder; oversized images are auto-compressed)",
   "name": "Name",
   "tags": "Tags (comma separated, helps the catgirl match)",
   "cancel": "Cancel",

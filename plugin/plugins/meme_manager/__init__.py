@@ -52,6 +52,13 @@ _MIME_BY_EXT = {
     ".svg": "image/svg+xml",
 }
 _MAX_IMAGE_BYTES = 2 * 1024 * 1024
+# Raw uploads may exceed the stored-size limit: oversized raster images are
+# normalized (resized / re-encoded) down to _MAX_IMAGE_BYTES before storage.
+_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+_MAX_BATCH_ITEMS = 100
+# Raster images are re-encoded to at most this edge length; anything larger
+# only wastes chat bandwidth when the catgirl posts the meme.
+_TARGET_IMAGE_DIMENSION = 1024
 _MAX_IMAGE_DIMENSION = 4096
 _MAX_IMAGE_PIXELS = 16 * 1024 * 1024
 _MAX_ANIMATION_FRAMES = 256
@@ -131,6 +138,40 @@ ADD_MEME_SCHEMA: dict[str, Any] = {
         "data_base64": {"type": "string", "minLength": 8},
     },
     "required": ["name", "filename", "data_base64"],
+    "additionalProperties": False,
+}
+
+ADD_MEMES_BATCH_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "maxLength": _MAX_NAME},
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string", "maxLength": _MAX_TAG_LEN},
+                        "maxItems": _MAX_TAGS,
+                    },
+                    "filename": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "data_base64": {"type": "string", "minLength": 8},
+                },
+                "required": ["filename", "data_base64"],
+                "additionalProperties": False,
+            },
+        },
+        "tags": {
+            "type": "array",
+            "items": {"type": "string", "maxLength": _MAX_TAG_LEN},
+            "maxItems": _MAX_TAGS,
+            "description": "批量上传时未单独指定标签的图片共用这份标签。",
+        },
+    },
+    "required": ["items"],
     "additionalProperties": False,
 }
 
@@ -315,14 +356,187 @@ def _validate_raster(data: bytes, expected_ext: str) -> tuple[int, int]:
 def _validate_image_payload(filename: str, data: bytes) -> tuple[str, int, int]:
     if not data:
         raise SdkError("图片内容为空")
-    if len(data) > _MAX_IMAGE_BYTES:
-        raise SdkError(f"图片超过 {_MAX_IMAGE_BYTES // 1024 // 1024}MB 上限")
+    if len(data) > _MAX_UPLOAD_BYTES:
+        raise SdkError(f"图片超过 {_MAX_UPLOAD_BYTES // 1024 // 1024}MB 上传上限")
     ext = _detect_extension(filename, data)
     if ext == ".svg":
         width, height = _validate_svg(data)
     else:
         width, height = _validate_raster(data, ext)
     return ext, width, height
+
+
+def _encode_under_limit(
+    encode: Any,
+    *,
+    quality_start: int = 88,
+    quality_floor: int = 35,
+    scale_floor: float = 0.2,
+) -> bytes | None:
+    """Try quality then downscale steps until the payload fits _MAX_IMAGE_BYTES."""
+    for quality in range(quality_start, quality_floor - 1, -8):
+        candidate = encode(1.0, quality)
+        if candidate is not None and len(candidate) <= _MAX_IMAGE_BYTES:
+            return candidate
+    scale = 0.85
+    while scale >= scale_floor:
+        for quality in (quality_start, 60, quality_floor):
+            candidate = encode(scale, quality)
+            if candidate is not None and len(candidate) <= _MAX_IMAGE_BYTES:
+                return candidate
+        scale *= 0.7
+    return None
+
+
+def _normalize_image_payload(
+    filename: str, data: bytes
+) -> tuple[bytes, str, int, int, bool]:
+    """Validate, then shrink/re-encode raster uploads that exceed the stored
+    size limit so chat messages stay small. Returns
+    ``(payload, ext, width, height, compressed)``."""
+    ext, width, height = _validate_image_payload(filename, data)
+    if ext == ".svg":
+        if len(data) > _MAX_IMAGE_BYTES:
+            raise SdkError(
+                f"SVG 超过 {_MAX_IMAGE_BYTES // 1024 // 1024}MB 上限且无法自动压缩"
+            )
+        return data, ext, width, height, False
+
+    oversized = len(data) > _MAX_IMAGE_BYTES
+    too_large = max(width, height) > _TARGET_IMAGE_DIMENSION
+    if not oversized and not too_large:
+        return data, ext, width, height, False
+    # Already small enough on disk and only mildly over the target edge:
+    # keep the original pixels (preserves GIF animation and quality).
+    if not oversized and max(width, height) <= 2 * _TARGET_IMAGE_DIMENSION:
+        return data, ext, width, height, False
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(data)) as source:
+                source.load()
+                is_gif = ext == ".gif"
+                animated = bool(getattr(source, "is_animated", False))
+                if is_gif and animated:
+                    # Re-encoding animated GIFs frame-by-frame is lossy and
+                    # slow; only allow shrinking when it fits after a resize.
+                    frames = []
+                    durations = []
+                    disposal = []
+                    for index in range(int(getattr(source, "n_frames", 1) or 1)):
+                        source.seek(index)
+                        frame = source.convert("RGBA")
+                        frames.append(frame)
+                        durations.append(int(source.info.get("duration", 100)))
+                        disposal.append(getattr(source, "disposal_method", 0))
+                    base_w, base_h = frames[0].size
+
+                    def encode_gif(scale: float, _quality: int) -> bytes | None:
+                        target_w = max(1, int(base_w * scale))
+                        target_h = max(1, int(base_h * scale))
+                        if target_w > _TARGET_IMAGE_DIMENSION or target_h > _TARGET_IMAGE_DIMENSION:
+                            ratio = _TARGET_IMAGE_DIMENSION / max(target_w, target_h)
+                            target_w = max(1, int(target_w * ratio))
+                            target_h = max(1, int(target_h * ratio))
+                        resized = [
+                            frame.resize((target_w, target_h), Image.Resampling.LANCZOS)
+                            for frame in frames
+                        ]
+                        buffer = BytesIO()
+                        resized[0].save(
+                            buffer,
+                            format="GIF",
+                            save_all=True,
+                            append_images=resized[1:],
+                            duration=durations,
+                            loop=int(source.info.get("loop", 0) or 0),
+                            disposal=disposal,
+                            optimize=True,
+                        )
+                        return buffer.getvalue()
+
+                    payload = _encode_under_limit(encode_gif, quality_start=80)
+                    if payload is None:
+                        raise SdkError(
+                            "动图 GIF 过大且自动压缩后仍超过 "
+                            f"{_MAX_IMAGE_BYTES // 1024 // 1024}MB，请先自行压缩"
+                        )
+                    with Image.open(BytesIO(payload)) as check:
+                        new_w, new_h = check.size
+                    return payload, ".gif", new_w, new_h, True
+
+                # Static raster: JPEG/WebP keep format, PNG falls back to
+                # JPEG when it cannot fit (memes rarely need alpha at 2MB+).
+                image = source
+                if image.mode not in {"RGB", "RGBA", "P", "L", "LA"}:
+                    image = image.convert("RGBA")
+                has_alpha = image.mode in {"RGBA", "LA"} or (
+                    image.mode == "P" and "transparency" in image.info
+                )
+                base = image.convert("RGBA") if has_alpha else image.convert("RGB")
+                base_w, base_h = base.size
+
+                def make_encoder(fmt: str) -> Any:
+                    def encode(scale: float, quality: int) -> bytes | None:
+                        target_w = max(1, int(base_w * scale))
+                        target_h = max(1, int(base_h * scale))
+                        if target_w > _TARGET_IMAGE_DIMENSION or target_h > _TARGET_IMAGE_DIMENSION:
+                            ratio = _TARGET_IMAGE_DIMENSION / max(target_w, target_h)
+                            target_w = max(1, int(target_w * ratio))
+                            target_h = max(1, int(target_h * ratio))
+                        working = (
+                            base
+                            if (target_w, target_h) == base.size
+                            else base.resize((target_w, target_h), Image.Resampling.LANCZOS)
+                        )
+                        buffer = BytesIO()
+                        if fmt == "PNG":
+                            working.save(buffer, format="PNG", optimize=True)
+                        elif fmt == "WEBP":
+                            working.save(
+                                buffer, format="WEBP", quality=quality, method=6
+                            )
+                        else:
+                            working.convert("RGB").save(
+                                buffer,
+                                format="JPEG",
+                                quality=quality,
+                                optimize=True,
+                                progressive=True,
+                            )
+                        return buffer.getvalue()
+
+                    return encode
+
+                candidates = [(".webp", make_encoder("WEBP"))]
+                if ext == ".png" and has_alpha:
+                    candidates.insert(0, (".png", make_encoder("PNG")))
+                if ext == ".jpg":
+                    candidates.insert(0, (".jpg", make_encoder("JPEG")))
+
+                for new_ext, encoder in candidates:
+                    payload = _encode_under_limit(encoder)
+                    if payload is None:
+                        continue
+                    new_ext_actual, new_w, new_h = _validate_image_payload(
+                        f"normalized{new_ext}", payload
+                    )
+                    return payload, new_ext_actual, new_w, new_h, True
+                raise SdkError(
+                    "图片自动压缩后仍超过 "
+                    f"{_MAX_IMAGE_BYTES // 1024 // 1024}MB，请先自行压缩"
+                )
+    except SdkError:
+        raise
+    except (
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+        UnidentifiedImageError,
+        OSError,
+        ValueError,
+    ) as exc:
+        raise SdkError("图片无法安全解码") from exc
 
 
 def _validate_image_bytes(filename: str, data: bytes) -> str:
@@ -822,12 +1036,77 @@ class MemeManagerPlugin(NekoPluginBase):
             self.logger.warning("meme_manager panel state failed: {}", exc)
             return Err(SdkError("表情包目录暂时不可用"))
 
+    async def _store_single_meme(
+        self,
+        *,
+        name: Any,
+        filename: Any,
+        data_base64: Any,
+        tags: Any,
+    ) -> dict[str, Any]:
+        """Validate, normalize (auto-compress), persist one upload. Raises
+        SdkError on any validation/storage failure; caller handles cleanup
+        expectations via the returned ``created_file`` flag."""
+        if self._meme_dir is None:
+            raise SdkError("插件尚未启动完成")
+        clean_name = _clean_text(name, _MAX_NAME)
+        if not clean_name:
+            raise SdkError("名称不能为空")
+        clean_filename = Path(str(filename or "")).name[:128]
+        if not clean_filename:
+            raise SdkError("文件名无效")
+        encoded = str(data_base64 or "")
+        if len(encoded) > ((_MAX_UPLOAD_BYTES * 4) // 3) + 4096:
+            raise SdkError(f"图片超过 {_MAX_UPLOAD_BYTES // 1024 // 1024}MB 上传上限")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise SdkError("图片数据不是有效的 base64") from exc
+        data, ext, width, height, compressed = _normalize_image_payload(
+            clean_filename, data
+        )
+        digest = hashlib.sha256(data).hexdigest()[:16]
+        stored_name = f"{digest}{ext}"
+        target = self._asset_path(stored_name)
+        created_file = False
+
+        with self._library_lock:
+            library = self._load_library()
+            if len(library["memes"]) >= _MAX_MEMES:
+                raise SdkError(f"用户上传已满（{_MAX_MEMES} 张）")
+            if not target.exists():
+                self._atomic_write(target, data)
+                created_file = True
+            meme = {
+                "id": f"meme-{uuid4().hex}",
+                "name": clean_name,
+                "tags": _clean_tags(tags),
+                "enabled": True,
+                "stored_name": stored_name,
+                "mime": _MIME_BY_EXT[ext],
+                "size_bytes": len(data),
+                "width": width,
+                "height": height,
+                "created_at": time.time(),
+            }
+            library["memes"].append(meme)
+            try:
+                self._save_library(library)
+            except Exception:
+                if created_file:
+                    target.unlink(missing_ok=True)
+                raise
+        return {
+            "meme": {**self._public_user_item(meme), "stored_name": stored_name},
+            "compressed": compressed,
+        }
+
     @plugin_entry(
         id="add_meme",
         name="添加用户表情包",
-        description="上传一张经过格式、解码、尺寸和路径校验的图片。",
+        description="上传一张经过格式、解码、尺寸和路径校验的图片；过大的光栅图会自动压缩。",
         input_schema=ADD_MEME_SCHEMA,
-        timeout=30.0,
+        timeout=60.0,
     )
     async def add_meme(
         self,
@@ -837,72 +1116,133 @@ class MemeManagerPlugin(NekoPluginBase):
         tags: Any = None,
         **_: Any,
     ):
-        created_file = False
-        target: Path | None = None
         try:
-            if self._meme_dir is None:
-                raise SdkError("插件尚未启动完成")
-            clean_name = _clean_text(name, _MAX_NAME)
-            if not clean_name:
-                raise SdkError("名称不能为空")
-            clean_filename = Path(str(filename or "")).name[:128]
-            if not clean_filename:
-                raise SdkError("文件名无效")
-            encoded = str(data_base64 or "")
-            if len(encoded) > ((_MAX_IMAGE_BYTES * 4) // 3) + 4096:
-                raise SdkError(f"图片超过 {_MAX_IMAGE_BYTES // 1024 // 1024}MB 上限")
-            try:
-                data = base64.b64decode(encoded, validate=True)
-            except (binascii.Error, ValueError) as exc:
-                raise SdkError("图片数据不是有效的 base64") from exc
-            ext, width, height = _validate_image_payload(clean_filename, data)
-            digest = hashlib.sha256(data).hexdigest()[:16]
-            stored_name = f"{digest}{ext}"
-            target = self._asset_path(stored_name)
-
-            with self._library_lock:
-                library = self._load_library()
-                if len(library["memes"]) >= _MAX_MEMES:
-                    raise SdkError(f"用户上传已满（{_MAX_MEMES} 张）")
-                if not target.exists():
-                    self._atomic_write(target, data)
-                    created_file = True
-                meme = {
-                    "id": f"meme-{uuid4().hex}",
-                    "name": clean_name,
-                    "tags": _clean_tags(tags),
-                    "enabled": True,
-                    "stored_name": stored_name,
-                    "mime": _MIME_BY_EXT[ext],
-                    "size_bytes": len(data),
-                    "width": width,
-                    "height": height,
-                    "created_at": time.time(),
-                }
-                library["memes"].append(meme)
-                try:
-                    self._save_library(library)
-                except Exception:
-                    if created_file:
-                        target.unlink(missing_ok=True)
-                    raise
+            result = await self._store_single_meme(
+                name=name,
+                filename=filename,
+                data_base64=data_base64,
+                tags=tags,
+            )
+            message = "已保存到用户上传，刷新或重启后仍会保留。"
+            if result["compressed"]:
+                message = "已自动压缩并保存到用户上传，刷新或重启后仍会保留。"
             return Ok(
                 {
                     "saved": True,
-                    "message": "已保存到用户上传，刷新或重启后仍会保留。",
-                    "meme": {
-                        **self._public_user_item(meme),
-                        "stored_name": stored_name,
-                    },
+                    "compressed": result["compressed"],
+                    "message": message,
+                    "meme": result["meme"],
                 }
             )
         except SdkError as exc:
             return Err(exc)
         except Exception as exc:
-            if created_file and target is not None:
-                target.unlink(missing_ok=True)
             self.logger.warning("meme_manager add failed: {}", exc)
             return Err(SdkError("表情包保存失败"))
+
+    @plugin_entry(
+        id="add_memes_batch",
+        name="批量添加用户表情包",
+        description=(
+            "一次上传多张图片（例如整个文件夹），每张独立校验并在需要时自动压缩；"
+            "单张失败不影响其它图片。"
+        ),
+        input_schema=ADD_MEMES_BATCH_SCHEMA,
+        timeout=300.0,
+    )
+    async def add_memes_batch(
+        self,
+        items: Any = None,
+        tags: Any = None,
+        **_: Any,
+    ):
+        try:
+            if not isinstance(items, list) or not items:
+                return Err(SdkError("批量上传需要至少一张图片"))
+            if len(items) > _MAX_BATCH_ITEMS:
+                return Err(SdkError(f"单次批量上传最多 {_MAX_BATCH_ITEMS} 张"))
+            shared_tags = _clean_tags(tags)
+            results: list[dict[str, Any]] = []
+            saved = 0
+            compressed_count = 0
+            for position, raw_item in enumerate(items):
+                if not isinstance(raw_item, Mapping):
+                    results.append(
+                        {
+                            "index": position,
+                            "ok": False,
+                            "error": "条目格式无效",
+                        }
+                    )
+                    continue
+                raw_name = raw_item.get("name")
+                clean_filename = Path(str(raw_item.get("filename") or "")).name
+                fallback_name = Path(clean_filename).stem if clean_filename else ""
+                item_name = _clean_text(raw_name, _MAX_NAME) or _clean_text(
+                    fallback_name, _MAX_NAME
+                )
+                item_tags = (
+                    _clean_tags(raw_item.get("tags"))
+                    if raw_item.get("tags") is not None
+                    else shared_tags
+                )
+                try:
+                    stored = await self._store_single_meme(
+                        name=item_name,
+                        filename=raw_item.get("filename"),
+                        data_base64=raw_item.get("data_base64"),
+                        tags=item_tags,
+                    )
+                except SdkError as exc:
+                    results.append(
+                        {
+                            "index": position,
+                            "ok": False,
+                            "name": item_name,
+                            "filename": clean_filename[:128],
+                            "error": str(exc),
+                        }
+                    )
+                    continue
+                except Exception as exc:
+                    self.logger.warning(
+                        "meme_manager batch item {} failed: {}", position, exc
+                    )
+                    results.append(
+                        {
+                            "index": position,
+                            "ok": False,
+                            "name": item_name,
+                            "filename": clean_filename[:128],
+                            "error": "表情包保存失败",
+                        }
+                    )
+                    continue
+                saved += 1
+                compressed_count += 1 if stored["compressed"] else 0
+                results.append(
+                    {
+                        "index": position,
+                        "ok": True,
+                        "name": stored["meme"].get("name"),
+                        "compressed": stored["compressed"],
+                        "meme": stored["meme"],
+                    }
+                )
+            return Ok(
+                {
+                    "saved": saved,
+                    "failed": len(results) - saved,
+                    "compressed": compressed_count,
+                    "total": len(results),
+                    "results": results,
+                }
+            )
+        except SdkError as exc:
+            return Err(exc)
+        except Exception as exc:
+            self.logger.warning("meme_manager batch add failed: {}", exc)
+            return Err(SdkError("批量保存失败"))
 
     @plugin_entry(
         id="update_meme",

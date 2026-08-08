@@ -12,9 +12,11 @@ from plugin.plugins.meme_manager import (
     MemeManagerPlugin,
     _detect_extension,
     _matches,
+    _normalize_image_payload,
     _plugin_server_base,
     _safe_stored_name,
     _validate_image_bytes,
+    _MAX_IMAGE_BYTES,
 )
 from plugin.sdk.plugin import SdkError
 
@@ -102,8 +104,71 @@ def test_validate_image_rejects_svg_processing_instruction() -> None:
 def test_validate_image_rejects_oversize() -> None:
     with pytest.raises(SdkError, match="上限"):
         _validate_image_bytes(
-            "x.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * (3 * 1024 * 1024)
+            "x.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * (21 * 1024 * 1024)
         )
+
+
+def _make_photo_png(width: int = 2400, height: int = 1800) -> bytes:
+    """A noisy true-color PNG that comfortably exceeds the 2MB store limit."""
+    import random
+    from io import BytesIO
+
+    from PIL import Image
+
+    rng = random.Random(20260808)
+    image = Image.new("RGB", (width, height))
+    pixels = image.load()
+    for y in range(height):
+        for x in range(0, width, 3):
+            pixels[x, y] = (
+                rng.randrange(256),
+                rng.randrange(256),
+                rng.randrange(256),
+            )
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    payload = buffer.getvalue()
+    assert len(payload) > _MAX_IMAGE_BYTES
+    return payload
+
+
+def test_normalize_compresses_oversize_photo() -> None:
+    payload, ext, width, height, compressed = _normalize_image_payload(
+        "photo.png", _make_photo_png()
+    )
+    assert compressed is True
+    assert len(payload) <= _MAX_IMAGE_BYTES
+    assert ext in {".png", ".jpg", ".webp"}
+    assert max(width, height) <= 1024
+    # The normalized payload must itself pass validation.
+    _validate_image_bytes(f"normalized{ext}", payload)
+
+
+def test_normalize_keeps_small_image_untouched() -> None:
+    from io import BytesIO
+
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (64, 64), (255, 0, 0)).save(buffer, format="PNG")
+    original = buffer.getvalue()
+    payload, ext, width, height, compressed = _normalize_image_payload(
+        "small.png", original
+    )
+    assert compressed is False
+    assert payload == original
+    assert ext == ".png"
+    assert (width, height) == (64, 64)
+
+
+def test_normalize_rejects_oversize_svg() -> None:
+    svg = (
+        b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+        + b" " * (_MAX_IMAGE_BYTES + 16)
+        + b"</svg>"
+    )
+    with pytest.raises(SdkError, match="SVG"):
+        _normalize_image_payload("big.svg", svg)
 
 
 def test_validate_image_rejects_unknown_format() -> None:

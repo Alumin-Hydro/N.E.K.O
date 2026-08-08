@@ -6,7 +6,7 @@
   "advanced": "Avançado (limites e notas)",
   "empty": "Ainda não há envios do usuário; as fontes padrão continuam disponíveis.",
   "addTitle": "Adicionar meme",
-  "pickImage": "Escolha uma imagem (PNG / JPEG / GIF / WebP / SVG, máx. 2MB)",
+  "pickImage": "Escolha imagens (múltipla seleção ou pasta inteira; grandes são comprimidas)",
   "name": "Nome",
   "tags": "Tags (separadas por vírgula, ajudam a gatinha a combinar)",
   "cancel": "Cancelar",

@@ -416,14 +416,20 @@ dialog::backdrop { background: rgba(36, 26, 20, .45); backdrop-filter: blur(3px)
   <form id="memeForm" class="dialog-form">
     <h2 id="dialogTitle">添加表情包</h2>
     <div id="fileRow" class="form-row">
-      <label for="fileInput">选择本地图片</label>
-      <input id="fileInput" class="field" type="file" required
+      <label for="fileInput">选择本地图片（可多选）</label>
+      <input id="fileInput" class="field" type="file" required multiple
         accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml">
-      <p id="fileHelp" class="form-help">支持 PNG / JPEG / GIF / WebP / SVG，默认单张最大 2MB。</p>
+      <input id="dirInput" class="field" type="file" hidden multiple
+        webkitdirectory directory
+        accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml">
+      <button id="pickDirBtn" class="btn btn-secondary" type="button">选择整个文件夹</button>
+      <p id="fileHelp" class="form-help">支持 PNG / JPEG / GIF / WebP / SVG。超过 2MB 的图片会自动压缩到 2MB 内（单张上传上限 20MB）。</p>
+      <p id="fileSummary" class="form-help" hidden></p>
     </div>
-    <div class="form-row">
+    <div id="nameRow" class="form-row">
       <label for="nameInput" data-i18n="name">名称</label>
       <input id="nameInput" class="field" type="text" maxlength="48" required placeholder="摸摸头">
+      <p id="nameHelp" class="form-help" hidden>批量上传时，名称会自动使用各文件的文件名。</p>
     </div>
     <div class="form-row">
       <label for="tagsInput" data-i18n="tags">标签（逗号分隔）</label>
@@ -891,7 +897,11 @@ function bindElements() {
     dialogTitle: document.getElementById("dialogTitle"),
     fileRow: document.getElementById("fileRow"),
     fileInput: document.getElementById("fileInput"),
+    dirInput: document.getElementById("dirInput"),
+    pickDirBtn: document.getElementById("pickDirBtn"),
     fileHelp: document.getElementById("fileHelp"),
+    fileSummary: document.getElementById("fileSummary"),
+    nameHelp: document.getElementById("nameHelp"),
     nameInput: document.getElementById("nameInput"),
     tagsInput: document.getElementById("tagsInput"),
     cancelDialog: document.getElementById("cancelDialog"),
@@ -1032,6 +1042,9 @@ function openAddDialog() {
   elements.fileRow.hidden = false;
   elements.fileInput.required = true;
   elements.fileInput.value = "";
+  elements.dirInput.value = "";
+  selectedFiles = [];
+  updateFileSummary();
   elements.nameInput.value = "";
   elements.tagsInput.value = "";
   elements.saveMemeBtn.textContent = "保存";
@@ -1044,6 +1057,8 @@ function openEditDialog(meme) {
   elements.fileRow.hidden = true;
   elements.fileInput.required = false;
   elements.fileInput.value = "";
+  selectedFiles = [];
+  elements.nameInput.disabled = false;
   elements.nameInput.value = meme.name;
   elements.tagsInput.value = meme.tags.join(", ");
   elements.saveMemeBtn.textContent = "保存修改";
@@ -1149,10 +1164,11 @@ function renderPanel(state) {
   elements.addBtn.disabled = !state.storeReady;
   elements.restoreBtn.disabled = !state.storeReady;
   const maxMiB = Math.max(0, state.maxImageBytes / 1024 / 1024);
-  elements.fileHelp.textContent = `支持 PNG / JPEG / GIF / WebP / SVG，单张最大 ${maxMiB.toFixed(maxMiB % 1 ? 1 : 0)}MB。`;
+  elements.fileHelp.textContent = `支持 PNG / JPEG / GIF / WebP / SVG，可多选或选整个文件夹；超过 ${maxMiB.toFixed(maxMiB % 1 ? 1 : 0)}MB 的图片会自动压缩（单张上传上限 20MB）。`;
   elements.limits.textContent = [
     `用户上传上限 ${state.maxMemes} 张`,
-    `单张最大 ${maxMiB.toFixed(maxMiB % 1 ? 1 : 0)}MB`,
+    `单张存储最大 ${maxMiB.toFixed(maxMiB % 1 ? 1 : 0)}MB（超限自动压缩）`,
+    "支持多选与整个文件夹批量上传",
     "后端会校验 MIME、文件内容、尺寸与安全路径",
     "系统默认网络来源只做只读桥接，不会复制为可信本地文件",
   ].join(" · ");
@@ -1201,18 +1217,95 @@ async function fileToBase64(file) {
   });
 }
 
+async function blobToBase64(blob) {
+  return await fileToBase64(blob);
+}
+
+// Downscale / re-encode a raster image in-browser when it clearly exceeds the
+// stored 2MB budget, so uploads are fast and the server accepts them. SVG and
+// GIF animation are left untouched (server handles GIF resize itself).
+async function compressImageIfNeeded(file) {
+  const maxBytes = panelState?.maxImageBytes || 2 * 1024 * 1024;
+  const type = String(file.type || "").toLowerCase();
+  const isRaster = ["image/png", "image/jpeg", "image/webp"].includes(type);
+  if (!isRaster || file.size <= maxBytes) return file;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const maxEdge = 1024;
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+    let width = Math.max(1, Math.round(bitmap.width * scale));
+    let height = Math.max(1, Math.round(bitmap.height * scale));
+    for (const quality of [0.85, 0.72, 0.6, 0.45]) {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(bitmap, 0, 0, width, height);
+      const blob = await new Promise((resolve) =>
+        canvas.toBlob(resolve, "image/webp", quality)
+      );
+      if (blob && blob.size <= maxBytes) {
+        const base = String(file.name || "meme").replace(/\.[^.]+$/, "");
+        return new File([blob], `${base}.webp`, { type: "image/webp" });
+      }
+      width = Math.max(1, Math.round(width * 0.8));
+      height = Math.max(1, Math.round(height * 0.8));
+    }
+    return file; // server-side compressor is the fallback
+  } catch (_error) {
+    return file; // server-side compressor is the fallback
+  }
+}
+
+let selectedFiles = [];
+
+function currentFiles() {
+  return selectedFiles.slice();
+}
+
+function updateFileSummary() {
+  const files = currentFiles();
+  const summary = elements.fileSummary;
+  const nameHelp = elements.nameHelp;
+  if (!summary) return;
+  if (!files.length) {
+    summary.hidden = true;
+    summary.textContent = "";
+    if (nameHelp) nameHelp.hidden = true;
+    elements.nameInput.disabled = false;
+    return;
+  }
+  const totalBytes = files.reduce((sum, file) => sum + (file.size || 0), 0);
+  summary.hidden = false;
+  summary.textContent = files.length === 1
+    ? `已选择 1 张图片（${(totalBytes / 1024).toFixed(0)}KB）。`
+    : `已选择 ${files.length} 张图片（共 ${(totalBytes / 1024 / 1024).toFixed(1)}MB），将批量上传，名称自动取文件名。`;
+  const batch = files.length > 1;
+  if (nameHelp) nameHelp.hidden = !batch;
+  elements.nameInput.disabled = batch;
+}
+
+function acceptFileSelection(fileList) {
+  const files = Array.from(fileList || []).filter((file) =>
+    /^image\/(png|jpeg|gif|webp|svg\+xml)$/i.test(String(file.type || "")) ||
+    /\.(png|jpe?g|gif|webp|svg)$/i.test(String(file.name || ""))
+  );
+  selectedFiles = files.slice(0, 100);
+  updateFileSummary();
+}
+
 async function saveDialog(event) {
   event.preventDefault();
   const name = elements.nameInput.value.trim();
   const tags = parseTags(elements.tagsInput.value);
-  if (!name) {
-    feedback("请输入表情名称。", "warning");
-    elements.nameInput.focus();
-    return;
-  }
-  elements.saveMemeBtn.disabled = true;
 
   if (editingMemeId) {
+    if (!name) {
+      feedback("请输入表情名称。", "warning");
+      elements.nameInput.focus();
+      return;
+    }
+    elements.saveMemeBtn.disabled = true;
     setPersistentStatus(`正在保存「${name}」的名称和标签…`, "info");
     try {
       await callEntry("update_meme", {
@@ -1232,35 +1325,85 @@ async function saveDialog(event) {
     return;
   }
 
-  const file = elements.fileInput.files && elements.fileInput.files[0];
-  if (!file) {
-    feedback("请选择一张本地图片。", "warning");
-    elements.saveMemeBtn.disabled = false;
+  const files = currentFiles();
+  if (!files.length) {
+    feedback("请选择至少一张本地图片。", "warning");
     return;
   }
-  const maxBytes = panelState?.maxImageBytes || 2 * 1024 * 1024;
-  if (file.size > maxBytes) {
-    feedback(`图片太大：当前单张上限为 ${Math.round(maxBytes / 1024 / 1024)}MB。`, "warning");
-    elements.saveMemeBtn.disabled = false;
+  if (files.length === 1 && !name) {
+    feedback("请输入表情名称。", "warning");
+    elements.nameInput.focus();
     return;
   }
+  const maxUploadBytes = 20 * 1024 * 1024;
+  const tooBig = files.find((file) => file.size > maxUploadBytes);
+  if (tooBig) {
+    feedback(`「${tooBig.name}」超过 20MB 上传上限，请先自行压缩。`, "warning");
+    return;
+  }
+  elements.saveMemeBtn.disabled = true;
 
-  setPersistentStatus(`正在保存用户上传「${name}」…`, "info");
   try {
-    const dataBase64 = await fileToBase64(file);
-    await callEntry(
-      "add_meme",
+    setPersistentStatus(`正在预处理 ${files.length} 张图片…`, "info");
+    const prepared = [];
+    for (const file of files) {
+      const shrunk = await compressImageIfNeeded(file);
+      prepared.push({
+        file: shrunk,
+        name: files.length === 1 ? name : String(file.name || "meme").replace(/\.[^.]+$/, ""),
+        dataBase64: await blobToBase64(shrunk),
+      });
+    }
+
+    if (prepared.length === 1) {
+      setPersistentStatus(`正在保存用户上传「${name}」…`, "info");
+      const result = await callEntry(
+        "add_meme",
+        {
+          name,
+          filename: String(prepared[0].file.name || "upload"),
+          data_base64: prepared[0].dataBase64,
+          tags,
+        },
+        60000,
+      );
+      elements.memeDialog.close();
+      await refreshPanel({ announce: false });
+      const compressedNote = result?.compressed ? "（已自动压缩）" : "";
+      feedback(`已添加并保存「${name}」${compressedNote}，刷新后仍会保留。`, "success");
+      return;
+    }
+
+    setPersistentStatus(`正在批量上传 ${prepared.length} 张图片…`, "info");
+    const result = await callEntry(
+      "add_memes_batch",
       {
-        name,
-        filename: String(file.name || "upload"),
-        data_base64: dataBase64,
+        items: prepared.map((item) => ({
+          name: item.name,
+          filename: String(item.file.name || "upload"),
+          data_base64: item.dataBase64,
+        })),
         tags,
       },
-      35000,
+      300000,
     );
     elements.memeDialog.close();
     await refreshPanel({ announce: false });
-    feedback(`已添加并保存「${name}」，刷新后仍会保留。`, "success");
+    const saved = Number(result?.saved || 0);
+    const failed = Number(result?.failed || 0);
+    const compressedCount = Number(result?.compressed || 0);
+    if (failed === 0) {
+      feedback(
+        `批量上传完成：${saved} 张全部保存${compressedCount ? `（${compressedCount} 张已自动压缩）` : ""}。`,
+        "success",
+      );
+    } else {
+      const firstError = (result?.results || []).find((item) => !item.ok);
+      feedback(
+        `批量上传部分完成：成功 ${saved} 张、失败 ${failed} 张。首个失败：${firstError?.filename || ""} ${firstError?.error || ""}`,
+        "warning",
+      );
+    }
   } catch (error) {
     feedback(`保存失败：${readableError(error)}`, "error");
   } finally {
@@ -1340,6 +1483,15 @@ function registerEvents() {
     feedback("已取消编辑，目录没有变化。", "info");
   });
   elements.memeForm.addEventListener("submit", saveDialog);
+  elements.fileInput.addEventListener("change", () => {
+    acceptFileSelection(elements.fileInput.files);
+  });
+  elements.dirInput.addEventListener("change", () => {
+    acceptFileSelection(elements.dirInput.files);
+  });
+  elements.pickDirBtn.addEventListener("click", () => {
+    elements.dirInput.click();
+  });
   elements.restoreBtn.addEventListener("click", restoreDefaults);
   elements.tryBtn.addEventListener("click", tryMeme);
   elements.tryQuery.addEventListener("keydown", (event) => {
