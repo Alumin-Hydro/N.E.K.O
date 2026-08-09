@@ -1,0 +1,1636 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>表情包管理器</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f7f3ed;
+  --surface: #fffdf9;
+  --surface-soft: #fff7ec;
+  --text: #2f2924;
+  --muted: #776c62;
+  --border: #e5d8ca;
+  --accent: #e98238;
+  --accent-strong: #c75f18;
+  --success: #237a4b;
+  --warning: #9a6118;
+  --danger: #b83c3c;
+  --system: #5565b8;
+  --shadow: 0 10px 30px rgba(79, 52, 30, .08);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  background:
+    radial-gradient(circle at 12% 0%, rgba(255, 178, 96, .18), transparent 34rem),
+    var(--bg);
+  color: var(--text);
+}
+button, input, select { font: inherit; }
+button { touch-action: manipulation; }
+.shell { width: min(1180px, 100%); margin: 0 auto; padding: 24px; }
+.hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+  padding: 24px;
+  border: 1px solid rgba(229, 216, 202, .8);
+  border-radius: 24px;
+  background: linear-gradient(135deg, rgba(255, 253, 249, .98), rgba(255, 244, 227, .94));
+  box-shadow: var(--shadow);
+}
+.hero-copy { max-width: 760px; }
+.eyebrow {
+  margin: 0 0 6px;
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+h1 { margin: 0; font-size: clamp(24px, 4vw, 34px); line-height: 1.15; }
+.subtitle { margin: 10px 0 0; color: var(--muted); line-height: 1.65; }
+.hero-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 70px;
+  width: 70px;
+  height: 70px;
+  border-radius: 22px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(199, 95, 24, .14);
+  font-size: 36px;
+}
+.toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto;
+  gap: 10px;
+  margin: 18px 0 12px;
+}
+.field, .select {
+  width: 100%;
+  min-width: 0;
+  padding: 11px 14px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  outline: none;
+  background: var(--surface);
+  color: var(--text);
+}
+.field:focus, .select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(233, 130, 56, .15);
+}
+.btn {
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 10px 16px;
+  border: 1px solid transparent;
+  border-radius: 13px;
+  cursor: pointer;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  transition: transform .15s ease, opacity .15s ease, background .15s ease;
+}
+.btn:hover:not(:disabled) { transform: translateY(-1px); background: var(--accent-strong); }
+.btn:disabled { cursor: not-allowed; opacity: .48; }
+.btn-secondary { border-color: var(--border); background: var(--surface); color: var(--text); }
+.btn-secondary:hover:not(:disabled) { background: var(--surface-soft); }
+.btn-danger { border-color: rgba(184, 60, 60, .28); background: transparent; color: var(--danger); }
+.btn-danger:hover:not(:disabled) { background: rgba(184, 60, 60, .08); }
+.btn-small { min-height: 34px; padding: 6px 10px; border-radius: 10px; font-size: 12px; }
+.status {
+  min-height: 44px;
+  margin: 0 0 18px;
+  padding: 11px 14px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: rgba(255, 253, 249, .78);
+  color: var(--muted);
+  line-height: 1.45;
+}
+.status[data-tone="success"] { border-color: rgba(35, 122, 75, .32); color: var(--success); }
+.status[data-tone="warning"] { border-color: rgba(154, 97, 24, .34); color: var(--warning); }
+.status[data-tone="error"] { border-color: rgba(184, 60, 60, .34); color: var(--danger); }
+.store-warning {
+  margin: -6px 0 18px;
+  padding: 12px 14px;
+  border-radius: 13px;
+  background: rgba(154, 97, 24, .1);
+  color: var(--warning);
+  line-height: 1.5;
+}
+.section {
+  margin-top: 18px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: rgba(255, 253, 249, .92);
+  box-shadow: 0 6px 24px rgba(79, 52, 30, .045);
+}
+.section-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+.section-heading h2 { margin: 0; font-size: 19px; }
+.section-heading p { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.section-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.count {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 14px;
+}
+.source-card, .meme-card {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.source-card { padding: 16px; }
+.source-card__top, .card-meta, .card-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.source-card__icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  border-radius: 13px;
+  background: rgba(85, 101, 184, .1);
+  font-size: 22px;
+}
+.source-card__name { min-width: 0; flex: 1; font-weight: 800; }
+.source-card__description {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+}
+.badge-system { background: rgba(85, 101, 184, .1); color: var(--system); }
+.badge-user { background: rgba(233, 130, 56, .12); color: var(--accent-strong); }
+.badge-success { background: rgba(35, 122, 75, .1); color: var(--success); }
+.badge-muted { background: rgba(119, 108, 98, .1); color: var(--muted); }
+.meme-card { display: flex; flex-direction: column; }
+.meme-card[data-enabled="false"] { opacity: .64; }
+.preview {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(145deg, #fffaf2, #f5eee5);
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 34px;
+}
+.preview img { width: 100%; height: 100%; object-fit: contain; }
+.meme-body { display: flex; flex: 1; flex-direction: column; gap: 9px; padding: 12px; }
+.meme-name { overflow: hidden; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+.tags { min-height: 18px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.card-actions { margin-top: auto; }
+.card-actions .btn { flex: 1 1 auto; }
+.empty {
+  margin: 0;
+  padding: 30px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 15px;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.6;
+}
+.try-panel {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(145px, .35fr) auto;
+  gap: 10px;
+}
+.try-result {
+  min-height: 24px;
+  margin: 12px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+details {
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  background: rgba(255, 253, 249, .8);
+}
+summary { cursor: pointer; color: var(--muted); font-weight: 700; }
+.limits { margin: 10px 0 0; color: var(--muted); line-height: 1.6; }
+dialog {
+  width: min(460px, calc(100vw - 28px));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 24px 80px rgba(40, 24, 12, .28);
+}
+dialog::backdrop { background: rgba(36, 26, 20, .45); backdrop-filter: blur(3px); }
+.dialog-form { padding: 22px; }
+.dialog-form h2 { margin: 0 0 16px; font-size: 20px; }
+.form-row { margin-top: 13px; }
+.form-row label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px; font-weight: 700; }
+.form-help { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }
+.toast {
+  position: fixed;
+  z-index: 20;
+  right: 24px;
+  bottom: 24px;
+  max-width: min(440px, calc(100vw - 32px));
+  padding: 11px 15px;
+  border-radius: 13px;
+  background: #312a25;
+  color: #fff;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, .22);
+  opacity: 0;
+  transform: translateY(10px);
+  pointer-events: none;
+  transition: opacity .18s ease, transform .18s ease;
+}
+.toast[data-visible="true"] { opacity: .96; transform: translateY(0); }
+.toast[data-tone="error"] { background: #7f2525; }
+.toast[data-tone="success"] { background: #1f6841; }
+@media (max-width: 720px) {
+  .shell { padding: 14px; }
+  .hero { padding: 19px; border-radius: 19px; }
+  .hero-mark { display: none; }
+  .toolbar, .try-panel { grid-template-columns: 1fr; }
+  .toolbar .btn, .try-panel .btn { width: 100%; }
+  .section { padding: 16px; }
+  .section-heading { flex-direction: column; }
+  .section-actions { width: 100%; justify-content: stretch; }
+  .section-actions .btn { flex: 1; }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .toast { right: 16px; bottom: 16px; }
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1917;
+    --surface: #292522;
+    --surface-soft: #332b25;
+    --text: #f0e8df;
+    --muted: #b7aaa0;
+    --border: #4a4038;
+    --accent: #e98d4c;
+    --accent-strong: #ffad72;
+    --success: #70ca98;
+    --warning: #e5b66c;
+    --danger: #f28b8b;
+    --system: #aeb8ff;
+    --shadow: 0 12px 32px rgba(0, 0, 0, .2);
+  }
+  body { background: radial-gradient(circle at 12% 0%, rgba(233, 130, 56, .12), transparent 34rem), var(--bg); }
+  .hero { background: linear-gradient(135deg, rgba(41, 37, 34, .98), rgba(51, 43, 37, .96)); }
+  .hero-mark { background: #342d28; }
+  .preview { background: linear-gradient(145deg, #332d28, #24201d); }
+}
+</style>
+</head>
+<body>
+<main class="shell">
+  <header class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow">N.E.K.O Meme Catalog</p>
+      <h1 data-i18n="title">表情包管理器</h1>
+      <p class="subtitle" data-i18n="subtitle">
+        系统原本可用的表情来源会保留在“系统默认”；你自己上传的图片在“用户上传”里单独管理。
+      </p>
+    </div>
+    <div class="hero-mark" aria-hidden="true">🐾</div>
+  </header>
+
+  <div class="toolbar" aria-label="表情包工具栏">
+    <input id="search" class="field" type="search" maxlength="120"
+      data-i18n-placeholder="search" placeholder="搜索用户上传的名称或标签…">
+    <button id="refreshBtn" class="btn btn-secondary" type="button">刷新目录</button>
+    <button id="addBtn" class="btn" type="button" data-i18n="add">添加表情包</button>
+  </div>
+
+  <div id="panelStatus" class="status" role="status" aria-live="polite" aria-atomic="true">
+    正在连接表情包目录…
+  </div>
+  <div id="storeWarning" class="store-warning" role="note" hidden>
+    用户上传存储暂不可用；系统默认来源仍然可以使用。
+  </div>
+
+  <section class="section" aria-labelledby="systemTitle">
+    <div class="section-heading">
+      <div>
+        <h2 id="systemTitle">系统默认 <span id="systemCount" class="count">0 个来源</span></h2>
+        <p>来自 N.E.K.O 现有默认在线 meme 搜索机制。这里只展示来源，不下载网络图片，也不能在本插件里删除或修改。</p>
+      </div>
+    </div>
+    <div id="systemGrid" class="grid"></div>
+    <p id="systemEmpty" class="empty" hidden>
+      宿主暂时没有报告系统默认来源。你仍可以刷新重试，或继续管理自己的上传。
+    </p>
+  </section>
+
+  <section class="section" aria-labelledby="userTitle">
+    <div class="section-heading">
+      <div>
+        <h2 id="userTitle">用户上传 <span id="userCount" class="count">0 张</span></h2>
+        <p>你添加的本地图片，可启用、禁用、编辑名称和标签，或彻底删除。</p>
+      </div>
+      <div class="section-actions">
+        <button id="restoreBtn" class="btn btn-danger" type="button">
+          恢复默认（清空用户上传）
+        </button>
+      </div>
+    </div>
+    <div id="userGrid" class="grid"></div>
+    <p id="userEmpty" class="empty" hidden>
+      还没有用户上传。系统默认来源仍然可用；需要自定义时再添加即可。
+    </p>
+  </section>
+
+  <section class="section" aria-labelledby="tryTitle">
+    <div class="section-heading">
+      <div>
+        <h2 id="tryTitle">立即试用</h2>
+        <p>输入想要的表情并选择来源；试用结果会直接发送到当前聊天。</p>
+      </div>
+    </div>
+    <div class="try-panel">
+      <input id="tryQuery" class="field" type="text" maxlength="120" placeholder="例如：开心、摸摸头、累瘫">
+      <select id="trySource" class="select" aria-label="试用来源">
+        <option value="system">系统默认</option>
+        <option value="user">用户上传</option>
+      </select>
+      <button id="tryBtn" class="btn" type="button">立即试用</button>
+    </div>
+    <p id="tryResult" class="try-result" aria-live="polite"></p>
+  </section>
+
+  <details>
+    <summary data-i18n="advanced">存储上限与安全说明</summary>
+    <p id="limits" class="limits">
+      正在读取上限。上传图片只接受受支持格式，并由后端再次校验内容、大小和安全路径。
+    </p>
+  </details>
+
+  <details id="taggerSection">
+    <summary data-i18n="taggerSummary">一键生成标签（视觉模型）</summary>
+    <p class="limits" data-i18n="taggerHelp">
+      懒得手写标签时，可以让视觉模型看图自动生成。填入你自己的模型服务信息即可；密钥只保存在本机插件数据里，不会展示。
+    </p>
+    <div class="form-row">
+      <label for="taggerModel" data-i18n="taggerModel">模型名</label>
+      <input id="taggerModel" class="field" type="text" maxlength="100" placeholder="gpt-4o-mini">
+    </div>
+    <div class="form-row">
+      <label for="taggerKey" data-i18n="taggerKey">API 密钥</label>
+      <input id="taggerKey" class="field" type="password" maxlength="200" placeholder="sk-...">
+      <p id="taggerKeyState" class="form-help"></p>
+    </div>
+    <details class="tagger-advanced">
+      <summary data-i18n="taggerAdvanced">高级：自定义 API 地址</summary>
+      <div class="form-row">
+        <label for="taggerBase">API 地址</label>
+        <input id="taggerBase" class="field" type="text" maxlength="200" placeholder="https://api.openai.com/v1">
+        <p class="form-help">任何兼容 OpenAI chat/completions 的视觉模型服务都可以；一般保持默认即可。</p>
+      </div>
+    </details>
+    <button id="saveTaggerBtn" class="btn" type="button" data-i18n="taggerSave">保存模型设置</button>
+  </details>
+</main>
+
+<dialog id="memeDialog" aria-labelledby="dialogTitle">
+  <form id="memeForm" class="dialog-form">
+    <h2 id="dialogTitle">添加表情包</h2>
+    <div id="fileRow" class="form-row">
+      <label for="fileInput">选择本地图片（可多选）</label>
+      <input id="fileInput" class="field" type="file" required multiple
+        accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml">
+      <input id="dirInput" class="field" type="file" hidden multiple
+        webkitdirectory directory
+        accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml">
+      <button id="pickDirBtn" class="btn btn-secondary" type="button">选择整个文件夹</button>
+      <p id="fileHelp" class="form-help">支持 PNG / JPEG / GIF / WebP / SVG。超过 2MB 的图片会自动压缩到 2MB 内（单张上传上限 20MB）。</p>
+      <p id="fileSummary" class="form-help" hidden></p>
+    </div>
+    <div id="nameRow" class="form-row">
+      <label for="nameInput" data-i18n="name">名称</label>
+      <input id="nameInput" class="field" type="text" maxlength="48" required placeholder="摸摸头">
+      <p id="nameHelp" class="form-help" hidden>批量上传时，名称会自动使用各文件的文件名。</p>
+    </div>
+    <div class="form-row">
+      <label for="tagsInput" data-i18n="tags">标签（逗号分隔）</label>
+      <input id="tagsInput" class="field" type="text" maxlength="240" placeholder="可爱, 摸头, 安慰">
+      <p class="form-help">标签能帮助猫娘按你的描述匹配表情。</p>
+    </div>
+    <div class="dialog-actions">
+      <button id="cancelDialog" class="btn btn-secondary" type="button" data-i18n="cancel">取消</button>
+      <button id="saveMemeBtn" class="btn" type="submit" data-i18n="save">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+<script>
+const RUNS_URL = "/runs";
+const PLUGIN_ID = "meme_manager";
+const TERMINAL_FAILURES = new Set(["failed", "canceled", "timeout"]);
+const EXPORT_RETRIES = 3;
+const DEFAULT_TIMEOUT_MS = 20000;
+const SUPPORTED_LOCALES = ["zh-CN", "zh-TW", "en", "ja", "ko", "es", "pt", "ru"];
+
+let translations = {};
+let elements = null;
+let panelState = null;
+let editingMemeId = null;
+let searchTimer = null;
+let toastTimer = null;
+
+function readableError(value, fallback = "操作失败") {
+  const seen = new Set();
+
+  function visit(item, depth = 0) {
+    if (item === null || item === undefined || depth > 7) return "";
+    if (typeof item === "string") {
+      const text = item.trim();
+      return text && text !== "[object Object]" ? text : "";
+    }
+    if (typeof item === "number" || typeof item === "boolean") {
+      return String(item);
+    }
+    if (Array.isArray(item)) {
+      const parts = item.map((entry) => {
+        if (entry && typeof entry === "object" && typeof entry.msg === "string") {
+          const location = Array.isArray(entry.loc)
+            ? entry.loc.filter((part) => String(part) !== "body").join(".")
+            : "";
+          return location ? `${location}: ${entry.msg}` : entry.msg;
+        }
+        return visit(entry, depth + 1);
+      }).filter(Boolean);
+      return Array.from(new Set(parts)).join("；");
+    }
+    if (typeof item !== "object") return "";
+    if (seen.has(item)) return "";
+    seen.add(item);
+
+    const keys = ["message", "detail", "error", "reason", "details", "description"];
+    for (const key of keys) {
+      if (!Object.prototype.hasOwnProperty.call(item, key)) continue;
+      const message = visit(item[key], depth + 1);
+      if (message) return message;
+    }
+    if (typeof item.code === "string" && item.code.trim()) return item.code.trim();
+    try {
+      const serialized = JSON.stringify(item);
+      if (serialized && serialized !== "{}" && serialized !== "[]") {
+        return serialized.length > 800 ? `${serialized.slice(0, 800)}…` : serialized;
+      }
+    } catch (_error) {
+      return "";
+    }
+    return "";
+  }
+
+  return visit(value) || fallback;
+}
+
+function asObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function objectList(value) {
+  if (Array.isArray(value)) return value.filter((item) => item && typeof item === "object");
+  if (!value || typeof value !== "object") return [];
+  if (Array.isArray(value.items)) return objectList(value.items);
+  return Object.entries(value).map(([key, item]) => (
+    item && typeof item === "object"
+      ? { id: item.id || key, ...item }
+      : { id: key, name: String(item || key) }
+  ));
+}
+
+function sourceMarker(item) {
+  const marker = [
+    item.source_type,
+    item.source,
+    item.origin,
+    item.scope,
+    item.library,
+  ].filter(Boolean).join(" ").toLowerCase();
+  if (item.readonly === true || item.mutable === false || item.deletable === false) return "system";
+  if (/system|default|core|builtin/.test(marker)) return "system";
+  if (/user|upload|custom/.test(marker)) return "user";
+  return "";
+}
+
+function normalizeSystemSource(raw, index = 0) {
+  const source = asObject(raw);
+  const rawCount = source.count ?? source.total ?? source.item_count ?? source.meme_count;
+  const count = Number.isFinite(Number(rawCount)) ? Math.max(0, Number(rawCount)) : null;
+  const id = String(
+    source.id || source.source_id || source.key || source.source || `system-${index + 1}`
+  );
+  const name = String(
+    source.name || source.label || source.title || source.provider || "N.E.K.O 系统默认表情"
+  );
+  const description = String(
+    source.description
+      || source.detail
+      || source.summary
+      || "由 N.E.K.O 现有默认表情机制提供；本插件只做只读桥接。"
+  );
+  const kind = String(source.kind || source.type || source.provider || "").toLowerCase();
+  const available = typeof source.available === "boolean" ? source.available : null;
+  return {
+    ...source,
+    id,
+    name,
+    description,
+    kind,
+    count,
+    available,
+    readonly: true,
+    source: "system",
+  };
+}
+
+function normalizeUserMeme(raw, index = 0) {
+  const meme = asObject(raw);
+  return {
+    ...meme,
+    id: String(meme.id || meme.meme_id || `user-${index + 1}`),
+    name: String(meme.name || meme.title || `用户表情 ${index + 1}`),
+    tags: Array.isArray(meme.tags) ? meme.tags.map((tag) => String(tag)).filter(Boolean) : [],
+    enabled: meme.enabled !== false,
+    url: String(meme.url || meme.preview_url || ""),
+    source: "user",
+    readonly: false,
+  };
+}
+
+function uniqueById(items) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = `${item.source || ""}:${item.id || item.name || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function normalizePanelState(rawState) {
+  const state = asObject(rawState);
+  const catalog = state.catalog;
+  const catalogObject = asObject(catalog);
+  const catalogItems = Array.isArray(catalog)
+    ? objectList(catalog)
+    : objectList(catalogObject.items || catalogObject.entries || []);
+
+  const explicitSystem = [
+    ...objectList(state.system_sources),
+    ...objectList(state.default_sources),
+    ...objectList(catalogObject.system_sources),
+    ...objectList(catalogObject.system),
+    ...objectList(catalogObject.defaults),
+    ...objectList(catalogObject.sources).filter((item) => sourceMarker(item) === "system"),
+  ];
+  const catalogSystem = catalogItems.filter((item) => sourceMarker(item) === "system");
+  const systemSources = uniqueById(
+    [...explicitSystem, ...catalogSystem].map(normalizeSystemSource)
+  );
+
+  let rawUsers = null;
+  const userCandidates = [
+    state.user_memes,
+    state.memes,
+    catalogObject.user_memes,
+    catalogObject.user,
+    catalogObject.uploads,
+  ];
+  for (const candidate of userCandidates) {
+    if (Array.isArray(candidate)) {
+      rawUsers = candidate;
+      break;
+    }
+  }
+  if (rawUsers === null) {
+    rawUsers = catalogItems.filter((item) => sourceMarker(item) === "user");
+  }
+  const userMemes = uniqueById(objectList(rawUsers).map(normalizeUserMeme));
+
+  const userTotalRaw = state.user_total ?? state.total ?? userMemes.length;
+  const enabledRaw = state.user_enabled_count ?? state.enabled_count;
+  const userTotal = Number.isFinite(Number(userTotalRaw))
+    ? Math.max(0, Number(userTotalRaw))
+    : userMemes.length;
+  const enabledCount = Number.isFinite(Number(enabledRaw))
+    ? Math.max(0, Number(enabledRaw))
+    : userMemes.filter((meme) => meme.enabled).length;
+
+  return {
+    ...state,
+    systemSources,
+    userMemes,
+    userTotal,
+    enabledCount,
+    maxMemes: Number.isFinite(Number(state.max_memes)) ? Number(state.max_memes) : 500,
+    maxImageBytes: Number.isFinite(Number(state.max_image_bytes))
+      ? Number(state.max_image_bytes)
+      : 2 * 1024 * 1024,
+    storeReady: state.store_ready !== false,
+    tagger: normalizeTagger(state.tagger),
+    catalog,
+  };
+}
+
+function normalizeTagger(raw) {
+  const obj = raw && typeof raw === "object" ? raw : {};
+  return {
+    apiBase: typeof obj.api_base === "string" ? obj.api_base : "",
+    model: typeof obj.model === "string" ? obj.model : "",
+    keyConfigured: obj.key_configured === true,
+  };
+}
+
+function unwrapExportPayload(payload) {
+  const envelope = asObject(payload);
+  const items = Array.isArray(envelope.items) ? envelope.items : [];
+  const item = items.find((candidate) => (
+    candidate
+    && typeof candidate === "object"
+    && candidate.type === "json"
+    && Object.prototype.hasOwnProperty.call(candidate, "json")
+  ));
+  if (!item || !item.json || typeof item.json !== "object") {
+    throw new Error("插件没有返回可读取的结果");
+  }
+
+  const pluginResponse = item.json;
+  if (
+    pluginResponse.success === false
+    || (
+      pluginResponse.success !== true
+      && pluginResponse.error !== null
+      && pluginResponse.error !== undefined
+      && !Object.prototype.hasOwnProperty.call(pluginResponse, "data")
+    )
+  ) {
+    throw new Error(readableError(pluginResponse, "插件调用失败"));
+  }
+  if (Object.prototype.hasOwnProperty.call(pluginResponse, "data")) {
+    return pluginResponse.data ?? {};
+  }
+  return pluginResponse;
+}
+
+async function readResponsePayload(response) {
+  if (response && typeof response.text === "function") {
+    const text = await response.text();
+    if (!text) return {};
+    try {
+      return JSON.parse(text);
+    } catch (_error) {
+      return text;
+    }
+  }
+  if (response && typeof response.json === "function") {
+    try {
+      return await response.json();
+    } catch (_error) {
+      return {};
+    }
+  }
+  return {};
+}
+
+function httpError(label, response, payload) {
+  const status = response && Number.isFinite(Number(response.status))
+    ? Number(response.status)
+    : 0;
+  const detail = readableError(payload, "");
+  const suffix = detail ? `：${detail}` : "";
+  return new Error(`${label}${status ? `（HTTP ${status}）` : ""}${suffix}`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, Math.max(0, ms)));
+}
+
+async function fetchWithDeadline(url, options, deadline) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new Error("插件调用超时");
+  const controller = new AbortController();
+  const timer = globalThis.setTimeout(() => controller.abort(), remaining);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    const payload = await readResponsePayload(response);
+    return { response, payload };
+  } catch (error) {
+    if (error && error.name === "AbortError") throw new Error("插件调用超时");
+    throw new Error(readableError(error, "无法连接插件服务"));
+  } finally {
+    globalThis.clearTimeout(timer);
+  }
+}
+
+async function exportRunResult(runId, deadline) {
+  let lastFailure = null;
+  for (let attempt = 0; attempt < EXPORT_RETRIES; attempt += 1) {
+    const result = await fetchWithDeadline(
+      `${RUNS_URL}/${encodeURIComponent(runId)}/export`,
+      { cache: "no-store" },
+      deadline,
+    );
+    if (result.response.ok) return unwrapExportPayload(result.payload);
+    lastFailure = httpError("读取执行结果失败", result.response, result.payload);
+    if (attempt < EXPORT_RETRIES - 1) {
+      await sleep(Math.min(220 * (attempt + 1), Math.max(0, deadline - Date.now())));
+    }
+  }
+  throw lastFailure || new Error("读取执行结果失败");
+}
+
+async function callEntry(entryId, args = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS);
+  const created = await fetchWithDeadline(
+    RUNS_URL,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plugin_id: PLUGIN_ID, entry_id: entryId, args }),
+      cache: "no-store",
+    },
+    deadline,
+  );
+  if (!created.response.ok) {
+    throw httpError("创建任务失败", created.response, created.payload);
+  }
+  const createPayload = asObject(created.payload);
+  const runId = String(createPayload.run_id || createPayload.id || "").trim();
+  if (!runId) throw new Error("插件服务没有返回任务编号");
+
+  let delay = 120;
+  let lastPollFailure = null;
+  while (Date.now() < deadline) {
+    await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
+    delay = Math.min(Math.round(delay * 1.5), 1200);
+    const polled = await fetchWithDeadline(
+      `${RUNS_URL}/${encodeURIComponent(runId)}`,
+      { cache: "no-store" },
+      deadline,
+    );
+    if (!polled.response.ok) {
+      lastPollFailure = httpError("读取任务状态失败", polled.response, polled.payload);
+      if (polled.response.status >= 400 && polled.response.status < 500 && polled.response.status !== 404) {
+        throw lastPollFailure;
+      }
+      continue;
+    }
+
+    const record = asObject(polled.payload);
+    const status = String(record.status || "").toLowerCase();
+    if (status === "succeeded") return await exportRunResult(runId, deadline);
+    if (TERMINAL_FAILURES.has(status)) {
+      throw new Error(readableError(record.error || record.message || record, `任务已${status}`));
+    }
+  }
+  throw lastPollFailure || new Error("插件调用超时");
+}
+
+function t(key, fallback, values = {}) {
+  const template = String(translations[key] || fallback || key);
+  return template.replace(/\{([A-Za-z0-9_]+)\}/g, (match, name) => (
+    Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : match
+  ));
+}
+
+function localeCandidates(rawLocale) {
+  const raw = String(rawLocale || "").replace("_", "-").trim();
+  const lower = raw.toLowerCase();
+  const candidates = [];
+  const add = (locale) => {
+    if (SUPPORTED_LOCALES.includes(locale) && !candidates.includes(locale)) candidates.push(locale);
+  };
+  if (lower.startsWith("zh-hant") || lower === "zh-tw" || lower === "zh-hk") add("zh-TW");
+  if (lower.startsWith("zh")) add("zh-CN");
+  const exact = SUPPORTED_LOCALES.find((locale) => locale.toLowerCase() === lower);
+  if (exact) add(exact);
+  const language = lower.split("-")[0];
+  const languageMatch = SUPPORTED_LOCALES.find((locale) => locale.toLowerCase() === language);
+  if (languageMatch) add(languageMatch);
+  add("zh-CN");
+  add("en");
+  return candidates;
+}
+
+async function loadTranslations() {
+  let locale = "";
+  try {
+    locale = new URLSearchParams(globalThis.location?.search || "").get("locale") || "";
+  } catch (_error) {
+    locale = "";
+  }
+  if (!locale) locale = globalThis.navigator?.language || "zh-CN";
+  try {
+    const response = await fetch(`/plugin/${PLUGIN_ID}/ui-api/locale`, { cache: "no-store" });
+    if (response.ok) {
+      const payload = await response.json();
+      locale = payload.locale || payload.language || locale;
+    }
+  } catch (_error) {
+    // The query/browser locale remains a safe fallback.
+  }
+  for (const candidate of localeCandidates(locale)) {
+    try {
+      const response = await fetch(
+        `/plugin/${PLUGIN_ID}/ui-api/i18n/${encodeURIComponent(candidate)}.json`,
+        { cache: "no-store" },
+      );
+      if (!response.ok) continue;
+      const bundle = await response.json();
+      if (bundle && typeof bundle === "object") translations = bundle;
+      if (globalThis.document?.documentElement) document.documentElement.lang = candidate;
+      return;
+    } catch (_error) {
+      // Try the next supported locale.
+    }
+  }
+}
+
+function applyTranslations() {
+  document.querySelectorAll("[data-i18n]").forEach((node) => {
+    const key = node.getAttribute("data-i18n");
+    node.textContent = t(key, node.textContent);
+  });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((node) => {
+    const key = node.getAttribute("data-i18n-placeholder");
+    node.setAttribute("placeholder", t(key, node.getAttribute("placeholder") || ""));
+  });
+}
+
+function bindElements() {
+  elements = {
+    search: document.getElementById("search"),
+    refreshBtn: document.getElementById("refreshBtn"),
+    addBtn: document.getElementById("addBtn"),
+    panelStatus: document.getElementById("panelStatus"),
+    storeWarning: document.getElementById("storeWarning"),
+    systemGrid: document.getElementById("systemGrid"),
+    systemCount: document.getElementById("systemCount"),
+    systemEmpty: document.getElementById("systemEmpty"),
+    userGrid: document.getElementById("userGrid"),
+    userCount: document.getElementById("userCount"),
+    userEmpty: document.getElementById("userEmpty"),
+    restoreBtn: document.getElementById("restoreBtn"),
+    tryQuery: document.getElementById("tryQuery"),
+    trySource: document.getElementById("trySource"),
+    tryBtn: document.getElementById("tryBtn"),
+    tryResult: document.getElementById("tryResult"),
+    limits: document.getElementById("limits"),
+    memeDialog: document.getElementById("memeDialog"),
+    memeForm: document.getElementById("memeForm"),
+    dialogTitle: document.getElementById("dialogTitle"),
+    fileRow: document.getElementById("fileRow"),
+    fileInput: document.getElementById("fileInput"),
+    dirInput: document.getElementById("dirInput"),
+    pickDirBtn: document.getElementById("pickDirBtn"),
+    fileHelp: document.getElementById("fileHelp"),
+    fileSummary: document.getElementById("fileSummary"),
+    nameHelp: document.getElementById("nameHelp"),
+    nameInput: document.getElementById("nameInput"),
+    tagsInput: document.getElementById("tagsInput"),
+    cancelDialog: document.getElementById("cancelDialog"),
+    saveMemeBtn: document.getElementById("saveMemeBtn"),
+    taggerModel: document.getElementById("taggerModel"),
+    taggerKey: document.getElementById("taggerKey"),
+    taggerKeyState: document.getElementById("taggerKeyState"),
+    taggerBase: document.getElementById("taggerBase"),
+    saveTaggerBtn: document.getElementById("saveTaggerBtn"),
+    toast: document.getElementById("toast"),
+  };
+}
+
+function setPersistentStatus(message, tone = "info") {
+  if (!elements?.panelStatus) return;
+  elements.panelStatus.textContent = readableError(message, "状态已更新");
+  elements.panelStatus.dataset.tone = tone;
+}
+
+function showToast(message, tone = "info") {
+  if (!elements?.toast) return;
+  const text = readableError(message, tone === "error" ? "操作失败" : "操作完成");
+  elements.toast.textContent = text;
+  elements.toast.dataset.tone = tone;
+  elements.toast.dataset.visible = "true";
+  globalThis.clearTimeout(toastTimer);
+  toastTimer = globalThis.setTimeout(() => {
+    if (elements?.toast) elements.toast.dataset.visible = "false";
+  }, tone === "error" ? 5600 : 3200);
+}
+
+function feedback(message, tone = "info", toast = true) {
+  setPersistentStatus(message, tone);
+  if (toast) showToast(message, tone);
+}
+
+function sourceIcon(kind) {
+  if (/qq|sticker/.test(kind)) return "🧩";
+  if (/online|fetch|remote|network/.test(kind)) return "🌐";
+  return "🐾";
+}
+
+function createSystemSourceCard(rawSource, index = 0) {
+  const source = normalizeSystemSource(rawSource, index);
+  const card = document.createElement("article");
+  card.className = "source-card";
+  card.dataset.source = "system";
+  card.dataset.sourceId = source.id;
+  card.dataset.readonly = "true";
+
+  const top = document.createElement("div");
+  top.className = "source-card__top";
+  const icon = document.createElement("div");
+  icon.className = "source-card__icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = sourceIcon(source.kind);
+  const name = document.createElement("div");
+  name.className = "source-card__name";
+  name.textContent = source.name;
+  const readOnly = document.createElement("span");
+  readOnly.className = "badge badge-system";
+  readOnly.textContent = "只读";
+  top.append(icon, name, readOnly);
+
+  const meta = document.createElement("div");
+  meta.className = "card-meta";
+  meta.style.marginTop = "10px";
+  const availability = document.createElement("span");
+  availability.className = source.available === true
+    ? "badge badge-success"
+    : source.available === false
+      ? "badge badge-muted"
+      : "badge badge-system";
+  availability.textContent = source.available === true
+    ? "当前可用"
+    : source.available === false
+      ? "暂不可用"
+      : "在线按需搜索";
+  meta.append(availability);
+  if (source.count !== null) {
+    const count = document.createElement("span");
+    count.className = "badge badge-muted";
+    count.textContent = `${source.count} 个条目`;
+    meta.append(count);
+  }
+
+  const description = document.createElement("p");
+  description.className = "source-card__description";
+  description.textContent = source.description;
+  card.append(top, meta, description);
+  return card;
+}
+
+function safeUserImageUrl(rawUrl) {
+  const value = String(rawUrl || "").trim();
+  if (!value) return "";
+  try {
+    const base = globalThis.location?.href || "http://localhost/plugin/meme_manager/ui/";
+    const parsed = new URL(value, base);
+    const currentOrigin = new URL(base).origin;
+    const expectedPrefix = `/plugin/${PLUGIN_ID}/ui/memes/`;
+    if (parsed.origin !== currentOrigin || !parsed.pathname.startsWith(expectedPrefix)) return "";
+    return `${parsed.pathname}${parsed.search}`;
+  } catch (_error) {
+    return "";
+  }
+}
+
+function actionButton(label, action, tone = "secondary") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `btn btn-small ${tone === "danger" ? "btn-danger" : "btn-secondary"}`;
+  button.dataset.action = action;
+  button.textContent = label;
+  return button;
+}
+
+function parseTags(value) {
+  return String(value || "")
+    .split(/[,，]/)
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
+async function mutateUserMeme(meme, action, successMessage) {
+  const label = action === "delete" ? "删除" : action === "rename" ? "保存修改" : "更新状态";
+  feedback(`正在${label}「${meme.name}」…`, "info");
+  try {
+    const result = await callEntry("update_meme", { meme_id: meme.id, action });
+    await refreshPanel({ announce: false });
+    feedback(successMessage || `已${label}「${meme.name}」`, "success");
+    return result;
+  } catch (error) {
+    feedback(`${label}失败：${readableError(error)}`, "error");
+    throw error;
+  }
+}
+
+function openAddDialog() {
+  editingMemeId = null;
+  elements.dialogTitle.textContent = "添加表情包";
+  elements.fileRow.hidden = false;
+  elements.fileInput.required = true;
+  elements.fileInput.value = "";
+  elements.dirInput.value = "";
+  selectedFiles = [];
+  updateFileSummary();
+  elements.nameInput.value = "";
+  elements.tagsInput.value = "";
+  elements.saveMemeBtn.textContent = "保存";
+  elements.memeDialog.showModal();
+}
+
+function openEditDialog(meme) {
+  editingMemeId = meme.id;
+  elements.dialogTitle.textContent = "编辑用户上传";
+  elements.fileRow.hidden = true;
+  elements.fileInput.required = false;
+  elements.fileInput.value = "";
+  selectedFiles = [];
+  elements.nameInput.disabled = false;
+  elements.nameInput.value = meme.name;
+  elements.tagsInput.value = meme.tags.join(", ");
+  elements.saveMemeBtn.textContent = "保存修改";
+  elements.memeDialog.showModal();
+}
+
+function createUserMemeCard(rawMeme, index = 0) {
+  const meme = normalizeUserMeme(rawMeme, index);
+  const card = document.createElement("article");
+  card.className = "meme-card";
+  card.dataset.source = "user";
+  card.dataset.memeId = meme.id;
+  card.dataset.enabled = meme.enabled ? "true" : "false";
+
+  const preview = document.createElement("div");
+  preview.className = "preview";
+  const safeUrl = safeUserImageUrl(meme.url);
+  if (safeUrl) {
+    const image = document.createElement("img");
+    image.src = safeUrl;
+    image.alt = meme.name;
+    image.loading = "lazy";
+    image.referrerPolicy = "no-referrer";
+    preview.append(image);
+  } else {
+    preview.textContent = "🖼️";
+    preview.setAttribute("aria-label", "本地表情预览不可用");
+  }
+
+  const body = document.createElement("div");
+  body.className = "meme-body";
+  const meta = document.createElement("div");
+  meta.className = "card-meta";
+  const sourceBadge = document.createElement("span");
+  sourceBadge.className = "badge badge-user";
+  sourceBadge.textContent = "用户上传";
+  const enabledBadge = document.createElement("span");
+  enabledBadge.className = `badge ${meme.enabled ? "badge-success" : "badge-muted"}`;
+  enabledBadge.textContent = meme.enabled ? "已启用" : "已禁用";
+  meta.append(sourceBadge, enabledBadge);
+
+  const name = document.createElement("div");
+  name.className = "meme-name";
+  name.textContent = meme.name;
+  name.title = meme.name;
+  const tags = document.createElement("div");
+  tags.className = "tags";
+  tags.textContent = meme.tags.length ? meme.tags.join(" · ") : "暂无标签";
+
+  const actions = document.createElement("div");
+  actions.className = "card-actions";
+  const toggle = actionButton(meme.enabled ? "禁用" : "启用", meme.enabled ? "disable" : "enable");
+  const edit = actionButton("编辑", "edit");
+  const remove = actionButton("删除", "delete", "danger");
+  const taggerReady = Boolean(panelState && panelState.tagger && panelState.tagger.keyConfigured);
+  const autoTag = actionButton("一键生成标签", "autotag");
+  const storeReady = panelState ? panelState.storeReady : true;
+  toggle.disabled = !storeReady;
+  edit.disabled = !storeReady;
+  remove.disabled = !storeReady;
+  autoTag.disabled = !storeReady || !taggerReady;
+  autoTag.title = taggerReady ? "" : "先在下方「一键生成标签」里保存视觉模型密钥";
+
+  toggle.addEventListener("click", () => {
+    const action = meme.enabled ? "disable" : "enable";
+    mutateUserMeme(
+      meme,
+      action,
+      `${action === "enable" ? "已启用" : "已禁用"}「${meme.name}」，刷新后状态已保存。`,
+    ).catch(() => {});
+  });
+  edit.addEventListener("click", () => openEditDialog(meme));
+  remove.addEventListener("click", () => {
+    if (!globalThis.confirm(`确定删除用户上传「${meme.name}」吗？这会同时删除本地文件，系统默认来源不受影响。`)) {
+      feedback("已取消删除，目录没有变化。", "info");
+      return;
+    }
+    mutateUserMeme(meme, "delete", `已删除用户上传「${meme.name}」，系统默认来源保持不变。`)
+      .catch(() => {});
+  });
+  autoTag.addEventListener("click", async () => {
+    autoTag.disabled = true;
+    autoTag.textContent = "生成中…";
+    try {
+      const result = await callEntry("generate_tags", { meme_id: meme.id }, 60000);
+      const added = Array.isArray(result.added_tags) ? result.added_tags : [];
+      feedback(
+        added.length
+          ? `已为「${meme.name}」生成标签：${added.join(" · ")}`
+          : (result.message || "标签已生成。"),
+        "success",
+      );
+      await refreshPanel();
+    } catch (error) {
+      feedback(readableError(error, "生成标签失败，请稍后重试"), "error");
+    } finally {
+      autoTag.disabled = false;
+      autoTag.textContent = "一键生成标签";
+    }
+  });
+  actions.append(toggle, edit, autoTag, remove);
+  body.append(meta, name, tags, actions);
+  card.append(preview, body);
+  return card;
+}
+
+function renderPanel(state) {
+  panelState = state;
+  elements.systemGrid.replaceChildren();
+  state.systemSources.forEach((source, index) => {
+    elements.systemGrid.append(createSystemSourceCard(source, index));
+  });
+  elements.systemEmpty.hidden = state.systemSources.length > 0;
+  elements.systemCount.textContent = `${state.systemSources.length} 个来源`;
+
+  elements.userGrid.replaceChildren();
+  state.userMemes.forEach((meme, index) => {
+    elements.userGrid.append(createUserMemeCard(meme, index));
+  });
+  elements.userEmpty.hidden = state.userMemes.length > 0;
+  const shownSuffix = state.userTotal !== state.userMemes.length
+    ? `（当前显示 ${state.userMemes.length}）`
+    : "";
+  elements.userCount.textContent = `${state.enabledCount}/${state.userTotal} 张已启用${shownSuffix}`;
+
+  elements.storeWarning.hidden = state.storeReady;
+  elements.addBtn.disabled = !state.storeReady;
+  elements.restoreBtn.disabled = !state.storeReady;
+  const maxMiB = Math.max(0, state.maxImageBytes / 1024 / 1024);
+  elements.fileHelp.textContent = `支持 PNG / JPEG / GIF / WebP / SVG，可多选或选整个文件夹；超过 ${maxMiB.toFixed(maxMiB % 1 ? 1 : 0)}MB 的图片会自动压缩（单张上传上限 20MB）。`;
+  elements.limits.textContent = [
+    `用户上传上限 ${state.maxMemes} 张`,
+    `单张存储最大 ${maxMiB.toFixed(maxMiB % 1 ? 1 : 0)}MB（超限自动压缩）`,
+    "支持多选与整个文件夹批量上传",
+    "后端会校验 MIME、文件内容、尺寸与安全路径",
+    "系统默认网络来源只做只读桥接，不会复制为可信本地文件",
+  ].join(" · ");
+
+  if (elements.taggerModel && document.activeElement !== elements.taggerModel) {
+    elements.taggerModel.value = state.tagger.model || "";
+  }
+  if (elements.taggerBase && document.activeElement !== elements.taggerBase) {
+    elements.taggerBase.value = state.tagger.apiBase || "";
+  }
+  if (elements.taggerKeyState) {
+    elements.taggerKeyState.textContent = state.tagger.keyConfigured
+      ? "密钥已保存；输入新密钥可覆盖，留空则保持不变。"
+      : "还没有保存密钥；一键生成标签按钮会保持不可用。";
+  }
+}
+
+async function saveTaggerSettings() {
+  if (!elements?.saveTaggerBtn) return;
+  elements.saveTaggerBtn.disabled = true;
+  try {
+    const args = {
+      model: elements.taggerModel.value.trim(),
+      api_base: elements.taggerBase.value.trim(),
+    };
+    const typedKey = elements.taggerKey.value.trim();
+    if (typedKey) args.api_key = typedKey;
+    const result = await callEntry("save_tagger_settings", args, 10000);
+    elements.taggerKey.value = "";
+    feedback(result.message || "标签生成模型已保存。", "success");
+    await refreshPanel({ announce: false });
+  } catch (error) {
+    feedback(readableError(error, "保存标签生成设置失败"), "error");
+  } finally {
+    elements.saveTaggerBtn.disabled = false;
+  }
+}
+
+async function refreshPanel({ announce = true } = {}) {
+  if (announce) setPersistentStatus("正在刷新统一表情目录…", "info");
+  if (elements?.refreshBtn) elements.refreshBtn.disabled = true;
+  try {
+    const rawState = await callEntry(
+      "get_panel_state",
+      { query: elements?.search?.value.trim() || "" },
+      20000,
+    );
+    const state = normalizePanelState(rawState);
+    renderPanel(state);
+    if (announce) {
+      feedback(
+        `目录已刷新：${state.systemSources.length} 个系统默认来源，用户上传 ${state.enabledCount}/${state.userTotal} 张已启用。`,
+        "success",
+      );
+    }
+    return state;
+  } catch (error) {
+    feedback(`刷新失败：${readableError(error)}`, "error");
+    throw error;
+  } finally {
+    if (elements?.refreshBtn) elements.refreshBtn.disabled = false;
+  }
+}
+
+async function fileToBase64(file) {
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const raw = String(reader.result || "");
+      const marker = raw.indexOf(",");
+      if (marker < 0) {
+        reject(new Error("无法读取图片内容"));
+        return;
+      }
+      resolve(raw.slice(marker + 1));
+    };
+    reader.onerror = () => reject(new Error("读取本地图片失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function blobToBase64(blob) {
+  return await fileToBase64(blob);
+}
+
+// Downscale / re-encode a raster image in-browser when it clearly exceeds the
+// stored 2MB budget, so uploads are fast and the server accepts them. SVG and
+// GIF animation are left untouched (server handles GIF resize itself).
+async function compressImageIfNeeded(file) {
+  const maxBytes = panelState?.maxImageBytes || 2 * 1024 * 1024;
+  const type = String(file.type || "").toLowerCase();
+  const isRaster = ["image/png", "image/jpeg", "image/webp"].includes(type);
+  if (!isRaster || file.size <= maxBytes) return file;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const maxEdge = 1024;
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+    let width = Math.max(1, Math.round(bitmap.width * scale));
+    let height = Math.max(1, Math.round(bitmap.height * scale));
+    for (const quality of [0.85, 0.72, 0.6, 0.45]) {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(bitmap, 0, 0, width, height);
+      const blob = await new Promise((resolve) =>
+        canvas.toBlob(resolve, "image/webp", quality)
+      );
+      if (blob && blob.size <= maxBytes) {
+        const base = String(file.name || "meme").replace(/\.[^.]+$/, "");
+        return new File([blob], `${base}.webp`, { type: "image/webp" });
+      }
+      width = Math.max(1, Math.round(width * 0.8));
+      height = Math.max(1, Math.round(height * 0.8));
+    }
+    return file; // server-side compressor is the fallback
+  } catch (_error) {
+    return file; // server-side compressor is the fallback
+  }
+}
+
+let selectedFiles = [];
+
+function currentFiles() {
+  return selectedFiles.slice();
+}
+
+function updateFileSummary() {
+  const files = currentFiles();
+  const summary = elements.fileSummary;
+  const nameHelp = elements.nameHelp;
+  if (!summary) return;
+  if (!files.length) {
+    summary.hidden = true;
+    summary.textContent = "";
+    if (nameHelp) nameHelp.hidden = true;
+    elements.nameInput.disabled = false;
+    return;
+  }
+  const totalBytes = files.reduce((sum, file) => sum + (file.size || 0), 0);
+  summary.hidden = false;
+  summary.textContent = files.length === 1
+    ? `已选择 1 张图片（${(totalBytes / 1024).toFixed(0)}KB）。`
+    : `已选择 ${files.length} 张图片（共 ${(totalBytes / 1024 / 1024).toFixed(1)}MB），将批量上传，名称自动取文件名。`;
+  const batch = files.length > 1;
+  if (nameHelp) nameHelp.hidden = !batch;
+  elements.nameInput.disabled = batch;
+}
+
+function acceptFileSelection(fileList) {
+  const files = Array.from(fileList || []).filter((file) =>
+    /^image\/(png|jpeg|gif|webp|svg\+xml)$/i.test(String(file.type || "")) ||
+    /\.(png|jpe?g|gif|webp|svg)$/i.test(String(file.name || ""))
+  );
+  selectedFiles = files.slice(0, 100);
+  updateFileSummary();
+}
+
+async function saveDialog(event) {
+  event.preventDefault();
+  const name = elements.nameInput.value.trim();
+  const tags = parseTags(elements.tagsInput.value);
+
+  if (editingMemeId) {
+    if (!name) {
+      feedback("请输入表情名称。", "warning");
+      elements.nameInput.focus();
+      return;
+    }
+    elements.saveMemeBtn.disabled = true;
+    setPersistentStatus(`正在保存「${name}」的名称和标签…`, "info");
+    try {
+      await callEntry("update_meme", {
+        meme_id: editingMemeId,
+        action: "rename",
+        name,
+        tags,
+      });
+      elements.memeDialog.close();
+      await refreshPanel({ announce: false });
+      feedback(`「${name}」的修改已保存，刷新后仍会保留。`, "success");
+    } catch (error) {
+      feedback(`保存修改失败：${readableError(error)}`, "error");
+    } finally {
+      elements.saveMemeBtn.disabled = false;
+    }
+    return;
+  }
+
+  const files = currentFiles();
+  if (!files.length) {
+    feedback("请选择至少一张本地图片。", "warning");
+    return;
+  }
+  if (files.length === 1 && !name) {
+    feedback("请输入表情名称。", "warning");
+    elements.nameInput.focus();
+    return;
+  }
+  const maxUploadBytes = 20 * 1024 * 1024;
+  const tooBig = files.find((file) => file.size > maxUploadBytes);
+  if (tooBig) {
+    feedback(`「${tooBig.name}」超过 20MB 上传上限，请先自行压缩。`, "warning");
+    return;
+  }
+  elements.saveMemeBtn.disabled = true;
+
+  try {
+    setPersistentStatus(`正在预处理 ${files.length} 张图片…`, "info");
+    const prepared = [];
+    for (const file of files) {
+      const shrunk = await compressImageIfNeeded(file);
+      prepared.push({
+        file: shrunk,
+        name: files.length === 1 ? name : String(file.name || "meme").replace(/\.[^.]+$/, ""),
+        dataBase64: await blobToBase64(shrunk),
+      });
+    }
+
+    if (prepared.length === 1) {
+      setPersistentStatus(`正在保存用户上传「${name}」…`, "info");
+      const result = await callEntry(
+        "add_meme",
+        {
+          name,
+          filename: String(prepared[0].file.name || "upload"),
+          data_base64: prepared[0].dataBase64,
+          tags,
+        },
+        60000,
+      );
+      elements.memeDialog.close();
+      await refreshPanel({ announce: false });
+      const compressedNote = result?.compressed ? "（已自动压缩）" : "";
+      feedback(`已添加并保存「${name}」${compressedNote}，刷新后仍会保留。`, "success");
+      return;
+    }
+
+    setPersistentStatus(`正在批量上传 ${prepared.length} 张图片…`, "info");
+    const result = await callEntry(
+      "add_memes_batch",
+      {
+        items: prepared.map((item) => ({
+          name: item.name,
+          filename: String(item.file.name || "upload"),
+          data_base64: item.dataBase64,
+        })),
+        tags,
+      },
+      300000,
+    );
+    elements.memeDialog.close();
+    await refreshPanel({ announce: false });
+    const saved = Number(result?.saved || 0);
+    const failed = Number(result?.failed || 0);
+    const compressedCount = Number(result?.compressed || 0);
+    if (failed === 0) {
+      feedback(
+        `批量上传完成：${saved} 张全部保存${compressedCount ? `（${compressedCount} 张已自动压缩）` : ""}。`,
+        "success",
+      );
+    } else {
+      const firstError = (result?.results || []).find((item) => !item.ok);
+      feedback(
+        `批量上传部分完成：成功 ${saved} 张、失败 ${failed} 张。首个失败：${firstError?.filename || ""} ${firstError?.error || ""}`,
+        "warning",
+      );
+    }
+  } catch (error) {
+    feedback(`保存失败：${readableError(error)}`, "error");
+  } finally {
+    elements.saveMemeBtn.disabled = false;
+  }
+}
+
+async function restoreDefaults() {
+  const count = panelState?.userTotal || panelState?.userMemes.length || 0;
+  const confirmed = globalThis.confirm(
+    `恢复默认状态会永久删除全部 ${count} 张用户上传及其本地文件；系统默认来源会完整保留。确定继续吗？`
+  );
+  if (!confirmed) {
+    feedback("已取消恢复默认，用户上传没有变化。", "info");
+    return;
+  }
+  elements.restoreBtn.disabled = true;
+  setPersistentStatus("正在清空用户上传并恢复默认状态…", "info");
+  try {
+    const result = asObject(await callEntry("restore_defaults", {}, 30000));
+    const rawRemoved = result.removed_count
+      ?? result.removed
+      ?? result.deleted_count
+      ?? result.deleted
+      ?? count;
+    const removed = Number.isFinite(Number(rawRemoved)) ? Math.max(0, Number(rawRemoved)) : count;
+    const cleanupFailures = Number.isFinite(Number(result.cleanup_failures))
+      ? Math.max(0, Number(result.cleanup_failures))
+      : 0;
+    await refreshPanel({ announce: false });
+    if (cleanupFailures > 0) {
+      feedback(
+        `目录已恢复，但有 ${cleanupFailures} 个旧文件未能清理；系统默认来源不受影响。`,
+        "warning",
+      );
+    } else {
+      feedback(
+        `已恢复默认状态：移除 ${removed} 张用户上传，系统默认来源保持不变。`,
+        "success",
+      );
+    }
+  } catch (error) {
+    feedback(`恢复默认失败：${readableError(error)}`, "error");
+  } finally {
+    elements.restoreBtn.disabled = panelState ? !panelState.storeReady : false;
+  }
+}
+
+async function tryMeme() {
+  const query = elements.tryQuery.value.trim();
+  const source = elements.trySource.value === "user" ? "user" : "system";
+  elements.tryBtn.disabled = true;
+  elements.tryResult.textContent = "";
+  setPersistentStatus(`正在从${source === "system" ? "系统默认" : "用户上传"}试用表情…`, "info");
+  try {
+    const result = asObject(await callEntry("meme_send", { query, source }, 40000));
+    const message = readableError(
+      result.message || result.detail,
+      result.sent === false ? "这个来源暂时没有匹配的表情。" : "试用完成。",
+    );
+    elements.tryResult.textContent = message;
+    feedback(`试用完成：${message}`, result.sent === false ? "warning" : "success");
+  } catch (error) {
+    const message = readableError(error);
+    elements.tryResult.textContent = `试用失败：${message}`;
+    feedback(`试用失败：${message}`, "error");
+  } finally {
+    elements.tryBtn.disabled = false;
+  }
+}
+
+function registerEvents() {
+  elements.refreshBtn.addEventListener("click", () => refreshPanel().catch(() => {}));
+  elements.addBtn.addEventListener("click", openAddDialog);
+  elements.cancelDialog.addEventListener("click", () => {
+    elements.memeDialog.close();
+    feedback("已取消编辑，目录没有变化。", "info");
+  });
+  elements.memeForm.addEventListener("submit", saveDialog);
+  elements.fileInput.addEventListener("change", () => {
+    acceptFileSelection(elements.fileInput.files);
+  });
+  elements.dirInput.addEventListener("change", () => {
+    acceptFileSelection(elements.dirInput.files);
+  });
+  elements.pickDirBtn.addEventListener("click", () => {
+    elements.dirInput.click();
+  });
+  elements.restoreBtn.addEventListener("click", restoreDefaults);
+  elements.saveTaggerBtn.addEventListener("click", saveTaggerSettings);
+  elements.tryBtn.addEventListener("click", tryMeme);
+  elements.tryQuery.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") tryMeme();
+  });
+  elements.search.addEventListener("input", () => {
+    globalThis.clearTimeout(searchTimer);
+    searchTimer = globalThis.setTimeout(() => {
+      refreshPanel({ announce: false }).catch(() => {});
+    }, 300);
+  });
+}
+
+async function bootstrap() {
+  bindElements();
+  registerEvents();
+  setPersistentStatus("正在读取系统默认与用户上传目录…", "info");
+  await loadTranslations();
+  applyTranslations();
+  try {
+    await refreshPanel();
+  } catch (_error) {
+    // refreshPanel already leaves a readable persistent error.
+  }
+}
+
+globalThis.__memeManagerPanelTestHooks = Object.freeze({
+  callEntry,
+  readableError,
+  unwrapExportPayload,
+  normalizePanelState,
+  normalizeSystemSource,
+  normalizeUserMeme,
+  createSystemSourceCard,
+  safeUserImageUrl,
+  readResponsePayload,
+});
+
+if (!globalThis.__MEME_MANAGER_PANEL_TEST__) {
+  bootstrap();
+}
+</script>
+</body>
+</html>

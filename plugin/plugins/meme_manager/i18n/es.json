@@ -1,0 +1,14 @@
+{
+  "title": "Gestor de memes",
+  "subtitle": "Las fuentes en línea existentes permanecen en «Predeterminados del sistema»; gestiona tus imágenes en «Subidas del usuario».",
+  "search": "Buscar nombres o etiquetas de tus subidas…",
+  "add": "Añadir meme",
+  "advanced": "Ajustes avanzados (límites y notas)",
+  "empty": "Aún no hay subidas del usuario; las fuentes predeterminadas siguen disponibles.",
+  "addTitle": "Añadir meme",
+  "pickImage": "Elige imágenes (selección múltiple o carpeta completa; las grandes se comprimen solas)",
+  "name": "Nombre",
+  "tags": "Etiquetas (separadas por comas, ayudan a la chica gato)",
+  "cancel": "Cancelar",
+  "save": "Guardar"
+}

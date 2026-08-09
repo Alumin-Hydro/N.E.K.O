@@ -1,0 +1,14 @@
+{
+  "title": "Meme Manager",
+  "subtitle": "Existing online sources stay under System defaults; manage your own images separately under User uploads.",
+  "search": "Search user-upload names or tags…",
+  "add": "Add meme",
+  "advanced": "Advanced (limits and notes)",
+  "empty": "No user uploads yet; system default sources are still available.",
+  "addTitle": "Add meme",
+  "pickImage": "Pick images (multi-select or a whole folder; oversized images are auto-compressed)",
+  "name": "Name",
+  "tags": "Tags (comma separated, helps the catgirl match)",
+  "cancel": "Cancel",
+  "save": "Save"
+}

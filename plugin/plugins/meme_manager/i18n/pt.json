@@ -1,0 +1,14 @@
+{
+  "title": "Gerenciador de memes",
+  "subtitle": "As fontes on-line existentes ficam em “Padrões do sistema”; gerencie suas imagens separadamente em “Envios do usuário”.",
+  "search": "Buscar nomes ou tags dos seus envios…",
+  "add": "Adicionar meme",
+  "advanced": "Avançado (limites e notas)",
+  "empty": "Ainda não há envios do usuário; as fontes padrão continuam disponíveis.",
+  "addTitle": "Adicionar meme",
+  "pickImage": "Escolha imagens (múltipla seleção ou pasta inteira; grandes são comprimidas)",
+  "name": "Nome",
+  "tags": "Tags (separadas por vírgula, ajudam a gatinha a combinar)",
+  "cancel": "Cancelar",
+  "save": "Salvar"
+}

@@ -1,0 +1,33 @@
+[plugin]
+id = "meme_manager"
+name = "表情包管理器"
+description = "统一展示 N.E.K.O 系统默认在线表情来源与用户上传；支持批量上传整个文件夹、自动压缩大图并持久化管理。"
+short_description = "View N.E.K.O's default online meme sources and persistently manage user uploads in one catalog, with folder batch upload and automatic image compression."
+keywords = ["表情包", "meme", "sticker", "表情", "贴纸", "ミーム", "スタンプ", "밈", "스티커", "мем", "стикер"]
+version = "0.2.0"
+entry = "plugin.plugins.meme_manager:MemeManagerPlugin"
+
+[plugin.author]
+name = "N.E.K.O community"
+
+[plugin.sdk]
+recommended = ">=0.1.0,<0.2.0"
+supported = ">=0.1.0,<0.3.0"
+
+[plugin.ui]
+enabled = true
+
+[plugin.i18n]
+default_locale = "zh-CN"
+locales_dir = "i18n"
+
+[plugin_runtime]
+enabled = true
+auto_start = false
+
+[plugin.store]
+enabled = true
+
+[meme]
+max_memes = 500
+max_image_bytes = 2097152
