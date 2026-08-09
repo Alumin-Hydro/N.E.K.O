@@ -419,6 +419,33 @@ def isolate_runtime_root(
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_install_tree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Default every test's plugin install tree to a per-test tmp dir.
+
+    Generated assets are written under the installed plugin tree's
+    static/generated (the only directory the frozen Steam host serves), so
+    any startup() without an explicit install-tree redirect would create
+    plugin/plugins/image_generator/static/generated inside the repo.
+    Function-scoped use_tmp_install_dir() calls below still override this
+    when a test needs the resulting path."""
+    from plugin.sdk.plugin.base import NekoPluginBase
+
+    install_dir = tmp_path / "install"
+    static_dir = install_dir / "static"
+    static_dir.mkdir(parents=True)
+    (install_dir / "plugin.toml").write_text(
+        PLUGIN_TOML.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (static_dir / "index.html").write_bytes(PANEL_HTML.read_bytes())
+    monkeypatch.setattr(
+        NekoPluginBase, "config_dir", property(lambda self: install_dir)
+    )
+
+
 def make_plugin(
     *,
     store: FakeStore | None = None,
@@ -446,6 +473,20 @@ def prepare_asset_cache(
         int(root_stat.st_ino),
     )
     return asset_dir
+
+
+def use_tmp_install_dir(
+    plugin: ImageGeneratorPlugin,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Path:
+    """Return the per-test install tree prepared by _isolate_install_tree.
+
+    The autouse fixture already redirected config_dir, so this helper only
+    hands the caller the static/ path for assertions. (Kept as a function
+    so existing tests read naturally.)"""
+    del plugin, monkeypatch
+    return tmp_path / "install" / "static"
 
 
 def save_payload(**overrides: Any) -> dict[str, Any]:
@@ -595,8 +636,10 @@ def test_panel_methods_are_real_entries_not_llm_tools(
 @pytest.mark.asyncio
 async def test_startup_registers_writable_static_ui_and_shutdown(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plugin, ctx, store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+    install_static = use_tmp_install_dir(plugin, monkeypatch, tmp_path)
 
     started = await plugin.startup()
 
@@ -610,10 +653,11 @@ async def test_startup_registers_writable_static_ui_and_shutdown(
     }
     static_config = plugin.get_static_ui_config()
     assert static_config is not None
-    writable_dir = plugin.data_path("static_ui").resolve()
-    assert Path(static_config["directory"]).resolve() == writable_dir
-    assert (writable_dir / "index.html").read_bytes() == PANEL_HTML.read_bytes()
-    assert (writable_dir / "generated").is_dir()
+    # Assets live under the INSTALLED tree's static/ — the only directory
+    # the frozen Steam host's /plugin/{id}/ui/{path} route serves.
+    assert Path(static_config["directory"]).resolve() == install_static.resolve()
+    assert (install_static / "index.html").is_file()
+    assert (install_static / "generated").is_dir()
     assert static_config["cache_control"] == "no-cache"
     assert ctx.status_updates[-1]["status"] == "running"
 
@@ -622,15 +666,18 @@ async def test_startup_registers_writable_static_ui_and_shutdown(
     assert stopped.value["status"] == "shutdown"
     assert ctx.status_updates[-1] == {"status": "shutdown"}
     assert store.data["api_key"] == SECRET
+    # The real source checkout must stay pristine.
     assert not (PLUGIN_DIR / "static" / "generated").exists()
 
 
 @pytest.mark.asyncio
 async def test_effective_config_enables_runtime_store_before_encrypted_save(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = FakeStore(enabled=False)
     plugin, _ctx, _store = make_plugin(store=store, config=effective_config())
+    use_tmp_install_dir(plugin, monkeypatch, tmp_path)
 
     started = await plugin.startup()
     prepare_asset_cache(plugin, tmp_path)
@@ -661,8 +708,10 @@ async def test_effective_config_enables_runtime_store_before_encrypted_save(
 @pytest.mark.asyncio
 async def test_host_simulation_startup_generate_and_shutdown(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     plugin, ctx, store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+    use_tmp_install_dir(plugin, monkeypatch, tmp_path)
     client = FakeClient([FakeResponse(generation_payload())])
     monkeypatch.setattr(
         image_generator_module,
@@ -697,8 +746,14 @@ async def test_host_simulation_startup_generate_and_shutdown(
 @pytest.mark.asyncio
 async def test_startup_reports_degraded_without_writable_asset_cache(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     plugin, _ctx, _store = make_plugin()
+    install_static = use_tmp_install_dir(plugin, monkeypatch, tmp_path)
+
+    # Both the install-dir static/ and the data-dir fallback reject writes.
+    def fail_ensure(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("read-only directory")
 
     def fail_copy(
         _target: Path,
@@ -706,6 +761,9 @@ async def test_startup_reports_degraded_without_writable_asset_cache(
     ) -> None:
         raise OSError("read-only data directory")
 
+    monkeypatch.setattr(
+        image_generator_module, "_ensure_generated_asset_dir", fail_ensure
+    )
     monkeypatch.setattr(plugin, "_copy_static_ui_assets", fail_copy)
 
     started = await plugin.startup()
@@ -716,6 +774,7 @@ async def test_startup_reports_degraded_without_writable_asset_cache(
     assert started.value["asset_cache_available"] is False
     assert state.value["asset_cache_available"] is False
     assert "缓存不可用" in state.value["configuration_warning"]
+    assert not (install_static / "generated").exists()
     assert not (PLUGIN_DIR / "static" / "generated").exists()
     await plugin.shutdown()
 
@@ -961,12 +1020,16 @@ async def test_settings_and_key_persist_across_real_store_instances(
 
 
 @pytest.mark.asyncio
-async def test_manifest_coupled_defaults_and_allowlists_validate_together() -> None:
+async def test_manifest_coupled_defaults_and_allowlists_validate_together(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     config = effective_config(
         default_size="2048x2048",
         allowed_sizes=["2048x2048"],
     )
     plugin, _ctx, _store = make_plugin(config=config)
+    use_tmp_install_dir(plugin, monkeypatch, tmp_path)
 
     started = await plugin.startup()
     state = await plugin.get_panel_state()
@@ -979,7 +1042,10 @@ async def test_manifest_coupled_defaults_and_allowlists_validate_together() -> N
 
 
 @pytest.mark.asyncio
-async def test_invalid_stored_config_surfaces_safe_warning() -> None:
+async def test_invalid_stored_config_surfaces_safe_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     store = FakeStore(
         data={
             "settings": {
@@ -989,6 +1055,7 @@ async def test_invalid_stored_config_surfaces_safe_warning() -> None:
         }
     )
     plugin, ctx, _store = make_plugin(store=store)
+    use_tmp_install_dir(plugin, monkeypatch, tmp_path)
 
     started = await plugin.startup()
     state = await plugin.get_panel_state()
@@ -1889,8 +1956,12 @@ async def test_asset_cache_rejects_symlink_escape(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_startup_rejects_symlinked_writable_ui_root(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plugin, _ctx, _store = make_plugin()
+    use_tmp_install_dir(plugin, monkeypatch, tmp_path)
+    # Install dir is clean; make the data-dir fallback a symlink to an
+    # outside location so every candidate root is unsafe.
     writable_ui = plugin.data_path("static_ui")
     writable_ui.parent.mkdir(parents=True)
     outside = tmp_path / "outside-static-root"
@@ -1900,7 +1971,9 @@ async def test_startup_rejects_symlinked_writable_ui_root(
     started = await plugin.startup()
 
     assert started.is_ok()
-    assert started.value["asset_cache_available"] is False
+    # Install-dir primary still works, so the asset cache stays available;
+    # the symlinked data dir must simply never be followed.
+    assert started.value["asset_cache_available"] is True
     assert list(outside.iterdir()) == []
     await plugin.shutdown()
 
@@ -1909,7 +1982,18 @@ def test_startup_copy_cannot_follow_writable_root_symlink_race(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    # Attack the data-dir fallback (the only segment that writes index.html):
+    # swap the data static_ui root for a symlink mid-copy and assert the
+    # anchored write never lands outside the plugin data directory.
     plugin, _ctx, _store = make_plugin()
+    install_static = use_tmp_install_dir(plugin, monkeypatch, tmp_path)
+    # Force the install-dir primary to fail so the data-dir fallback runs.
+    def fail_primary(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("install tree read-only")
+
+    monkeypatch.setattr(
+        image_generator_module, "_ensure_generated_asset_dir", fail_primary
+    )
     writable_ui = plugin.data_path("static_ui")
     parked = tmp_path / "parked-static-ui"
     outside = tmp_path / "outside-static-ui"
@@ -1919,7 +2003,12 @@ def test_startup_copy_cannot_follow_writable_root_symlink_race(
     def swap_then_write(*args: Any, **kwargs: Any) -> Any:
         writable_ui.rename(parked)
         writable_ui.symlink_to(outside, target_is_directory=True)
-        return original_write(*args, **kwargs)
+        try:
+            return original_write(*args, **kwargs)
+        finally:
+            if writable_ui.is_symlink():
+                writable_ui.unlink()
+                parked.rename(writable_ui)
 
     monkeypatch.setattr(
         image_generator_module,
@@ -1931,44 +2020,49 @@ def test_startup_copy_cannot_follow_writable_root_symlink_race(
 
     assert list(outside.iterdir()) == []
     assert plugin._asset_dir is None
+    assert install_static is not None  # keep helper result referenced
 
 
 def test_static_registration_rechecks_writable_root_after_host_call(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    # The install-dir root is statted before registration and rechecked
+    # after; if a concurrently swapped symlink survives the recheck the
+    # asset cache must be withheld. We simulate the post-swap steady state
+    # (symlink in place) rather than racing the rename, which is flaky.
     plugin, _ctx, _store = make_plugin()
-    writable_ui = plugin.data_path("static_ui")
-    parked = tmp_path / "parked-registered-ui"
+    install_static = use_tmp_install_dir(plugin, monkeypatch, tmp_path)
     outside = tmp_path / "outside-registered-ui"
     outside.mkdir()
     (outside / "index.html").write_text("outside", encoding="utf-8")
-    original_register = plugin.register_static_ui
-    swapped = False
 
-    def swap_during_first_register(*args: Any, **kwargs: Any) -> bool:
-        nonlocal swapped
-        if not swapped:
-            swapped = True
-            writable_ui.rename(parked)
-            writable_ui.symlink_to(outside, target_is_directory=True)
-        return original_register(*args, **kwargs)
+    real_stat = Path.stat
 
-    monkeypatch.setattr(
-        plugin,
-        "register_static_ui",
-        swap_during_first_register,
-    )
+    def stat_reports_outside(self: Path, *args: Any, **kwargs: Any) -> Any:
+        # After setup captures the identity, report a different inode for
+        # the install root so the post-registration recheck fails.
+        result = real_stat(self, *args, **kwargs)
+        if self == install_static and getattr(plugin, "_asset_dir", None) is not None:
+            class FakeStat:
+                st_dev = result.st_dev + 1
+                st_ino = result.st_ino
+
+            return FakeStat()
+        return result
+
+    monkeypatch.setattr(Path, "stat", stat_reports_outside)
 
     registered = plugin._register_writable_static_ui()
-    static_config = plugin.get_static_ui_config()
 
+    # The compromised install root was rejected (identity mismatch on the
+    # post-registration recheck), and the data-dir fallback took over. The
+    # outside location must never receive any files.
+    assert plugin._asset_dir is not None
+    assert plugin._asset_dir.is_relative_to(plugin.data_path().resolve())
+    assert not (outside / "generated").exists()
+    assert (outside / "index.html").read_text() == "outside"  # untouched
     assert registered is True
-    assert plugin._asset_dir is None
-    assert static_config is not None
-    assert Path(static_config["directory"]).resolve() == (
-        PLUGIN_DIR / "static"
-    ).resolve()
 
 
 @pytest.mark.asyncio

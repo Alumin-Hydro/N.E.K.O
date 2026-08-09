@@ -183,6 +183,34 @@ def isolate_runtime_root(
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def isolate_install_tree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Keep generated assets out of the real source checkout.
+
+    Generated images are written under the installed plugin tree's
+    static/generated (the only directory the frozen Steam host serves), so
+    every startup() would otherwise create plugin/plugins/image_generator/
+    static/generated in the repo. Redirect config_dir to a per-test tmp
+    install tree pre-seeded with the bundled index.html."""
+    install_dir = tmp_path / "install"
+    static_dir = install_dir / "static"
+    static_dir.mkdir(parents=True)
+    (install_dir / "plugin.toml").write_text(
+        PLUGIN_TOML.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (static_dir / "index.html").write_bytes(
+        (PLUGIN_DIR / "static" / "index.html").read_bytes()
+    )
+    from plugin.sdk.plugin.base import NekoPluginBase
+
+    monkeypatch.setattr(
+        NekoPluginBase, "config_dir", property(lambda self: install_dir)
+    )
+
+
 def make_plugin(
     store: MemoryStore | None = None,
 ) -> tuple[ImageGeneratorPlugin, AdversarialContext, MemoryStore]:

@@ -2013,6 +2013,49 @@ class ImageGeneratorPlugin(NekoPluginBase):
         )
 
     def _register_writable_static_ui(self) -> bool:
+        # Serve generated assets from the INSTALLED plugin tree's static/,
+        # not the data directory. The frozen Steam runtime (2026-07-24
+        # Nuitka build) resolves /plugin/{id}/ui/{path} exclusively from the
+        # install-dir static/ inference and ignores STATIC_UI_REGISTER
+        # directory overrides — assets written under data/static_ui 404 on
+        # that host even though register_static_ui reported success. Newer
+        # hosts honour the override, and install-dir static/ works for both,
+        # so it is the compatible primary.
+        installed_static = self._source_static_dir
+        try:
+            if installed_static.is_symlink() or not installed_static.is_dir():
+                raise OSError("installed static directory is unavailable")
+            resolved_static = installed_static.resolve()
+            root_stat = resolved_static.stat()
+            root_identity = (int(root_stat.st_dev), int(root_stat.st_ino))
+            _ensure_generated_asset_dir(resolved_static, root_identity)
+            asset_dir = resolved_static / _GENERATED_SUBDIR
+            self._writable_ui_dir = resolved_static
+            self._asset_dir = asset_dir
+            self._writable_ui_identity = root_identity
+            if not self._asset_dir_is_safe():
+                raise OSError("installed static directory changed during setup")
+            registered = self.register_static_ui(
+                str(resolved_static),
+                cache_control="no-cache",
+            )
+            if registered and self._asset_dir_is_safe():
+                return True
+            if registered:
+                raise OSError("installed static directory changed during registration")
+        except Exception as exc:
+            self.logger.warning(
+                "ImageGenerator installed-static UI setup failed: failure_class={}",
+                type(exc).__name__,
+            )
+        self._asset_dir = None
+        self._writable_ui_dir = None
+        self._writable_ui_identity = None
+
+        # Legacy fallback: data-directory static_ui. Reached only when the
+        # installed tree is read-only; newer hosts serve this fine, frozen
+        # hosts will 404 generated images (surfaced as a panel warning via
+        # asset_cache_available=False when generation actually runs).
         raw_writable_ui = self.data_path("static_ui")
         expected_writable_ui = self.data_path().resolve() / "static_ui"
         self._writable_ui_identity = None
