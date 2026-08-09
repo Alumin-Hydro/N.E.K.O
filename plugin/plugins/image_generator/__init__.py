@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import io
 import ipaddress
 import json
@@ -926,6 +927,28 @@ def _verified_image_format(data: bytes) -> str:
         )
     return image_format
 
+def _image_geometry(data: bytes) -> tuple[int, int] | None:
+    """Best-effort (width, height) for an already-verified image.
+
+    The image has passed _verified_image_format by the time this runs, so any
+    parse failure here means a corrupt-but-passing container; return None and
+    let the chat renderer fall back to its size-less path instead of failing
+    the whole generation."""
+    try:
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            width, height, _ = _read_png_geometry(data)
+        elif data[:2] == b"\xff\xd8":
+            width, height = _read_jpeg_geometry(data)
+        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            width, height, _ = _read_webp_geometry(data)
+        else:
+            return None
+    except Exception:
+        return None
+    if width < 1 or height < 1:
+        return None
+    return width, height
+
 
 def _image_type(data: bytes) -> tuple[str, str]:
     image_format = _verified_image_format(data)
@@ -1495,6 +1518,11 @@ class ImageGeneratorPlugin(NekoPluginBase):
         self._writable_ui_dir: Path | None = None
         self._asset_dir: Path | None = None
         self._writable_ui_identity: tuple[int, int] | None = None
+        # In-flight generation dedup: the host may dispatch the same request
+        # twice (llm_tool + plugin_entry both broadcast to the model), and the
+        # model itself occasionally re-calls within seconds. Each real call
+        # costs money, so concurrent/duplicate requests must collapse to one.
+        self._inflight: dict[str, asyncio.Task] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle, Store, and loop-local HTTP client
@@ -2976,12 +3004,44 @@ class ImageGeneratorPlugin(NekoPluginBase):
             f"### 图片已生成\n\n![AI 生成图片]({image_url})\n\n[打开原图]({image_url})"
         )
 
-    def _push_chat_markdown(self, markdown: str) -> bool:
+    def _push_chat_image(
+        self,
+        *,
+        image_url: str,
+        geometry: tuple[int, int] | None,
+        fallback_markdown: str,
+    ) -> bool:
+        """Push the generated image to the chat as a native image part.
+
+        Sending a real image part (not Markdown text) lets the chat renderer
+        use its aspect-ratio path when width/height are known, so generated
+        images no longer go through the size-less ``object-fit: cover`` crop
+        that made results look inconsistent."""
+        part: dict[str, Any] = {"type": "image", "url": image_url}
+        if geometry is not None:
+            part["width"], part["height"] = geometry
         try:
             self.push_message(
                 visibility=["chat"],
                 ai_behavior="blind",
-                parts=[{"type": "text", "text": markdown}],
+                parts=[part],
+                source="image_generator",
+                priority=2,
+                metadata={"event_type": "image_generated"},
+            )
+            return True
+        except Exception as exc:
+            self.logger.warning(
+                "ImageGenerator chat image push failed: failure_class={}",
+                type(exc).__name__,
+            )
+        # Older hosts may reject image parts; fall back to the Markdown text
+        # push so the paid result is never silently lost.
+        try:
+            self.push_message(
+                visibility=["chat"],
+                ai_behavior="blind",
+                parts=[{"type": "text", "text": fallback_markdown}],
                 source="image_generator",
                 priority=2,
                 metadata={"event_type": "image_generated"},
@@ -3004,6 +3064,36 @@ class ImageGeneratorPlugin(NekoPluginBase):
         action: str,
         auto_show_override: bool | None,
     ):
+        # Collapse duplicate dispatches onto one real API call. The host may
+        # route the same user request through both the llm_tool and the
+        # plugin_entry registration, and the model occasionally re-calls
+        # within seconds; each non-deduplicated call bills the provider again.
+        # Dedup only applies to the LLM-facing action: panel test_generation
+        # is user-driven and must always run fresh.
+        dedup_key: str | None = None
+        if action == "generate_image":
+            candidate_key = hashlib.sha256(
+                "|".join(
+                    str(part)
+                    for part in (prompt, size, quality, style, auto_show_override)
+                ).encode("utf-8")
+            ).hexdigest()
+            dedup_key = candidate_key
+            existing = self._inflight.get(candidate_key)
+            if existing is not None:
+                self.logger.info(
+                    "ImageGenerator duplicate request collapsed: action={} "
+                    "prompt_len={}",
+                    action,
+                    len(str(prompt)),
+                )
+                try:
+                    return await existing
+                except Exception:
+                    # The in-flight attempt failed; fall through to a fresh
+                    # run so the caller still gets a real error/result rather
+                    # than a stale exception.
+                    pass
         try:
             settings, api_key = await self._generation_config_snapshot()
             cleaned_prompt, resolved_size, resolved_quality, resolved_style = (
@@ -3046,100 +3136,158 @@ class ImageGeneratorPlugin(NekoPluginBase):
             bool(resolved_quality and resolved_quality != "auto"),
             bool(resolved_style),
         )
-        try:
-            try:
-                async with asyncio.timeout(float(settings["timeout_seconds"])):
-                    (
-                        image_bytes,
-                        _mime,
-                        extension,
-                        revised_prompt,
-                    ) = await self._request_generation(
-                        settings=settings,
-                        api_key=api_key,
-                        prompt=cleaned_prompt,
-                        size=resolved_size,
-                        quality=resolved_quality,
-                        style=resolved_style,
-                    )
-            except TimeoutError:
-                raise _GenerationFailure(
-                    "生成图片超过了配置的总超时时间，请稍后重试",
-                    "GenerationTimeout",
-                ) from None
-            image_url, _filename = await self._save_asset(
-                image_bytes,
-                extension=extension,
-                secrets=self._known_secrets_snapshot(api_key),
-            )
-        except _GenerationFailure as exc:
-            self._set_request_state(
-                action=action,
-                status="error",
-                failure_class=exc.failure_class,
-            )
-            self.report_status(
-                {
-                    "status": "error",
-                    "failure_class": exc.failure_class,
-                }
-            )
-            await self._record_history(
-                prompt=cleaned_prompt,
-                model=str(settings["model"]),
-                status="failed",
-                result_url="",
-                api_key=api_key,
-                history_limit=int(settings["history_limit"]),
-            )
-            self.logger.warning(
-                "ImageGenerator request failed: action={} failure_class={}",
-                action,
-                exc.failure_class,
-            )
-            return Err(SdkError(exc.message))
-        except Exception as exc:
-            failure_class = type(exc).__name__
-            self._set_request_state(
-                action=action,
-                status="error",
-                failure_class=failure_class,
-            )
-            self.report_status({"status": "error", "failure_class": failure_class})
-            await self._record_history(
-                prompt=cleaned_prompt,
-                model=str(settings["model"]),
-                status="failed",
-                result_url="",
-                api_key=api_key,
-                history_limit=int(settings["history_limit"]),
-            )
-            self.logger.warning(
-                "ImageGenerator unexpected failure: action={} failure_class={}",
-                action,
-                failure_class,
-            )
-            return Err(SdkError("生成图片时发生内部错误，请稍后重试"))
 
+        async def _run_generation():
+            try:
+                try:
+                    async with asyncio.timeout(float(settings["timeout_seconds"])):
+                        (
+                            image_bytes,
+                            _mime,
+                            extension,
+                            revised_prompt,
+                        ) = await self._request_generation(
+                            settings=settings,
+                            api_key=api_key,
+                            prompt=cleaned_prompt,
+                            size=resolved_size,
+                            quality=resolved_quality,
+                            style=resolved_style,
+                        )
+                except TimeoutError:
+                    raise _GenerationFailure(
+                        "生成图片超过了配置的总超时时间，请稍后重试",
+                        "GenerationTimeout",
+                    ) from None
+                image_url, _filename = await self._save_asset(
+                    image_bytes,
+                    extension=extension,
+                    secrets=self._known_secrets_snapshot(api_key),
+                )
+            except _GenerationFailure as exc:
+                self._set_request_state(
+                    action=action,
+                    status="error",
+                    failure_class=exc.failure_class,
+                )
+                self.report_status(
+                    {
+                        "status": "error",
+                        "failure_class": exc.failure_class,
+                    }
+                )
+                await self._record_history(
+                    prompt=cleaned_prompt,
+                    model=str(settings["model"]),
+                    status="failed",
+                    result_url="",
+                    api_key=api_key,
+                    history_limit=int(settings["history_limit"]),
+                )
+                self.logger.warning(
+                    "ImageGenerator request failed: action={} failure_class={}",
+                    action,
+                    exc.failure_class,
+                )
+                return Err(SdkError(exc.message))
+            except Exception as exc:
+                failure_class = type(exc).__name__
+                self._set_request_state(
+                    action=action,
+                    status="error",
+                    failure_class=failure_class,
+                )
+                self.report_status({"status": "error", "failure_class": failure_class})
+                await self._record_history(
+                    prompt=cleaned_prompt,
+                    model=str(settings["model"]),
+                    status="failed",
+                    result_url="",
+                    api_key=api_key,
+                    history_limit=int(settings["history_limit"]),
+                )
+                self.logger.warning(
+                    "ImageGenerator unexpected failure: action={} failure_class={}",
+                    action,
+                    failure_class,
+                )
+                return Err(SdkError("生成图片时发生内部错误，请稍后重试"))
+
+            return await self._finalize_success(
+                settings=settings,
+                api_key=api_key,
+                cleaned_prompt=cleaned_prompt,
+                action=action,
+                image_bytes=image_bytes,
+                image_url=image_url,
+                revised_prompt=revised_prompt,
+                auto_show_override=auto_show_override,
+            )
+
+        if dedup_key is not None:
+            task = asyncio.ensure_future(_run_generation())
+            self._inflight[dedup_key] = task
+            try:
+                return await task
+            finally:
+                self._inflight.pop(dedup_key, None)
+        return await _run_generation()
+
+    async def _finalize_success(
+        self,
+        *,
+        settings: dict[str, Any],
+        api_key: str,
+        cleaned_prompt: str,
+        action: str,
+        image_bytes: bytes,
+        image_url: str,
+        revised_prompt: Any,
+        auto_show_override: bool | None,
+    ):
         markdown = self._display_markdown(image_url)
         should_show = (
             bool(settings["auto_show_in_chat"])
             if auto_show_override is None
             else auto_show_override
         )
-        push_attempted = should_show and self._push_chat_markdown(markdown)
+        geometry = _image_geometry(image_bytes)
+        push_attempted = False
+        if should_show:
+            push_attempted = self._push_chat_image(
+                image_url=image_url,
+                geometry=geometry,
+                fallback_markdown=markdown,
+            )
         if push_attempted:
-            message = "图片已生成，插件已尝试直接显示"
+            message = "图片已生成，并已直接发送到聊天中显示"
+            # The image part is already in the chat stream; handing the model
+            # the same Markdown again would render a duplicate. Tell it to
+            # describe the result verbally instead.
+            instruction = (
+                "图片已经直接展示在聊天中，{MASTER_NAME} 已经能看到。"
+                "请不要再在回复中粘贴任何图片链接或 Markdown，"
+                "只用角色口吻简短说明已经画好即可。"
+            )
+            result_fields: dict[str, Any] = {
+                "message": message,
+                "display_instruction": instruction,
+                "revised_prompt": revised_prompt,
+            }
         else:
             message = "图片已生成，可通过返回的链接查看"
-        # push_message has no delivery acknowledgement. Keep a model-facing
-        # Markdown fallback even after a successful enqueue attempt; a
-        # duplicate image is preferable to silently losing a paid result.
-        instruction = (
-            "请在回复中附上 display_markdown 的原样内容，确保 "
-            "{MASTER_NAME} 能直接看到并打开生成图片；再用角色口吻简短说明"
-            "已经画好。"
-        )
+            instruction = (
+                "请在回复中附上 display_markdown 的原样内容，确保 "
+                "{MASTER_NAME} 能直接看到并打开生成图片；再用角色口吻简短说明"
+                "已经画好。"
+            )
+            result_fields = {
+                "message": message,
+                "image_url": image_url,
+                "display_markdown": markdown,
+                "display_instruction": instruction,
+                "revised_prompt": revised_prompt,
+            }
 
         await self._record_history(
             prompt=cleaned_prompt,
@@ -3158,21 +3306,18 @@ class ImageGeneratorPlugin(NekoPluginBase):
             len(image_bytes),
             push_attempted,
         )
-        return Ok(
-            _redact_structure(
-                {
-                    "message": message,
-                    "image_url": image_url,
-                    "display_markdown": markdown,
-                    "display_instruction": instruction,
-                    "revised_prompt": revised_prompt,
-                },
-                self._known_secrets_snapshot(api_key),
-            )
-        )
+        return Ok(_redact_structure(result_fields, self._known_secrets_snapshot(api_key)))
 
     # ------------------------------------------------------------------
-    # Primary dual-registered capability
+    # Primary capability — registered as an LLM tool ONLY.
+    #
+    # This method used to carry both @llm_tool and @plugin_entry. The host
+    # broadcasts both registrations to the model, so a single "draw X"
+    # request fired the tool twice (~20s apart, the second call with a
+    # model-rewritten prompt): every user-visible image was billed twice and
+    # displayed twice. The panel uses test_generation, not this entry, so the
+    # plugin_entry registration is safe to drop. The in-flight dedup in
+    # _generate is kept as a second line of defense.
     # ------------------------------------------------------------------
 
     @llm_tool(
@@ -3181,28 +3326,11 @@ class ImageGeneratorPlugin(NekoPluginBase):
             "根据用户描述生成一张图片。用户说“画一张……”“生成图片”、"
             "“帮我画”“绘制插画/海报/头像”或其他明确图像创作请求时调用。"
             "prompt 必填；size、quality、style 可省略并使用管理面板默认值，"
-            "提供时必须符合面板允许列表。工具会返回可直接显示的图片 Markdown。"
+            "提供时必须符合面板允许列表。每次用户请求只调用一次；"
+            "成功后图片会自动展示在聊天中，无需重复调用。"
         ),
         parameters=GENERATE_IMAGE_SCHEMA,
         timeout=300.0,
-    )
-    @plugin_entry(
-        id="generate_image",
-        name="生成图片",
-        description=(
-            "根据文本描述调用 OpenAI-compatible Images API 生成图片。"
-            "适用于“画一张”“生成图片”“帮我画”“绘制海报/头像/插画”等请求。"
-            "prompt 必填；可选 size、quality、style 会按面板允许列表校验。"
-        ),
-        input_schema=GENERATE_IMAGE_SCHEMA,
-        timeout=300.0,
-        llm_result_fields=[
-            "message",
-            "image_url",
-            "display_markdown",
-            "display_instruction",
-            "revised_prompt",
-        ],
     )
     async def generate_image(
         self,

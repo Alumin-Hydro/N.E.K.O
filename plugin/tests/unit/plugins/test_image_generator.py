@@ -170,6 +170,28 @@ class FakeContext:
         del timeout
         return {"config": copy.deepcopy(self.config)}
 
+    # Minimal stubs so FakeContext passes ensure_sdk_context's compatibility
+    # check and is used AS the plugin ctx (not wrapped in an SdkContext proxy,
+    # which would break monkeypatching push_message on plugin.ctx).
+    def _not_implemented(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise NotImplementedError("FakeContext stub")
+
+    get_own_base_config = _not_implemented
+    get_own_profiles_state = _not_implemented
+    get_own_profile_config = _not_implemented
+    get_own_effective_config = _not_implemented
+    update_own_config = _not_implemented
+    upsert_own_profile_config = _not_implemented
+    delete_own_profile_config = _not_implemented
+    set_own_active_profile = _not_implemented
+    query_plugins = _not_implemented
+    trigger_plugin_event = _not_implemented
+    get_system_config = _not_implemented
+    query_memory = _not_implemented
+    run_update = _not_implemented
+    export_push = _not_implemented
+    finish = _not_implemented
+
     def push_message(self, **kwargs: Any) -> dict[str, bool]:
         self.pushed.append(copy.deepcopy(kwargs))
         return {"ok": True}
@@ -515,24 +537,14 @@ def install_client(
 # ---------------------------------------------------------------------------
 
 
-def test_generate_image_is_dual_registered_with_bounded_schema() -> None:
+def test_generate_image_is_llm_tool_only_with_bounded_schema() -> None:
+    # The plugin_entry registration was intentionally dropped: the host
+    # broadcast both registrations to the model, which fired the tool twice
+    # per user request and billed the provider twice. generate_image must
+    # stay LLM-tool-only; the panel drives test_generation instead.
     method = ImageGeneratorPlugin.generate_image
-    entry = getattr(method, EVENT_META_ATTR)
+    assert not hasattr(method, EVENT_META_ATTR)
     tool = getattr(method, LLM_TOOL_META_ATTR)
-
-    assert entry.event_type == "plugin_entry"
-    assert entry.id == "generate_image"
-    assert entry.input_schema == GENERATE_IMAGE_SCHEMA
-    assert entry.timeout == 300.0
-    assert entry.llm_result_fields == [
-        "message",
-        "image_url",
-        "display_markdown",
-        "display_instruction",
-        "revised_prompt",
-    ]
-    assert "api_key" not in entry.llm_result_fields
-    assert "b64_json" not in entry.llm_result_fields
 
     assert tool.name == "generate_image"
     assert tool.parameters == GENERATE_IMAGE_SCHEMA
@@ -541,6 +553,7 @@ def test_generate_image_is_dual_registered_with_bounded_schema() -> None:
     assert GENERATE_IMAGE_SCHEMA["additionalProperties"] is False
     assert GENERATE_IMAGE_SCHEMA["properties"]["prompt"]["maxLength"] == 4_000
     assert "画一张" in tool.description
+    assert "只调用一次" in tool.description
 
 
 @pytest.mark.parametrize(
@@ -667,7 +680,13 @@ async def test_host_simulation_startup_generate_and_shutdown(
     assert client.is_closed is True
     assert len(client.post_calls) == 1
     assert client.post_calls[0]["url"].endswith("/images/generations")
-    assert ctx.pushed[0]["parts"][0]["text"].startswith("### 图片已生成")
+    first_part = ctx.pushed[0]["parts"][0]
+    assert first_part["type"] == "image"
+    assert first_part["url"].startswith(
+        "http://127.0.0.1:48916/plugin/image_generator/ui/generated/"
+    )
+    assert first_part["width"] > 0
+    assert first_part["height"] > 0
     assert store.data["api_key"] == SECRET
     assert SECRET not in json.dumps(
         store.data["recent_generations"],
@@ -1543,23 +1562,16 @@ async def test_generate_pushes_small_markdown_without_inline_image_data(
     )
 
     assert result.is_ok()
+    # Push succeeded → the image is already in the chat stream, so the model
+    # gets NO display_markdown (handing it the Markdown again rendered a
+    # duplicate bubble). Fallback fields only appear when the push failed.
     assert set(result.value) == {
         "message",
-        "image_url",
-        "display_markdown",
         "display_instruction",
         "revised_prompt",
     }
-    assert result.value["image_url"].startswith(
-        "http://127.0.0.1:48916/plugin/image_generator/ui/generated/"
-    )
-    assert result.value["display_markdown"] == (
-        "### 图片已生成\n\n"
-        f"![AI 生成图片]({result.value['image_url']})\n\n"
-        f"[打开原图]({result.value['image_url']})"
-    )
-    assert "尝试直接显示" in result.value["message"]
-    assert "display_markdown" in result.value["display_instruction"]
+    assert "已直接发送" in result.value["message"]
+    assert "不要再" in result.value["display_instruction"]
     assert len(list(asset_dir.iterdir())) == 1
 
     assert len(ctx.pushed) == 1
@@ -1568,9 +1580,14 @@ async def test_generate_pushes_small_markdown_without_inline_image_data(
     assert pushed["ai_behavior"] == "blind"
     assert pushed["source"] == "image_generator"
     assert pushed["metadata"] == {"event_type": "image_generated"}
-    assert pushed["parts"] == [
-        {"type": "text", "text": result.value["display_markdown"]}
-    ]
+    part = pushed["parts"][0]
+    assert part["type"] == "image"
+    image_url = part["url"]
+    assert image_url.startswith(
+        "http://127.0.0.1:48916/plugin/image_generator/ui/generated/"
+    )
+    assert part["width"] > 0
+    assert part["height"] > 0
     serialized_push = json.dumps(pushed, ensure_ascii=False)
     serialized_result = json.dumps(result.value, ensure_ascii=False)
     assert len(serialized_push.encode()) < 256 * 1024
