@@ -110,6 +110,12 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "default_model": "wanx2.1-t2i-turbo",
         "allow_local_base_url": False,
         "allow_custom_base_url": False,
+        # Wanx 文生图在 OpenAI 兼容模式下不可用（compatible-mode 的
+        # /images/generations 对其返回 404），必须走 DashScope 原生异步
+        # 任务接口：POST 创建任务 → 轮询 task 状态 → 下载结果 URL。
+        # 结果 URL 是签名的 OSS 地址，由插件服务端在受控大小限制内下载，
+        # 与百炼返回 b64_json 的兼容端点行为对齐。
+        "api_flavor": "dashscope_native",
     },
     "siliconflow": {
         "label": "SiliconFlow",
@@ -2366,6 +2372,276 @@ class ImageGeneratorPlugin(NekoPluginBase):
         return body
 
     async def _request_generation(
+        self,
+        *,
+        settings: Mapping[str, Any],
+        api_key: str,
+        prompt: str,
+        size: str,
+        quality: str,
+        style: str,
+    ) -> tuple[bytes, str, str, str]:
+        flavor = str(
+            PROVIDER_PRESETS.get(str(settings.get("provider") or ""), {}).get(
+                "api_flavor", "openai_compatible"
+            )
+        )
+        if flavor == "dashscope_native":
+            return await self._request_generation_dashscope(
+                settings=settings,
+                api_key=api_key,
+                prompt=prompt,
+                size=size,
+            )
+        return await self._request_generation_openai(
+            settings=settings,
+            api_key=api_key,
+            prompt=prompt,
+            size=size,
+            quality=quality,
+            style=style,
+        )
+
+    @staticmethod
+    def _dashscope_size(size: str) -> str:
+        # OpenAI style "1024x1024" -> DashScope style "1024*1024".
+        return size.lower().replace("x", "*")
+
+    async def _request_generation_dashscope(
+        self,
+        *,
+        settings: Mapping[str, Any],
+        api_key: str,
+        prompt: str,
+        size: str,
+    ) -> tuple[bytes, str, str, str]:
+        max_bytes = int(settings["max_download_bytes"])
+        timeout_seconds = float(settings["timeout_seconds"])
+        deadline = time.monotonic() + timeout_seconds
+        create_endpoint = (
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/"
+            "text2image/image-synthesis"
+        )
+        create_body: dict[str, Any] = {
+            "model": settings["model"],
+            "input": {"prompt": prompt},
+            "parameters": {"n": 1},
+        }
+        if size and size != "auto":
+            create_body["parameters"]["size"] = self._dashscope_size(size)
+
+        async def post_create() -> dict[str, Any]:
+            client = self._get_client()
+            try:
+                response = await client.post(
+                    create_endpoint,
+                    json=create_body,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "X-DashScope-Async": "enable",
+                        "User-Agent": USER_AGENT,
+                    },
+                    timeout=30,
+                )
+            except httpx.RequestError:
+                raise _GenerationFailure(
+                    "无法连接图片生成服务，请检查 API 地址和网络",
+                    "ProviderNetworkError",
+                ) from None
+            finally:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+            if response.status_code == 401 or response.status_code == 403:
+                raise _GenerationFailure(
+                    "图片服务拒绝了凭据，请检查 API 密钥",
+                    f"ProviderHttp{response.status_code}",
+                )
+            if response.status_code == 429:
+                raise _GenerationFailure(
+                    "图片服务请求过于频繁或额度不足，请稍后重试",
+                    "ProviderHttp429",
+                )
+            if response.status_code < 200 or response.status_code >= 300:
+                raise _GenerationFailure(
+                    f"图片服务请求失败（HTTP {response.status_code}）",
+                    f"ProviderHttp{response.status_code}",
+                )
+            try:
+                payload = json.loads(response.content)
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+                raise _GenerationFailure(
+                    "图片服务返回了无法解析的数据",
+                    "InvalidProviderJson",
+                ) from None
+            if not isinstance(payload, Mapping):
+                raise _GenerationFailure(
+                    "图片服务返回的数据格式无效",
+                    "MalformedResponse",
+                )
+            return dict(payload)
+
+        created = await post_create()
+        output = created.get("output")
+        task_id = output.get("task_id") if isinstance(output, Mapping) else None
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise _GenerationFailure(
+                "图片服务没有返回任务编号",
+                "MalformedResponse",
+            )
+        task_id = task_id.strip()
+        if not re.fullmatch(r"[0-9A-Za-z-]{1,128}", task_id):
+            raise _GenerationFailure(
+                "图片服务返回的任务编号格式无效",
+                "MalformedResponse",
+            )
+        task_endpoint = f"https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
+
+        poll_client = self._get_client()
+        try:
+            while True:
+                if time.monotonic() >= deadline:
+                    raise _GenerationFailure(
+                        "生成图片超时，请稍后重试或提高超时设置",
+                        "ProviderTimeout",
+                    )
+                try:
+                    response = await poll_client.get(
+                        task_endpoint,
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Accept": "application/json",
+                            "User-Agent": USER_AGENT,
+                        },
+                        timeout=30,
+                    )
+                except httpx.RequestError:
+                    raise _GenerationFailure(
+                        "无法连接图片生成服务，请检查 API 地址和网络",
+                        "ProviderNetworkError",
+                    ) from None
+                if response.status_code < 200 or response.status_code >= 300:
+                    raise _GenerationFailure(
+                        f"图片服务请求失败（HTTP {response.status_code}）",
+                        f"ProviderHttp{response.status_code}",
+                    )
+                try:
+                    payload = json.loads(response.content)
+                except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+                    raise _GenerationFailure(
+                        "图片服务返回了无法解析的数据",
+                        "InvalidProviderJson",
+                    ) from None
+                task_output = payload.get("output") if isinstance(payload, Mapping) else None
+                if not isinstance(task_output, Mapping):
+                    raise _GenerationFailure(
+                        "图片服务返回的数据格式无效",
+                        "MalformedResponse",
+                    )
+                status = str(task_output.get("task_status") or "").upper()
+                if status == "SUCCEEDED":
+                    results = task_output.get("results")
+                    first = results[0] if isinstance(results, list) and results else None
+                    image_url = first.get("url") if isinstance(first, Mapping) else None
+                    if not isinstance(image_url, str) or not image_url.strip():
+                        raise _GenerationFailure(
+                            "图片服务没有返回图片",
+                            "MalformedResponse",
+                        )
+                    image_url = image_url.strip()
+                    parsed_image = _parse_http_url(image_url)
+                    if (
+                        parsed_image is None
+                        or parsed_image.scheme.lower() != "https"
+                        or _is_private_or_loopback_hostname(parsed_image.hostname)
+                    ):
+                        raise _GenerationFailure(
+                            "图片服务返回了不安全的图片地址",
+                            "ProviderUrlOutputRejected",
+                        )
+                    return await self._download_provider_image(
+                        image_url,
+                        max_bytes=max_bytes,
+                        timeout_seconds=max(5.0, deadline - time.monotonic()),
+                    )
+                if status in {"FAILED", "CANCELED", "UNKNOWN"}:
+                    raise _GenerationFailure(
+                        "图片服务生成失败，请检查模型、尺寸或账户额度",
+                        "ProviderTaskFailed",
+                    )
+                await asyncio.sleep(2)
+        finally:
+            try:
+                await poll_client.aclose()
+            except Exception:
+                pass
+
+    async def _download_provider_image(
+        self,
+        image_url: str,
+        *,
+        max_bytes: int,
+        timeout_seconds: float,
+    ) -> tuple[bytes, str, str, str]:
+        client = self._get_client(trust_env=False)
+        try:
+            async with client.stream(
+                "GET",
+                image_url,
+                headers={
+                    "Accept": "image/png,image/jpeg,image/webp",
+                    "Accept-Encoding": "identity",
+                    "User-Agent": USER_AGENT,
+                },
+                timeout=timeout_seconds,
+                follow_redirects=False,
+            ) as response:
+                status = int(getattr(response, "status_code", 0) or 0)
+                if status < 200 or status >= 300:
+                    raise _GenerationFailure(
+                        f"下载生成图片失败（HTTP {status}）",
+                        f"ProviderHttp{status}",
+                    )
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise _GenerationFailure(
+                            "生成图片超过了配置的最大字节数",
+                            "ImageTooLarge",
+                        )
+                    chunks.append(bytes(chunk))
+                raw = b"".join(chunks)
+        except _GenerationFailure:
+            raise
+        except httpx.TimeoutException:
+            raise _GenerationFailure(
+                "生成图片超时，请稍后重试或提高超时设置",
+                "ProviderTimeout",
+            ) from None
+        except httpx.RequestError:
+            raise _GenerationFailure(
+                "无法连接图片生成服务，请检查 API 地址和网络",
+                "ProviderNetworkError",
+            ) from None
+        finally:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+        decoded, mime, extension = await asyncio.to_thread(
+            _sanitize_image,
+            raw,
+            max_bytes=max_bytes,
+        )
+        return decoded, mime, extension, ""
+
+    async def _request_generation_openai(
         self,
         *,
         settings: Mapping[str, Any],

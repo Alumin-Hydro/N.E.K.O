@@ -32,6 +32,7 @@ from plugin.plugins.image_generator import (
     DEFAULT_SETTINGS,
     GENERATE_IMAGE_SCHEMA,
     PLUGIN_VERSION,
+    PROVIDER_PRESETS,
     USER_AGENT,
     ImageGeneratorPlugin,
     _decode_b64_image,
@@ -192,6 +193,12 @@ class FakeResponse:
         self.headers = dict(headers or {})
         self.json_calls = 0
 
+    @property
+    def content(self) -> bytes:
+        if self.json_error is not None:
+            return b"{invalid-json"
+        return json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
+
     def json(self) -> Any:
         self.json_calls += 1
         if self.json_error is not None:
@@ -325,6 +332,50 @@ class FakeClient:
         if self.close_error is not None:
             raise self.close_error
         self.is_closed = True
+
+
+class FakeDashScopeClient:
+    """Scripted client for the native DashScope async task flow."""
+
+    def __init__(
+        self,
+        *,
+        create_payload: Any = None,
+        create_status: int = 200,
+        poll_payloads: list[Any] | None = None,
+        download_chunks: list[bytes] | None = None,
+        download_status: int = 200,
+    ) -> None:
+        self.create_payload = create_payload
+        self.create_status = create_status
+        self.poll_payloads = list(poll_payloads or [])
+        self.download_chunks = list(download_chunks or [])
+        self.download_status = download_status
+        self.post_calls: list[dict[str, Any]] = []
+        self.get_calls: list[dict[str, Any]] = []
+        self.stream_calls: list[dict[str, Any]] = []
+
+    async def post(self, url: str, **kwargs: Any) -> Any:
+        self.post_calls.append({"url": url, **kwargs})
+        return FakeResponse(self.create_payload, status_code=self.create_status)
+
+    async def get(self, url: str, **kwargs: Any) -> Any:
+        self.get_calls.append({"url": url, **kwargs})
+        if not self.poll_payloads:
+            raise AssertionError("fake dashscope client ran out of poll payloads")
+        return FakeResponse(self.poll_payloads.pop(0))
+
+    def stream(self, method: str, url: str, **kwargs: Any) -> FakeStreamContext:
+        self.stream_calls.append({"method": method, "url": url, **kwargs})
+        return FakeStreamContext(
+            FakeStreamResponse(
+                self.download_chunks,
+                status_code=self.download_status,
+            )
+        )
+
+    async def aclose(self) -> None:
+        return None
 
 
 @pytest.fixture(autouse=True)
@@ -2416,3 +2467,121 @@ def test_built_archive_contains_backend_panel_readme_and_all_locales(
     assert not any("__pycache__" in name for name in names)
     assert not any("/generated/" in name for name in names)
     assert "payload/dependencies.toml" in names
+
+
+# ---------------------------------------------------------------------------
+# DashScope native (aliyun_bailian) flow
+# ---------------------------------------------------------------------------
+
+
+def make_dashscope_plugin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    client: FakeDashScopeClient,
+) -> ImageGeneratorPlugin:
+    plugin, _ctx, _store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+    prepare_asset_cache(plugin, tmp_path)
+    plugin._settings = copy.deepcopy(DEFAULT_SETTINGS)
+    plugin._settings.update(
+        {
+            "provider": "aliyun_bailian",
+            "api_base_url": PROVIDER_PRESETS["aliyun_bailian"]["base_url"],
+            "model": "wanx2.1-t2i-turbo",
+        }
+    )
+    plugin._running = True
+    monkeypatch.setattr(plugin, "_get_client", lambda **_kwargs: client)
+    async def no_sleep(*_a: Any, **_k: Any) -> None:
+        return None
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    return plugin
+
+
+@pytest.mark.asyncio
+async def test_dashscope_native_flow_creates_polls_and_downloads(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client = FakeDashScopeClient(
+        create_payload={"output": {"task_id": "task-abc123", "task_status": "PENDING"}},
+        poll_payloads=[
+            {"output": {"task_status": "RUNNING"}},
+            {
+                "output": {
+                    "task_status": "SUCCEEDED",
+                    "results": [{"url": "https://cdn.example.com/result.png"}],
+                }
+            },
+        ],
+        download_chunks=[PNG_BYTES],
+    )
+    plugin = make_dashscope_plugin(monkeypatch, tmp_path, client)
+
+    result = await plugin.generate_image(prompt="一只猫")
+
+    if result.is_err():
+        for level, args in plugin.logger.records:
+            print("LOG", level, args)
+    assert result.is_ok(), result
+    assert client.post_calls[0]["url"].endswith("text2image/image-synthesis")
+    assert client.post_calls[0]["headers"]["X-DashScope-Async"] == "enable"
+    assert client.post_calls[0]["json"]["input"]["prompt"] == "一只猫"
+    assert client.post_calls[0]["json"]["parameters"]["size"] == "1024*1024"
+    assert client.get_calls[0]["url"].endswith("/api/v1/tasks/task-abc123")
+    assert client.stream_calls[0]["method"] == "GET"
+    assert client.stream_calls[0]["url"] == "https://cdn.example.com/result.png"
+
+
+@pytest.mark.asyncio
+async def test_dashscope_create_rejected_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client = FakeDashScopeClient(create_payload={}, create_status=401)
+    plugin = make_dashscope_plugin(monkeypatch, tmp_path, client)
+
+    result = await plugin.generate_image(prompt="一只猫")
+
+    assert result.is_err()
+    assert "凭据" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_dashscope_failed_task_surfaces_friendly_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client = FakeDashScopeClient(
+        create_payload={"output": {"task_id": "task-abc123"}},
+        poll_payloads=[{"output": {"task_status": "FAILED"}}],
+    )
+    plugin = make_dashscope_plugin(monkeypatch, tmp_path, client)
+
+    result = await plugin.generate_image(prompt="一只猫")
+
+    assert result.is_err()
+    assert "生成失败" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_dashscope_rejects_private_image_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client = FakeDashScopeClient(
+        create_payload={"output": {"task_id": "task-abc123"}},
+        poll_payloads=[
+            {
+                "output": {
+                    "task_status": "SUCCEEDED",
+                    "results": [{"url": "http://127.0.0.1/evil.png"}],
+                }
+            }
+        ],
+    )
+    plugin = make_dashscope_plugin(monkeypatch, tmp_path, client)
+
+    result = await plugin.generate_image(prompt="一只猫")
+
+    assert result.is_err()
+    assert "不安全" in str(result.error)
