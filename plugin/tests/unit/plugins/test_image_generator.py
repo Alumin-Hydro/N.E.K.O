@@ -18,9 +18,10 @@ from typing import Any
 
 import httpx
 import pytest
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from Cryptodome.Cipher import AES as _CD_AES
+from Cryptodome.Cipher import PKCS1_OAEP as _CD_PKCS1_OAEP
+from Cryptodome.Hash import SHA256 as _CD_SHA256
+from Cryptodome.PublicKey import RSA as _CD_RSA
 from fastapi import FastAPI
 from PIL import Image
 
@@ -387,28 +388,27 @@ def encrypt_save_document(
 ) -> str:
     key_id = envelope["key_id"]
     binding = f"image_generator:{key_id}".encode("utf-8")
-    public_key = serialization.load_der_public_key(
+    public_key = _CD_RSA.import_key(
         base64.b64decode(envelope["public_key_spki_b64"], validate=True)
     )
-    aes_key = AESGCM.generate_key(bit_length=256)
+    aes_key = b"\x2a" * 32
     iv = b"\x01\x23\x45\x67\x89\xab\xcd\xef\x10\x32\x54\x76"
-    wrapped_key = public_key.encrypt(
-        aes_key,
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-            algorithm=hashes.SHA256(),
-            label=binding,
-        ),
-    )
-    ciphertext = AESGCM(aes_key).encrypt(
-        iv,
+    wrapped_key = _CD_PKCS1_OAEP.new(
+        public_key,
+        hashAlgo=_CD_SHA256,
+        label=binding,
+    ).encrypt(aes_key)
+    gcm = _CD_AES.new(aes_key, _CD_AES.MODE_GCM, nonce=iv)
+    gcm.update(binding)
+    body, tag = gcm.encrypt_and_digest(
         json.dumps(
             document,
             ensure_ascii=False,
             separators=(",", ":"),
-        ).encode("utf-8"),
-        binding,
+        ).encode("utf-8")
     )
+    # WebCrypto AES-GCM appends the tag to the ciphertext.
+    ciphertext = body + tag
     outer = {
         "v": 1,
         "wrapped_key": base64.b64encode(wrapped_key).decode("ascii"),
@@ -1285,7 +1285,7 @@ async def test_generation_uses_one_end_to_end_timeout_budget(
     ("value", "expected"),
     [
         ("not-base64!", "Base64"),
-        (base64.b64encode(b"plain text").decode("ascii"), "损坏"),
+        (base64.b64encode(b"plain text").decode("ascii"), "不受支持"),
         ("data:text/plain;base64,SGVsbG8=", "数据 URL"),
     ],
 )
@@ -1314,7 +1314,7 @@ def test_decode_rejects_oversized_b64_before_returning_bytes() -> None:
         _decode_b64_image(oversized, max_bytes=1_024)
 
 
-def test_palette_png_transparency_survives_safe_reencoding() -> None:
+def test_palette_png_transparency_bytes_pass_through() -> None:
     source = Image.new("P", (2, 1))
     source.putpalette(
         [
@@ -1334,13 +1334,15 @@ def test_palette_png_transparency_survives_safe_reencoding() -> None:
         format="PNG",
         transparency=bytes([0, 128]),
     )
+    raw_bytes = raw.getvalue()
 
     sanitized, mime, extension = _decode_b64_image(
-        base64.b64encode(raw.getvalue()).decode("ascii"),
+        base64.b64encode(raw_bytes).decode("ascii"),
         max_bytes=1_000_000,
     )
 
     assert (mime, extension) == ("image/png", "png")
+    assert sanitized == raw_bytes
     with Image.open(io.BytesIO(sanitized)) as decoded:
         assert [pixel[3] for pixel in decoded.convert("RGBA").getdata()] == [0, 128]
 
@@ -1353,41 +1355,22 @@ def test_palette_png_transparency_survives_safe_reencoding() -> None:
         ("WEBP", "image/webp", "webp"),
     ],
 )
-def test_supported_image_formats_are_verified_and_reencoded(
+def test_supported_image_formats_are_verified(
     source_format: str,
     expected_mime: str,
     expected_extension: str,
 ) -> None:
     raw = io.BytesIO()
     Image.new("RGB", (7, 5), (91, 42, 173)).save(raw, format=source_format)
+    raw_bytes = raw.getvalue()
 
     sanitized, mime, extension = _decode_b64_image(
-        base64.b64encode(raw.getvalue()).decode("ascii"),
+        base64.b64encode(raw_bytes).decode("ascii"),
         max_bytes=1_000_000,
     )
 
     assert (mime, extension) == (expected_mime, expected_extension)
-    with Image.open(io.BytesIO(sanitized)) as decoded:
-        assert decoded.format == source_format
-        decoded.load()
-
-
-def test_jpeg_exif_orientation_is_applied_before_metadata_is_removed() -> None:
-    source = Image.new("RGB", (2, 3), (24, 116, 207))
-    exif = Image.Exif()
-    exif[274] = 6
-    raw = io.BytesIO()
-    source.save(raw, format="JPEG", exif=exif)
-
-    sanitized, mime, extension = _decode_b64_image(
-        base64.b64encode(raw.getvalue()).decode("ascii"),
-        max_bytes=1_000_000,
-    )
-
-    assert (mime, extension) == ("image/jpeg", "jpg")
-    with Image.open(io.BytesIO(sanitized)) as decoded:
-        assert decoded.size == (3, 2)
-        assert decoded.getexif().get(274) is None
+    assert sanitized == raw_bytes
 
 
 @pytest.mark.asyncio

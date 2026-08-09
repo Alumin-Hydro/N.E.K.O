@@ -20,7 +20,6 @@ import os
 import re
 import threading
 import time
-import warnings
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta, timezone
@@ -32,19 +31,20 @@ from uuid import uuid4
 import httpx
 
 try:
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import padding, rsa
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    # The Steam frozen runtime ships pycryptodomex (complete with pure-Python
+    # sources) but strips cryptography/Pillow down to extension stubs without
+    # their .py files, so `from cryptography...` / `from PIL import ...` fail
+    # there even though the host declares them as dependencies. pycryptodomex
+    # works in both the dev venv and the frozen build.
+    from Cryptodome.Cipher import AES as _CD_AES
+    from Cryptodome.Cipher import PKCS1_OAEP as _CD_PKCS1_OAEP
+    from Cryptodome.Hash import SHA256 as _CD_SHA256
+    from Cryptodome.PublicKey import RSA as _CD_RSA
 except ImportError:  # pragma: no cover - packaged dependency failure
-    AESGCM = None  # type: ignore[assignment,misc]
-    hashes = padding = rsa = serialization = None  # type: ignore[assignment]
-
-try:
-    from PIL import Image, ImageOps, UnidentifiedImageError
-except ImportError:  # pragma: no cover - packaged dependency failure
-    Image = None  # type: ignore[assignment]
-    ImageOps = None  # type: ignore[assignment]
-    UnidentifiedImageError = OSError  # type: ignore[assignment,misc]
+    _CD_AES = None  # type: ignore[assignment]
+    _CD_PKCS1_OAEP = None  # type: ignore[assignment]
+    _CD_SHA256 = None  # type: ignore[assignment]
+    _CD_RSA = None  # type: ignore[assignment]
 
 from plugin.sdk.plugin import (
     Err,
@@ -745,78 +745,179 @@ def _normalize_manifest_settings(raw: Any) -> dict[str, Any]:
     )
 
 
-def _require_image_dependency() -> None:
-    if Image is None or ImageOps is None:
+def _read_png_geometry(data: bytes) -> tuple[int, int, bool]:
+    """Return (width, height, animated) for a PNG byte string."""
+    if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n":
         raise _GenerationFailure(
-            "图片安全验证组件不可用，请重新安装插件依赖",
-            "ImageDependencyUnavailable",
+            "图片服务返回了损坏、截断或尺寸不安全的图片",
+            "InvalidImageData",
         )
+    ihdr_len = int.from_bytes(data[8:12], "big")
+    if ihdr_len != 13 or data[12:16] != b"IHDR":
+        raise _GenerationFailure(
+            "图片服务返回了损坏、截断或尺寸不安全的图片",
+            "InvalidImageData",
+        )
+    width = int.from_bytes(data[16:20], "big")
+    height = int.from_bytes(data[20:24], "big")
+    animated = b"acTL" in data[: min(len(data), 1_048_576)]
+    return width, height, animated
+
+
+_JPEG_SOF_MARKERS = frozenset(
+    {
+        0xC0,  # baseline
+        0xC1,  # extended sequential
+        0xC2,  # progressive
+        0xC3,  # lossless sequential
+        0xC5,
+        0xC6,
+        0xC7,
+        0xC9,
+        0xCA,
+        0xCB,
+        0xCD,
+        0xCE,
+        0xCF,
+    }
+)
+
+
+def _read_jpeg_geometry(data: bytes) -> tuple[int, int]:
+    """Return (width, height) for a JPEG byte string."""
+    if len(data) < 4 or data[:2] != b"\xff\xd8":
+        raise _GenerationFailure(
+            "图片服务返回了损坏、截断或尺寸不安全的图片",
+            "InvalidImageData",
+        )
+    offset = 2
+    limit = len(data)
+    while offset + 4 <= limit:
+        if data[offset] != 0xFF:
+            # Entropy-coded data or padding before the next marker; scan
+            # forward for the next 0xFF marker preamble.
+            next_marker = data.find(b"\xff", offset + 1)
+            if next_marker == -1:
+                break
+            offset = next_marker
+            continue
+        marker = data[offset + 1]
+        if marker in (0x00, 0xFF):
+            offset += 1
+            continue
+        if marker in (0x01,) or 0xD0 <= marker <= 0xD9:
+            offset += 2
+            continue
+        segment_length = int.from_bytes(data[offset + 2 : offset + 4], "big")
+        if segment_length < 2 or offset + 2 + segment_length > limit:
+            raise _GenerationFailure(
+                "图片服务返回了损坏、截断或尺寸不安全的图片",
+                "InvalidImageData",
+            )
+        if marker in _JPEG_SOF_MARKERS:
+            if segment_length < 7:
+                raise _GenerationFailure(
+                    "图片服务返回了损坏、截断或尺寸不安全的图片",
+                    "InvalidImageData",
+                )
+            height = int.from_bytes(data[offset + 5 : offset + 7], "big")
+            width = int.from_bytes(data[offset + 7 : offset + 9], "big")
+            return width, height
+        offset += 2 + segment_length
+    raise _GenerationFailure(
+        "图片服务返回了损坏、截断或尺寸不安全的图片",
+        "InvalidImageData",
+    )
+
+
+def _read_webp_geometry(data: bytes) -> tuple[int, int, bool]:
+    """Return (width, height, animated) for a WebP byte string."""
+    if len(data) < 30 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        raise _GenerationFailure(
+            "图片服务返回了损坏、截断或尺寸不安全的图片",
+            "InvalidImageData",
+        )
+    chunk = data[12:16]
+    animated = False
+    if chunk == b"VP8X":
+        if len(data) < 30:
+            raise _GenerationFailure(
+                "图片服务返回了损坏、截断或尺寸不安全的图片",
+                "InvalidImageData",
+            )
+        flags = data[20]
+        animated = bool(flags & 0x02)
+        width = 1 + int.from_bytes(data[24:27], "little")
+        height = 1 + int.from_bytes(data[27:30], "little")
+        return width, height, animated
+    if chunk == b"VP8L":
+        if len(data) < 25:
+            raise _GenerationFailure(
+                "图片服务返回了损坏、截断或尺寸不安全的图片",
+                "InvalidImageData",
+            )
+        bits = int.from_bytes(data[21:25], "little")
+        width = (bits & 0x3FFF) + 1
+        height = ((bits >> 14) & 0x3FFF) + 1
+        return width, height, animated
+    if chunk == b"VP8 ":
+        if len(data) < 30:
+            raise _GenerationFailure(
+                "图片服务返回了损坏、截断或尺寸不安全的图片",
+                "InvalidImageData",
+            )
+        # Frame tag (3 bytes) + start code (3 bytes) precede dimensions.
+        if data[23:26] != b"\x9d\x01\x2a":
+            raise _GenerationFailure(
+                "图片服务返回了损坏、截断或尺寸不安全的图片",
+                "InvalidImageData",
+            )
+        width = int.from_bytes(data[26:28], "little") & 0x3FFF
+        height = int.from_bytes(data[28:30], "little") & 0x3FFF
+        return width, height, animated
+    raise _GenerationFailure(
+        "图片服务返回了损坏、截断或尺寸不安全的图片",
+        "InvalidImageData",
+    )
 
 
 def _verified_image_format(data: bytes) -> str:
-    _require_image_dependency()
     if not data:
         raise _GenerationFailure(
             "图片服务返回了空图片",
             "InvalidImageData",
         )
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(data)) as image:
-                image_format = str(image.format or "").upper()
-                width, height = image.size
-                if image_format not in _SUPPORTED_IMAGE_FORMATS:
-                    raise _GenerationFailure(
-                        "图片服务返回的图片格式不受支持；仅允许 PNG、JPEG 或 WebP",
-                        "UnsupportedImageFormat",
-                    )
-                if (
-                    width < 1
-                    or height < 1
-                    or width > _MAX_IMAGE_DIMENSION
-                    or height > _MAX_IMAGE_DIMENSION
-                    or width * height > _MAX_IMAGE_PIXELS
-                ):
-                    raise _GenerationFailure(
-                        "生成图片的尺寸或像素数量超过安全上限",
-                        "ImagePixelLimit",
-                    )
-                if int(getattr(image, "n_frames", 1) or 1) != 1:
-                    raise _GenerationFailure(
-                        "暂不支持动画图片",
-                        "AnimatedImageUnsupported",
-                    )
-                image.verify()
-            with Image.open(io.BytesIO(data)) as decoded:
-                width, height = decoded.size
-                if (
-                    width < 1
-                    or height < 1
-                    or width > _MAX_IMAGE_DIMENSION
-                    or height > _MAX_IMAGE_DIMENSION
-                    or width * height > _MAX_IMAGE_PIXELS
-                ):
-                    raise _GenerationFailure(
-                        "生成图片的尺寸或像素数量超过安全上限",
-                        "ImagePixelLimit",
-                    )
-                decoded.seek(0)
-                decoded.load()
-    except _GenerationFailure:
-        raise
-    except (
-        Image.DecompressionBombError,
-        Image.DecompressionBombWarning,
-        UnidentifiedImageError,
-        OSError,
-        SyntaxError,
-        ValueError,
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        image_format = "PNG"
+        width, height, animated = _read_png_geometry(data)
+    elif data[:2] == b"\xff\xd8":
+        image_format = "JPEG"
+        width, height = _read_jpeg_geometry(data)
+        animated = False
+    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        image_format = "WEBP"
+        width, height, animated = _read_webp_geometry(data)
+    else:
+        raise _GenerationFailure(
+            "图片服务返回的图片格式不受支持；仅允许 PNG、JPEG 或 WebP",
+            "UnsupportedImageFormat",
+        )
+    if (
+        width < 1
+        or height < 1
+        or width > _MAX_IMAGE_DIMENSION
+        or height > _MAX_IMAGE_DIMENSION
+        or width * height > _MAX_IMAGE_PIXELS
     ):
         raise _GenerationFailure(
-            "图片服务返回了损坏、截断或尺寸不安全的图片",
-            "InvalidImageData",
-        ) from None
+            "生成图片的尺寸或像素数量超过安全上限",
+            "ImagePixelLimit",
+        )
+    if animated:
+        raise _GenerationFailure(
+            "暂不支持动画图片",
+            "AnimatedImageUnsupported",
+        )
     return image_format
 
 
@@ -836,60 +937,8 @@ def _sanitize_image(
             "ImageTooLarge",
         )
     image_format = _verified_image_format(data)
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(data)) as image:
-                image.seek(0)
-                image.load()
-                output = io.BytesIO()
-                if image_format == "JPEG":
-                    sanitized = ImageOps.exif_transpose(image).convert("RGB")
-                    sanitized.save(
-                        output,
-                        format="JPEG",
-                        quality=95,
-                        optimize=False,
-                    )
-                elif image_format == "WEBP":
-                    mode = "RGBA" if "A" in image.getbands() else "RGB"
-                    sanitized = image.convert(mode)
-                    sanitized.save(
-                        output,
-                        format="WEBP",
-                        quality=95,
-                        method=4,
-                    )
-                else:
-                    has_transparency = (
-                        "A" in image.getbands()
-                        or image.info.get("transparency") is not None
-                    )
-                    mode = "RGBA" if has_transparency else "RGB"
-                    sanitized = image.convert(mode)
-                    sanitized.save(
-                        output,
-                        format="PNG",
-                        compress_level=6,
-                    )
-        result = output.getvalue()
-    except (
-        Image.DecompressionBombError,
-        Image.DecompressionBombWarning,
-        OSError,
-        ValueError,
-    ):
-        raise _GenerationFailure(
-            "无法安全处理图片内容",
-            "ImageSanitizationError",
-        ) from None
-    if not result or len(result) > max_bytes:
-        raise _GenerationFailure(
-            "安全处理后的图片超过了配置的最大字节数",
-            "ImageTooLarge",
-        )
     mime, extension = _SUPPORTED_IMAGE_FORMATS[image_format]
-    return result, mime, extension
+    return data, mime, extension
 
 
 def _decode_b64_image(value: Any, *, max_bytes: int) -> tuple[bytes, str, str]:
@@ -1547,14 +1596,13 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 "failure_class=SecretInSettings"
             )
         dependencies_available = (
-            Image is not None
-            and ImageOps is not None
-            and rsa is not None
-            and serialization is not None
-            and AESGCM is not None
+            _CD_RSA is not None
+            and _CD_PKCS1_OAEP is not None
+            and _CD_SHA256 is not None
+            and _CD_AES is not None
         )
         if not dependencies_available:
-            configuration_warning = "图片验证或密钥加密组件不可用；请重新安装插件依赖"
+            configuration_warning = "密钥加密组件不可用；请重新安装插件依赖"
             with self._state_lock:
                 self._configuration_warning = configuration_warning
         configured = bool(key)
@@ -1745,24 +1793,16 @@ class ImageGeneratorPlugin(NekoPluginBase):
 
     async def _issue_secret_envelope(self) -> dict[str, Any]:
         if (
-            rsa is None
-            or serialization is None
-            or hashes is None
-            or padding is None
-            or AESGCM is None
+            _CD_RSA is None
+            or _CD_PKCS1_OAEP is None
+            or _CD_SHA256 is None
+            or _CD_AES is None
         ):
             raise SdkError("密钥加密组件不可用，请重新安装插件依赖")
 
         try:
-            private_key = await asyncio.to_thread(
-                rsa.generate_private_key,
-                public_exponent=65537,
-                key_size=2048,
-            )
-            public_bytes = private_key.public_key().public_bytes(
-                encoding=serialization.Encoding.DER,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo,
-            )
+            private_key = await asyncio.to_thread(_CD_RSA.generate, 2048)
+            public_bytes = private_key.public_key().export_key(format="DER")
             key_id = uuid4().hex
             now = time.monotonic()
             expires_at = datetime.now(timezone.utc) + timedelta(
@@ -1841,21 +1881,19 @@ class ImageGeneratorPlugin(NekoPluginBase):
             binding = f"image_generator:{key_id}".encode("utf-8")
 
             def decrypt_payload() -> bytes:
-                aes_key = private_key.decrypt(
-                    wrapped_key,
-                    padding.OAEP(
-                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                        algorithm=hashes.SHA256(),
-                        label=binding,
-                    ),
+                oaep = _CD_PKCS1_OAEP.new(
+                    private_key,
+                    hashAlgo=_CD_SHA256,
+                    label=binding,
                 )
+                aes_key = oaep.decrypt(wrapped_key)
                 if len(aes_key) != 32:
                     raise ValueError
-                return AESGCM(aes_key).decrypt(
-                    iv,
-                    ciphertext,
-                    binding,
-                )
+                # WebCrypto AES-GCM appends the 16-byte tag to the ciphertext.
+                body, tag = ciphertext[:-16], ciphertext[-16:]
+                cipher = _CD_AES.new(aes_key, _CD_AES.MODE_GCM, nonce=iv)
+                cipher.update(binding)
+                return cipher.decrypt_and_verify(body, tag)
 
             plaintext = await asyncio.to_thread(decrypt_payload)
             if len(plaintext) > _ENCRYPTED_DOCUMENT_MAX_BYTES:
