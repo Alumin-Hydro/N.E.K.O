@@ -266,3 +266,189 @@ def test_llm_tool_metadata() -> None:
     meta = getattr(MemeManagerPlugin.meme_send, LLM_TOOL_META_ATTR, None)
     assert meta is not None
     assert getattr(meta, "name", None) == "meme_send"
+
+
+# ---------------------------------------------------------------------------
+# One-click tag generation (vision model)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tagger_settings_roundtrip_and_key_keep(tmp_path, monkeypatch) -> None:
+    plugin = _make_plugin(tmp_path, monkeypatch)
+
+    saved = await plugin.save_tagger_settings(
+        api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        api_key="sk-test-key",
+        model="qwen-vl-plus",
+    )
+    assert saved.is_ok()
+    assert saved.value["key_configured"] is True
+
+    # Empty key on a later save keeps the stored one.
+    saved2 = await plugin.save_tagger_settings(model="qwen-vl-max", api_key="")
+    assert saved2.is_ok()
+    cfg = plugin._tagger_config()
+    assert cfg["model"] == "qwen-vl-max"
+    assert cfg["api_key"] == "sk-test-key"
+
+    state = await plugin.get_panel_state()
+    assert state.is_ok()
+    assert state.value["tagger"]["key_configured"] is True
+    assert state.value["tagger"]["model"] == "qwen-vl-max"
+    # Secret must not leak into the panel payload.
+    assert "sk-test-key" not in str(state.value["tagger"])
+
+
+@pytest.mark.asyncio
+async def test_tagger_settings_rejects_insecure_base(tmp_path, monkeypatch) -> None:
+    plugin = _make_plugin(tmp_path, monkeypatch)
+    result = await plugin.save_tagger_settings(
+        api_base="http://evil.example.com/v1", model="x"
+    )
+    assert result.is_err()
+    assert "https" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_generate_tags_requires_key(tmp_path, monkeypatch) -> None:
+    plugin = _make_plugin(tmp_path, monkeypatch)
+    meme_dir = tmp_path / "static" / "memes"
+    meme_dir.mkdir(parents=True)
+    plugin._meme_dir = meme_dir
+    added = await plugin.add_meme(
+        name="摸摸头", filename="pat.png", data_base64=_PNG, tags=[]
+    )
+    assert added.is_ok()
+    result = await plugin.generate_tags(meme_id=added.value["meme"]["id"])
+    assert result.is_err()
+    assert "密钥" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_generate_tags_merges_model_tags(tmp_path, monkeypatch) -> None:
+    plugin = _make_plugin(tmp_path, monkeypatch)
+    meme_dir = tmp_path / "static" / "memes"
+    meme_dir.mkdir(parents=True)
+    plugin._meme_dir = meme_dir
+    added = await plugin.add_meme(
+        name="摸摸头", filename="pat.png", data_base64=_PNG, tags=["安慰"]
+    )
+    assert added.is_ok()
+    meme_id = added.value["meme"]["id"]
+    await plugin.save_tagger_settings(api_key="sk-test", model="vision-x")
+
+    captured: dict[str, Any] = {}
+
+    async def fake_request(*, cfg, mime, data):
+        captured["cfg"] = dict(cfg)
+        captured["mime"] = mime
+        captured["data"] = data
+        return ["猫猫", "摸头", "安慰"]
+
+    monkeypatch.setattr(plugin, "_request_tags_for_image", fake_request)
+    result = await plugin.generate_tags(meme_id=meme_id)
+
+    assert result.is_ok()
+    assert result.value["added_tags"] == ["猫猫", "摸头", "安慰"]
+    # Existing tag kept, new merged, duplicates removed.
+    assert result.value["meme"]["tags"] == ["安慰", "猫猫", "摸头"]
+    # The stored image bytes really went to the model.
+    assert captured["data"] == base64.b64decode(_PNG)
+    assert captured["mime"] == "image/png"
+    assert captured["cfg"]["api_key"] == "sk-test"
+
+
+@pytest.mark.asyncio
+async def test_generate_tags_missing_meme(tmp_path, monkeypatch) -> None:
+    plugin = _make_plugin(tmp_path, monkeypatch)
+    await plugin.save_tagger_settings(api_key="sk-test", model="vision-x")
+    result = await plugin.generate_tags(meme_id="meme-nonexistent")
+    assert result.is_err()
+    assert "没有找到" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_request_tags_parses_fenced_json(tmp_path, monkeypatch) -> None:
+    plugin = _make_plugin(tmp_path, monkeypatch)
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '```json\n["猫猫", "疑惑", "挠头"]\n```'
+                        }
+                    }
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url: str, **kwargs: Any) -> FakeResponse:
+            assert url.endswith("/chat/completions")
+            assert kwargs["headers"]["Authorization"] == "Bearer sk-test"
+            # Image went inline as a data URL.
+            content = kwargs["json"]["messages"][0]["content"]
+            assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+            return FakeResponse()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    tags = await plugin._request_tags_for_image(
+        cfg={
+            "api_base": "https://api.example.com/v1",
+            "api_key": "sk-test",
+            "model": "vision-x",
+        },
+        mime="image/png",
+        data=base64.b64decode(_PNG),
+    )
+    assert tags == ["猫猫", "疑惑", "挠头"]
+
+
+@pytest.mark.asyncio
+async def test_request_tags_human_errors(tmp_path, monkeypatch) -> None:
+    plugin = _make_plugin(tmp_path, monkeypatch)
+
+    class FakeResponse:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+
+        def json(self) -> dict[str, Any]:
+            return {}
+
+    class FakeClient:
+        def __init__(self, status_code: int) -> None:
+            self._status = status_code
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, *args: Any, **kwargs: Any) -> FakeResponse:
+            return FakeResponse(self._status)
+
+    import httpx
+
+    cfg = {"api_base": "https://x/v1", "api_key": "sk", "model": "m"}
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: FakeClient(401))
+    with pytest.raises(SdkError, match="密钥无效"):
+        await plugin._request_tags_for_image(cfg=cfg, mime="image/png", data=b"x")
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: FakeClient(404))
+    with pytest.raises(SdkError, match="模型名"):
+        await plugin._request_tags_for_image(cfg=cfg, mime="image/png", data=b"x")

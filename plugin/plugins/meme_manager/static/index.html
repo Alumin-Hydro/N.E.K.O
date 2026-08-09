@@ -410,6 +410,31 @@ dialog::backdrop { background: rgba(36, 26, 20, .45); backdrop-filter: blur(3px)
       正在读取上限。上传图片只接受受支持格式，并由后端再次校验内容、大小和安全路径。
     </p>
   </details>
+
+  <details id="taggerSection">
+    <summary data-i18n="taggerSummary">一键生成标签（视觉模型）</summary>
+    <p class="limits" data-i18n="taggerHelp">
+      懒得手写标签时，可以让视觉模型看图自动生成。填入你自己的模型服务信息即可；密钥只保存在本机插件数据里，不会展示。
+    </p>
+    <div class="form-row">
+      <label for="taggerModel" data-i18n="taggerModel">模型名</label>
+      <input id="taggerModel" class="field" type="text" maxlength="100" placeholder="gpt-4o-mini">
+    </div>
+    <div class="form-row">
+      <label for="taggerKey" data-i18n="taggerKey">API 密钥</label>
+      <input id="taggerKey" class="field" type="password" maxlength="200" placeholder="sk-...">
+      <p id="taggerKeyState" class="form-help"></p>
+    </div>
+    <details class="tagger-advanced">
+      <summary data-i18n="taggerAdvanced">高级：自定义 API 地址</summary>
+      <div class="form-row">
+        <label for="taggerBase">API 地址</label>
+        <input id="taggerBase" class="field" type="text" maxlength="200" placeholder="https://api.openai.com/v1">
+        <p class="form-help">任何兼容 OpenAI chat/completions 的视觉模型服务都可以；一般保持默认即可。</p>
+      </div>
+    </details>
+    <button id="saveTaggerBtn" class="btn" type="button" data-i18n="taggerSave">保存模型设置</button>
+  </details>
 </main>
 
 <dialog id="memeDialog" aria-labelledby="dialogTitle">
@@ -653,7 +678,17 @@ function normalizePanelState(rawState) {
       ? Number(state.max_image_bytes)
       : 2 * 1024 * 1024,
     storeReady: state.store_ready !== false,
+    tagger: normalizeTagger(state.tagger),
     catalog,
+  };
+}
+
+function normalizeTagger(raw) {
+  const obj = raw && typeof raw === "object" ? raw : {};
+  return {
+    apiBase: typeof obj.api_base === "string" ? obj.api_base : "",
+    model: typeof obj.model === "string" ? obj.model : "",
+    keyConfigured: obj.key_configured === true,
   };
 }
 
@@ -906,6 +941,11 @@ function bindElements() {
     tagsInput: document.getElementById("tagsInput"),
     cancelDialog: document.getElementById("cancelDialog"),
     saveMemeBtn: document.getElementById("saveMemeBtn"),
+    taggerModel: document.getElementById("taggerModel"),
+    taggerKey: document.getElementById("taggerKey"),
+    taggerKeyState: document.getElementById("taggerKeyState"),
+    taggerBase: document.getElementById("taggerBase"),
+    saveTaggerBtn: document.getElementById("saveTaggerBtn"),
     toast: document.getElementById("toast"),
   };
 }
@@ -1113,10 +1153,14 @@ function createUserMemeCard(rawMeme, index = 0) {
   const toggle = actionButton(meme.enabled ? "禁用" : "启用", meme.enabled ? "disable" : "enable");
   const edit = actionButton("编辑", "edit");
   const remove = actionButton("删除", "delete", "danger");
+  const taggerReady = Boolean(panelState && panelState.tagger && panelState.tagger.keyConfigured);
+  const autoTag = actionButton("一键生成标签", "autotag");
   const storeReady = panelState ? panelState.storeReady : true;
   toggle.disabled = !storeReady;
   edit.disabled = !storeReady;
   remove.disabled = !storeReady;
+  autoTag.disabled = !storeReady || !taggerReady;
+  autoTag.title = taggerReady ? "" : "先在下方「一键生成标签」里保存视觉模型密钥";
 
   toggle.addEventListener("click", () => {
     const action = meme.enabled ? "disable" : "enable";
@@ -1135,7 +1179,27 @@ function createUserMemeCard(rawMeme, index = 0) {
     mutateUserMeme(meme, "delete", `已删除用户上传「${meme.name}」，系统默认来源保持不变。`)
       .catch(() => {});
   });
-  actions.append(toggle, edit, remove);
+  autoTag.addEventListener("click", async () => {
+    autoTag.disabled = true;
+    autoTag.textContent = "生成中…";
+    try {
+      const result = await callEntry("generate_tags", { meme_id: meme.id }, 60000);
+      const added = Array.isArray(result.added_tags) ? result.added_tags : [];
+      feedback(
+        added.length
+          ? `已为「${meme.name}」生成标签：${added.join(" · ")}`
+          : (result.message || "标签已生成。"),
+        "success",
+      );
+      await refreshPanel();
+    } catch (error) {
+      feedback(readableError(error, "生成标签失败，请稍后重试"), "error");
+    } finally {
+      autoTag.disabled = false;
+      autoTag.textContent = "一键生成标签";
+    }
+  });
+  actions.append(toggle, edit, autoTag, remove);
   body.append(meta, name, tags, actions);
   card.append(preview, body);
   return card;
@@ -1172,6 +1236,39 @@ function renderPanel(state) {
     "后端会校验 MIME、文件内容、尺寸与安全路径",
     "系统默认网络来源只做只读桥接，不会复制为可信本地文件",
   ].join(" · ");
+
+  if (elements.taggerModel && document.activeElement !== elements.taggerModel) {
+    elements.taggerModel.value = state.tagger.model || "";
+  }
+  if (elements.taggerBase && document.activeElement !== elements.taggerBase) {
+    elements.taggerBase.value = state.tagger.apiBase || "";
+  }
+  if (elements.taggerKeyState) {
+    elements.taggerKeyState.textContent = state.tagger.keyConfigured
+      ? "密钥已保存；输入新密钥可覆盖，留空则保持不变。"
+      : "还没有保存密钥；一键生成标签按钮会保持不可用。";
+  }
+}
+
+async function saveTaggerSettings() {
+  if (!elements?.saveTaggerBtn) return;
+  elements.saveTaggerBtn.disabled = true;
+  try {
+    const args = {
+      model: elements.taggerModel.value.trim(),
+      api_base: elements.taggerBase.value.trim(),
+    };
+    const typedKey = elements.taggerKey.value.trim();
+    if (typedKey) args.api_key = typedKey;
+    const result = await callEntry("save_tagger_settings", args, 10000);
+    elements.taggerKey.value = "";
+    feedback(result.message || "标签生成模型已保存。", "success");
+    await refreshPanel({ announce: false });
+  } catch (error) {
+    feedback(readableError(error, "保存标签生成设置失败"), "error");
+  } finally {
+    elements.saveTaggerBtn.disabled = false;
+  }
 }
 
 async function refreshPanel({ announce = true } = {}) {
@@ -1493,6 +1590,7 @@ function registerEvents() {
     elements.dirInput.click();
   });
   elements.restoreBtn.addEventListener("click", restoreDefaults);
+  elements.saveTaggerBtn.addEventListener("click", saveTaggerSettings);
   elements.tryBtn.addEventListener("click", tryMeme);
   elements.tryQuery.addEventListener("keydown", (event) => {
     if (event.key === "Enter") tryMeme();

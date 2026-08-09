@@ -902,7 +902,12 @@ class MemeManagerPlugin(NekoPluginBase):
             normalized = self._normalize_meme(item)
             if normalized is not None:
                 memes.append(normalized)
-        return {"memes": memes}
+        library: dict[str, Any] = {"memes": memes}
+        # Preserve non-meme sections (e.g. the vision tagger config) verbatim.
+        tagger = raw.get("tagger")
+        if isinstance(tagger, Mapping):
+            library["tagger"] = dict(tagger)
+        return library
 
     def _save_library(self, library: Mapping[str, Any]) -> None:
         if not self.store.enabled:
@@ -910,7 +915,11 @@ class MemeManagerPlugin(NekoPluginBase):
         raw_memes = library.get("memes")
         if not isinstance(raw_memes, list):
             raise SdkError("表情包目录数据无效")
-        self.store._write_value(_STORE_KEY, {"memes": raw_memes})
+        payload: dict[str, Any] = {"memes": raw_memes}
+        tagger = library.get("tagger")
+        if isinstance(tagger, Mapping):
+            payload["tagger"] = dict(tagger)
+        self.store._write_value(_STORE_KEY, payload)
 
     def _asset_path(self, stored_name: Any) -> Path:
         if self._meme_dir is None:
@@ -1010,6 +1019,7 @@ class MemeManagerPlugin(NekoPluginBase):
                 )
                 total = len(library["memes"])
             system_sources = _system_sources()
+            tagger = self._tagger_config()
             return Ok(
                 {
                     "system_sources": system_sources,
@@ -1023,6 +1033,11 @@ class MemeManagerPlugin(NekoPluginBase):
                     "max_image_bytes": _MAX_IMAGE_BYTES,
                     "max_image_dimension": _MAX_IMAGE_DIMENSION,
                     "store_ready": bool(self.store.enabled),
+                    "tagger": {
+                        "api_base": tagger["api_base"],
+                        "model": tagger["model"],
+                        "key_configured": bool(tagger["api_key"]),
+                    },
                     "status_message": (
                         "系统默认来源已接入（在线按需搜索）；用户上传会持久保存。"
                         if self.store.enabled
@@ -1372,6 +1387,262 @@ class MemeManagerPlugin(NekoPluginBase):
             return Err(SdkError("恢复系统默认目录失败"))
 
     # ------------------------------------------------------------------
+    # Vision-model "one-click tag generation"
+    #
+    # Users who don't want to hand-write tags can point the plugin at any
+    # OpenAI-compatible vision chat endpoint (their own API key). The plugin
+    # sends the stored image inline and asks for a small JSON tag list, then
+    # merges the result into that meme's tags. Secrets stay server-side and
+    # are never echoed into results/logs.
+    # ------------------------------------------------------------------
+
+    _TAGGER_DEFAULT_BASE = "https://api.openai.com/v1"
+    _TAGGER_DEFAULT_MODEL = "gpt-4o-mini"
+
+    def _tagger_config(self) -> dict[str, str]:
+        with self._library_lock:
+            library = self._load_library()
+        raw = library.get("tagger")
+        cfg = raw if isinstance(raw, Mapping) else {}
+        base = str(cfg.get("api_base") or "").strip() or self._TAGGER_DEFAULT_BASE
+        model = str(cfg.get("model") or "").strip() or self._TAGGER_DEFAULT_MODEL
+        return {
+            "api_base": base.rstrip("/"),
+            "api_key": str(cfg.get("api_key") or "").strip(),
+            "model": model,
+        }
+
+    def _save_tagger_config(self, cfg: Mapping[str, str]) -> None:
+        with self._library_lock:
+            library = self._load_library()
+            library["tagger"] = {
+                "api_base": str(cfg.get("api_base") or "").rstrip("/"),
+                "api_key": str(cfg.get("api_key") or "").strip(),
+                "model": str(cfg.get("model") or "").strip(),
+            }
+            self._save_library(library)
+
+    @plugin_entry(
+        id="save_tagger_settings",
+        name="保存标签生成模型设置",
+        description="保存用于一键生成标签的视觉模型连接信息（API 地址、密钥、模型名）。",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_base": {"type": "string", "maxLength": 200},
+                "api_key": {"type": "string", "maxLength": 200},
+                "model": {"type": "string", "maxLength": 100},
+            },
+            "additionalProperties": False,
+        },
+        timeout=10.0,
+    )
+    async def save_tagger_settings(
+        self,
+        api_base: Any = None,
+        api_key: Any = None,
+        model: Any = None,
+        **_: Any,
+    ):
+        try:
+            current = self._tagger_config()
+            new_cfg = {
+                "api_base": (
+                    _clean_text(api_base, 200)
+                    if api_base is not None
+                    else current["api_base"]
+                ),
+                # Empty string = keep existing key; panel sends the key only
+                # when the user actually typed a new one.
+                "api_key": (
+                    str(api_key).strip()
+                    if api_key is not None and str(api_key).strip()
+                    else current["api_key"]
+                ),
+                "model": (
+                    _clean_text(model, 100)
+                    if model is not None
+                    else current["model"]
+                ),
+            }
+            base = new_cfg["api_base"] or self._TAGGER_DEFAULT_BASE
+            if not base.startswith(("https://", "http://127.0.0.1", "http://localhost")):
+                raise SdkError("API 地址必须是 https（本机可用 http）")
+            new_cfg["api_base"] = base
+            if not new_cfg["model"]:
+                raise SdkError("模型名不能为空")
+            self._save_tagger_config(new_cfg)
+            return Ok(
+                {
+                    "saved": True,
+                    "api_base": new_cfg["api_base"],
+                    "model": new_cfg["model"],
+                    "key_configured": bool(new_cfg["api_key"]),
+                    "message": "标签生成模型已保存。",
+                }
+            )
+        except SdkError as exc:
+            return Err(exc)
+        except Exception as exc:
+            self.logger.warning("meme_manager tagger settings failed: {}", exc)
+            return Err(SdkError("保存标签生成设置失败"))
+
+    async def _request_tags_for_image(
+        self,
+        *,
+        cfg: Mapping[str, str],
+        mime: str,
+        data: bytes,
+    ) -> list[str]:
+        """Call the user's vision model and return a clean tag list.
+
+        Raises SdkError with a human-actionable message on any failure."""
+        import json as _json
+
+        import httpx
+
+        if not cfg.get("api_key"):
+            raise SdkError("还没有配置视觉模型密钥；请先在面板里保存")
+        b64 = base64.b64encode(data).decode("ascii")
+        payload = {
+            "model": cfg["model"],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "给这张表情包图片生成 3-8 个简短检索标签。"
+                                "标签用来按关键词搜到它，覆盖：画面主体、情绪/含义、"
+                                "常见使用场景、图上文字（如有）。"
+                                "只返回 JSON 数组，例如 [\"猫猫\",\"疑惑\",\"挠头\"]，不要解释。"
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{b64}"},
+                        },
+                    ],
+                }
+            ],
+            "max_tokens": 200,
+        }
+        url = f"{cfg['api_base']}/chat/completions"
+        try:
+            async with httpx.AsyncClient(timeout=45.0, trust_env=True) as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {cfg['api_key']}"},
+                    json=payload,
+                )
+        except Exception as exc:
+            raise SdkError("连不上标签生成服务；请检查网络或 API 地址") from exc
+        if response.status_code in {401, 403}:
+            raise SdkError("视觉模型密钥无效或没有权限；请检查后重新保存")
+        if response.status_code == 404:
+            raise SdkError("这个模型名不存在或不支持图片输入；请检查模型设置")
+        if response.status_code >= 400:
+            raise SdkError(f"标签生成服务出错（HTTP {response.status_code}）")
+        try:
+            body = response.json()
+            content = body["choices"][0]["message"]["content"]
+        except Exception as exc:
+            raise SdkError("标签生成服务返回了无法识别的内容") from exc
+        # Tolerate models that wrap the array in prose or a code fence.
+        match = re.search(r"\[[^\[\]]*\]", str(content), re.DOTALL)
+        if match is None:
+            raise SdkError("模型没有返回标签；请重试或更换模型")
+        try:
+            raw_tags = _json.loads(match.group(0))
+        except ValueError as exc:
+            raise SdkError("模型返回的标签格式不对；请重试") from exc
+        if not isinstance(raw_tags, list):
+            raise SdkError("模型返回的标签格式不对；请重试")
+        tags = _clean_tags([str(item) for item in raw_tags])
+        if not tags:
+            raise SdkError("模型没有给出可用标签；请重试")
+        return tags[:8]
+
+    @plugin_entry(
+        id="generate_tags",
+        name="一键生成标签",
+        description=(
+            "用用户配置的视觉模型为一张用户上传的表情包自动生成检索标签并合并保存。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"meme_id": {"type": "string", "maxLength": 64}},
+            "required": ["meme_id"],
+            "additionalProperties": False,
+        },
+        timeout=60.0,
+    )
+    async def generate_tags(self, meme_id: Any = "", **_: Any):
+        try:
+            meme_id_text = _clean_text(meme_id, 64)
+            if not meme_id_text:
+                raise SdkError("缺少 meme_id")
+            cfg = self._tagger_config()
+            if not cfg["api_key"]:
+                raise SdkError("还没有配置视觉模型密钥；请先在面板里保存")
+
+            with self._library_lock:
+                library = self._load_library()
+                target = next(
+                    (
+                        item
+                        for item in library["memes"]
+                        if item.get("id") == meme_id_text
+                    ),
+                    None,
+                )
+                if target is None:
+                    raise SdkError("没有找到这张用户上传表情包")
+                snapshot = dict(target)
+
+            asset = self._asset_path(snapshot.get("stored_name"))
+            try:
+                data = asset.read_bytes()
+            except OSError as exc:
+                raise SdkError("读取表情包文件失败") from exc
+            mime = str(snapshot.get("mime") or "image/png")
+
+            new_tags = await self._request_tags_for_image(cfg=cfg, mime=mime, data=data)
+
+            with self._library_lock:
+                library = self._load_library()
+                target = next(
+                    (
+                        item
+                        for item in library["memes"]
+                        if item.get("id") == meme_id_text
+                    ),
+                    None,
+                )
+                if target is None:
+                    raise SdkError("这张表情包在生成过程中被移除了")
+                merged = list(dict.fromkeys([*(target.get("tags") or []), *new_tags]))
+                target["tags"] = merged[:_MAX_TAGS]
+                self._save_library(library)
+                updated = self._public_user_item(target)
+
+            return Ok(
+                {
+                    "updated": True,
+                    "meme_id": meme_id_text,
+                    "added_tags": new_tags,
+                    "meme": updated,
+                    "message": f"已为「{snapshot.get('name')}」生成 {len(new_tags)} 个标签。",
+                }
+            )
+        except SdkError as exc:
+            return Err(exc)
+        except Exception as exc:
+            self.logger.warning("meme_manager generate tags failed: {}", exc)
+            return Err(SdkError("生成标签失败，请稍后重试"))
+
+    # ------------------------------------------------------------------
     # System source bridge and LLM capability
     # ------------------------------------------------------------------
 
@@ -1488,6 +1759,37 @@ class MemeManagerPlugin(NekoPluginBase):
             self.logger.warning("meme_manager push failed: {}", exc)
             return False
 
+    def _send_image(
+        self,
+        url: str,
+        *,
+        alt: str,
+        width: Any = None,
+        height: Any = None,
+        fallback_markdown: str | None = None,
+    ) -> bool:
+        """Push a native image part so the chat renderer can use its
+        aspect-ratio path; fall back to Markdown text for hosts that reject
+        image parts (older runtime)."""
+        part: dict[str, Any] = {"type": "image", "url": url, "alt": alt}
+        try:
+            w = int(width) if width is not None else 0
+            h = int(height) if height is not None else 0
+        except (TypeError, ValueError):
+            w, h = 0, 0
+        if w > 0 and h > 0:
+            part["width"], part["height"] = w, h
+        try:
+            self.push_message(
+                visibility=["chat"],
+                ai_behavior="blind",
+                parts=[part],
+            )
+            return True
+        except Exception as exc:
+            self.logger.warning("meme_manager image push failed: {}", exc)
+        return self._send_markdown(fallback_markdown or f"![{alt}]({url})")
+
     def _user_send_result(
         self,
         meme: Mapping[str, Any],
@@ -1497,7 +1799,13 @@ class MemeManagerPlugin(NekoPluginBase):
     ) -> dict[str, Any]:
         url = _public_url(meme)
         markdown = f"![{_markdown_alt(meme.get('name'))}]({url})"
-        sent = self._send_markdown(markdown)
+        sent = self._send_image(
+            url,
+            alt=_markdown_alt(meme.get("name")),
+            width=meme.get("width"),
+            height=meme.get("height"),
+            fallback_markdown=markdown,
+        )
         if fallback_reason:
             message = f"{fallback_reason}，改用用户上传的「{meme['name']}」。"
         elif exact_match:
@@ -1585,7 +1893,11 @@ class MemeManagerPlugin(NekoPluginBase):
             if candidate is not None:
                 proxy_url = _system_proxy_url(candidate["url"])
                 markdown = f"![{_markdown_alt(candidate['title'])}]({proxy_url})"
-                sent = self._send_markdown(markdown)
+                sent = self._send_image(
+                    proxy_url,
+                    alt=_markdown_alt(candidate["title"]),
+                    fallback_markdown=markdown,
+                )
                 source_name = candidate["source"] or "系统默认"
                 message = (
                     f"已从系统默认在线来源 {source_name} 找到「{candidate['title']}」。"
