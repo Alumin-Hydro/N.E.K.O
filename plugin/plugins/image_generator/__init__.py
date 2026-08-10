@@ -3923,6 +3923,14 @@ class ImageGeneratorPlugin(NekoPluginBase):
         description="使用当前配置立即生成一张测试图片；可能产生提供商费用。",
         input_schema=_TEST_GENERATION_SCHEMA,
         timeout=300.0,
+        # This entry exists ONLY for the management panel's "测试生成" button,
+        # which calls it directly via /runs. It must never be picked by the
+        # Agent's automatic task router — otherwise a user's "draw X" request
+        # gets dispatched here (auto_show_override=False) and the image is
+        # written to history without ever being pushed into the chat, which
+        # looks like "猫娘画了但没发出来". Hide it from agent routing; the
+        # panel's direct /runs call is unaffected.
+        metadata={"agent_hidden": True},
     )
     async def test_generation(self, prompt: str, **_: Any):
         return await self._generate(

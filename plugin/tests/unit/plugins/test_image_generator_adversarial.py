@@ -1572,6 +1572,38 @@ async def test_llm_callback_registration_uses_dual_entry_metadata() -> None:
     assert result.value["display_instruction"] == "display_markdown"
 
 
+def test_test_generation_is_hidden_from_agent_routing_but_generate_image_is_not() -> None:
+    """The panel's test entry must not be auto-routable by the Agent.
+
+    Regression: the host TaskExecutor LLM was picking ``test_generation`` for
+    "draw X" requests, which runs with ``auto_show_override=False`` — the image
+    was written to history but never pushed into chat, surfacing as "猫娘画了
+    但没发出来". The fix hides this entry via ``metadata={"agent_hidden": True}``;
+    the host's ``_is_plugin_entry_agent_hidden`` reads exactly that key.
+    """
+    import sys
+
+    task_executor = sys.modules.get("brain.task_executor")
+    plugin, _context, _store = make_plugin()
+    entries = plugin.collect_entries()
+
+    test_entry = entries.get("test_generation")
+    assert test_entry is not None, "test_generation entry must still exist for the panel"
+    # The metadata must survive collect_entries so the host filter can read it.
+    assert test_entry.meta.metadata.get("agent_hidden") is True
+
+    # The LLM-facing generate_image entry must NOT be hidden.
+    gen_entry = entries.get(entry_id_for_tool("generate_image"))
+    assert gen_entry is not None
+    assert gen_entry.meta.metadata.get("agent_hidden") is not True
+
+    # If the host module is importable, prove the real filter agrees.
+    if task_executor is not None and hasattr(task_executor, "DirectTaskExecutor"):
+        hidden = task_executor.DirectTaskExecutor._is_plugin_entry_agent_hidden
+        assert hidden({"id": "test_generation", "metadata": {"agent_hidden": True}}) is True
+        assert hidden({"id": "generate_image", "metadata": {}}) is False
+
+
 def test_public_cleartext_api_base_is_rejected_but_loopback_http_is_allowed() -> None:
     with pytest.raises(SdkError):
         image_generator_module._normalize_api_base_url(
