@@ -928,6 +928,57 @@
       background: var(--danger-soft);
     }
 
+    .lightbox {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 28px;
+      background: rgba(20, 14, 34, 0.82);
+      backdrop-filter: blur(3px);
+      cursor: zoom-out;
+    }
+
+    .lightbox[hidden] {
+      display: none;
+    }
+
+    .lightbox-image {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      border-radius: 12px;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+      cursor: default;
+    }
+
+    .lightbox-close {
+      position: absolute;
+      top: 18px;
+      right: 20px;
+      z-index: 61;
+      width: 42px;
+      height: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.15rem;
+      line-height: 1;
+      color: #fff;
+      background: rgba(255, 255, 255, 0.14);
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 50%;
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.15s ease;
+    }
+
+    .lightbox-close:hover {
+      background: rgba(255, 255, 255, 0.28);
+      transform: scale(1.06);
+    }
+
     .sr-only {
       position: absolute !important;
       overflow: hidden;
@@ -1278,9 +1329,8 @@
               <div class="result-copy">
                 <strong id="testResultTitle" data-i18n="test.result_title">测试图片已生成</strong>
                 <p id="testResultText"></p>
-                <a id="testResultLink" class="inline-link" href="#" target="_blank" rel="noopener noreferrer">
+                <a id="testResultLink" class="inline-link" href="#" >
                   <span data-i18n="action.open_image">打开原图</span>
-                  <span aria-hidden="true">↗</span>
                 </a>
               </div>
             </div>
@@ -1322,6 +1372,10 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite" data-visible="false"></div>
 
+  <div id="lightbox" class="lightbox" hidden role="dialog" aria-modal="true" aria-label="原图预览">
+    <button id="lightboxClose" class="lightbox-close" type="button" aria-label="关闭">✕</button>
+    <img id="lightboxImage" class="lightbox-image" alt="原图预览" />
+  </div>
   <script>
     (() => {
       'use strict';
@@ -1410,6 +1464,7 @@
         'testPrompt', 'promptCounter', 'testButton', 'testResult', 'testPreview',
         'testResultTitle', 'testResultText', 'testResultLink', 'historyRefreshButton',
         'lastRequestValue', 'historyList', 'historyEmpty', 'clearHistoryButton', 'toast',
+        'lightbox', 'lightboxImage', 'lightboxClose',
       ];
 
       function t(key, fallback = '', params = {}) {
@@ -2068,6 +2123,19 @@
         return image;
       }
 
+      function openLightbox(url) {
+        if (!url || !elements.lightbox || !elements.lightboxImage) return;
+        elements.lightboxImage.src = url;
+        elements.lightbox.hidden = false;
+        if (elements.lightboxClose) elements.lightboxClose.focus();
+      }
+
+      function closeLightbox() {
+        if (!elements.lightbox || elements.lightbox.hidden) return;
+        elements.lightbox.hidden = true;
+        if (elements.lightboxImage) elements.lightboxImage.removeAttribute('src');
+      }
+
       function renderHistory(historyValue) {
         const history = extractHistory(historyValue);
         elements.historyList.replaceChildren();
@@ -2086,9 +2154,11 @@
           if (url) {
             const link = document.createElement('a');
             link.href = url;
-            link.target = '_blank';
-            link.rel = 'noopener noreferrer';
             link.setAttribute('aria-label', t('action.open_image', '打开原图'));
+            link.addEventListener('click', (event) => {
+              event.preventDefault();
+              openLightbox(url);
+            });
             const image = createImage(url, t('history.image_alt', '生成图片缩略图'));
             image.addEventListener('error', () => {
               thumb.replaceChildren(document.createTextNode('✦'));
@@ -2132,9 +2202,11 @@
             const open = document.createElement('a');
             open.className = 'inline-link';
             open.href = url;
-            open.target = '_blank';
-            open.rel = 'noopener noreferrer';
             open.textContent = t('action.open_image', '打开原图');
+            open.addEventListener('click', (event) => {
+              event.preventDefault();
+              openLightbox(url);
+            });
             meta.appendChild(open);
           }
 
@@ -2516,10 +2588,10 @@
           const image = createImage(url, t('history.image_alt', '生成图片缩略图'));
           image.addEventListener('error', () => image.remove(), { once: true });
           elements.testPreview.replaceChildren(image);
-          elements.testResultLink.href = url;
+          elements.testResultLink.dataset.url = url;
           elements.testResultLink.hidden = false;
         } else {
-          elements.testResultLink.removeAttribute('href');
+          delete elements.testResultLink.dataset.url;
           elements.testResultLink.hidden = true;
         }
       }
@@ -2568,6 +2640,17 @@
         elements.allowedSizes.addEventListener('change', syncSelects);
         elements.allowedQualities.addEventListener('change', syncSelects);
         elements.allowedStyles.addEventListener('change', syncSelects);
+        elements.testResultLink.addEventListener('click', (event) => {
+          event.preventDefault();
+          openLightbox(elements.testResultLink.dataset.url);
+        });
+        elements.lightboxClose.addEventListener('click', closeLightbox);
+        elements.lightbox.addEventListener('click', (event) => {
+          if (event.target === elements.lightbox) closeLightbox();
+        });
+        document.addEventListener('keydown', (event) => {
+          if (event.key === 'Escape') closeLightbox();
+        });
       }
 
       async function initialize() {

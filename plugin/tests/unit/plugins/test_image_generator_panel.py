@@ -187,6 +187,7 @@ const elementIds = [
   'testResult', 'testPreview', 'testResultTitle', 'testResultText',
   'testResultLink', 'historyRefreshButton', 'lastRequestValue', 'historyList',
   'historyEmpty', 'clearHistoryButton', 'toast',
+  'lightbox', 'lightboxImage', 'lightboxClose',
 ];
 const selectIds = new Set([
   'provider', 'outputFormat', 'responseFormat', 'defaultSize',
@@ -194,7 +195,7 @@ const selectIds = new Set([
 ]);
 const buttonIds = new Set([
   'refreshButton', 'saveButton', 'resetButton', 'clearKeyButton', 'testButton',
-  'historyRefreshButton', 'clearHistoryButton',
+  'historyRefreshButton', 'clearHistoryButton', 'lightboxClose',
 ]);
 const textareaIds = new Set([
   'allowedSizes', 'allowedQualities', 'allowedStyles', 'testPrompt',
@@ -207,6 +208,7 @@ for (const id of elementIds) {
   else if (buttonIds.has(id)) tagName = 'button';
   else if (textareaIds.has(id)) tagName = 'textarea';
   else if (id === 'testResultLink') tagName = 'a';
+  else if (id === 'lightboxImage') tagName = 'img';
   else if ([
     'apiBaseUrl', 'apiKey', 'model', 'timeoutSeconds', 'maxDownloadMiB',
     'cacheMaxCount', 'cacheMaxMiB', 'historyLimit', 'autoShow',
@@ -218,6 +220,15 @@ const document = {
   body: new FakeElement('body', 'body'),
   documentElement: new FakeElement('html', 'html'),
   title: '',
+  _listeners: {},
+  addEventListener(type, callback) {
+    (this._listeners[type] = this._listeners[type] || []).push(callback);
+  },
+  removeEventListener(type, callback) {
+    const list = this._listeners[type] || [];
+    const index = list.indexOf(callback);
+    if (index >= 0) list.splice(index, 1);
+  },
   getElementById(id) {
     return elements.get(id) || null;
   },
