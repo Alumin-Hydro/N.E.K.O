@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from typing import Any, Dict
 
 from fastapi import APIRouter, Request
@@ -83,21 +84,24 @@ def _absorb_request_language(data: Any, lanlan_name: str | None) -> str | None:
         return None
     try:
         normalized_short = normalize_language_code(str(raw), format="short")
+        normalized_full = normalize_language_code(str(raw), format="full")
     except Exception:
         return None
-    if not normalized_short:
+    if not normalized_short or not normalized_full:
         return None
     try:
         manager = get_session_manager().get(str(lanlan_name or "").strip())
         if manager is not None:
-            normalized_full = normalize_language_code(str(raw), format="full")
-            if normalized_full and getattr(manager, "user_language", None) != normalized_full:
+            if normalized_full and (
+                getattr(manager, "user_language", None) != normalized_full
+                or not getattr(manager, "_user_language_explicit", False)
+            ):
                 setter = getattr(manager, "set_user_language", None)
                 if callable(setter):
                     setter(str(raw))
     except Exception:
         logger.debug("icebreaker absorb request language failed lanlan=%s", lanlan_name, exc_info=True)
-    return normalized_short
+    return normalized_full
 
 
 def _strip_ssml_like_tags(text: str) -> str:
@@ -133,7 +137,13 @@ def _build_icebreaker_memory_message(role: str, text: str) -> dict | None:
     }
 
 
-async def _cache_icebreaker_context_memory(*, lanlan_name: str, role: str, text: str) -> tuple[bool, str]:
+async def _cache_icebreaker_context_memory(
+    *,
+    lanlan_name: str,
+    role: str,
+    text: str,
+    language: str | None = None,
+) -> tuple[bool, str]:
     message = _build_icebreaker_memory_message(role, text)
     if message is None:
         return False, "invalid_memory_message"
@@ -145,6 +155,7 @@ async def _cache_icebreaker_context_memory(*, lanlan_name: str, role: str, text:
             lanlan_name,
             [message],
             timeout_s=ICEBREAKER_MEMORY_CACHE_TIMEOUT_SECONDS,
+            language=language,
         )
         return bool(ok), str(err_detail or "")
     except Exception as exc:
@@ -184,6 +195,28 @@ def _validate_icebreaker_local_mutation(request: Request, data: dict) -> Any:
         payload=data,
         error_defaults={"ok": False, "reason": "csrf_validation_failed"},
     )
+
+
+def _note_icebreaker_user_engagement(
+    mgr: Any,
+    lanlan_name: str,
+    *,
+    at: float | None = None,
+) -> None:
+    note_engagement = getattr(mgr, "note_user_engagement", None)
+    if not callable(note_engagement):
+        return
+    try:
+        if at is None:
+            note_engagement()
+        else:
+            note_engagement(at=at)
+    except Exception:
+        logger.debug(
+            "icebreaker engagement record failed lanlan=%s",
+            lanlan_name,
+            exc_info=True,
+        )
 
 
 async def _speak_icebreaker_line_via_project_tts(
@@ -282,6 +315,7 @@ async def icebreaker_route_state(lanlan_name: str = ""):
 
 @router.post("/context")
 async def icebreaker_context(request: Request):
+    request_arrival_time = time.time()
     try:
         data = await request.json()
     except Exception:
@@ -305,7 +339,7 @@ async def icebreaker_context(request: Request):
         return {"ok": False, "reason": "missing_lanlan_name"}
 
     lanlan_name = _resolve_lanlan_name(data.get("lanlan_name"))
-    _absorb_request_language(data, lanlan_name)
+    request_language = _absorb_request_language(data, lanlan_name)
     requested_session_id = str(data.get("session_id") or "")
     event = data.get("event") if isinstance(data.get("event"), dict) else {}
     request_id = str(data.get("request_id") or event.get("request_id") or "").strip()
@@ -331,6 +365,15 @@ async def icebreaker_context(request: Request):
     mgr = get_session_manager().get(lanlan_name)
     if not mgr:
         return {"ok": False, "reason": "no_session_manager", "lanlan_name": lanlan_name}
+
+    if role == "user":
+        # The input is valid for the active tutorial route even if a downstream
+        # context or memory write later fails.
+        _note_icebreaker_user_engagement(
+            mgr,
+            lanlan_name,
+            at=request_arrival_time,
+        )
 
     append_context = getattr(mgr, "append_context", None)
     try:
@@ -384,6 +427,14 @@ async def icebreaker_context(request: Request):
         lanlan_name=lanlan_name,
         role=role,
         text=text,
+        language=(
+            request_language
+            or (
+                getattr(mgr, "user_language", None)
+                if getattr(mgr, "_user_language_explicit", False)
+                else None
+            )
+        ),
     )
     if not memory_cached:
         logger.warning(
@@ -517,6 +568,7 @@ async def icebreaker_choice(request: Request):
     Kept separate from ``/context`` (which feeds transient session history) so the
     pool stays an independent signal we can consume incrementally later.
     """
+    choice_arrival_time = time.time()
     try:
         data = await request.json()
     except Exception:
@@ -558,6 +610,22 @@ async def icebreaker_choice(request: Request):
     if stale_response:
         return stale_response
 
+    if not str(data.get("day") or "").strip():
+        return {
+            "ok": False,
+            "reason": "missing_day",
+            "source": ICEBREAKER_SOURCE,
+        }
+    if not (
+        str(data.get("node_id") or "").strip()
+        and str(data.get("choice") or "").strip()
+    ):
+        return {
+            "ok": False,
+            "reason": "invalid_choice",
+            "source": ICEBREAKER_SOURCE,
+        }
+
     payload = {
         "lanlan_name": lanlan_name,
         "session_id": data.get("session_id"),
@@ -570,6 +638,24 @@ async def icebreaker_choice(request: Request):
         "seq": data.get("seq"),
         "source": ICEBREAKER_SOURCE,
     }
+    try:
+        mgr = get_session_manager().get(lanlan_name)
+    except Exception:
+        logger.debug(
+            "icebreaker choice manager lookup failed lanlan=%s",
+            lanlan_name,
+            exc_info=True,
+        )
+    else:
+        if mgr is not None:
+            # The choice is valid for the active route even if the downstream
+            # durable-state read or write later fails.
+            _note_icebreaker_user_engagement(
+                mgr,
+                lanlan_name,
+                at=choice_arrival_time,
+            )
+
     try:
         result = await asyncio.to_thread(record_tutorial_choice, payload)
     except Exception as exc:

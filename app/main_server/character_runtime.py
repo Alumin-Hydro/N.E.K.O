@@ -17,7 +17,9 @@
 
 import asyncio
 import atexit
+import logging
 import sys
+import traceback
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -235,12 +237,27 @@ def _get_session_manager(name):
     return rs.session_manager if rs is not None else None
 
 
+def _get_explicit_session_user_language(name):
+    """Return the live session locale only when the frontend declared it."""
+    manager = _get_session_manager(name)
+    if manager is None or not getattr(manager, "_user_language_explicit", False):
+        return None
+    return getattr(manager, "user_language", None)
+
+
 try:
     from main_logic.topic.delivery import register_topic_session_manager_getter
 
     register_topic_session_manager_getter(_get_session_manager)
 except Exception:
     logger.warning("Failed to register topic session manager getter", exc_info=True)
+
+try:
+    from main_logic.music_playback import register_music_session_manager_getter
+
+    register_music_session_manager_getter(_get_session_manager)
+except Exception:
+    logger.warning("Failed to register music session manager getter", exc_info=True)
 
 
 def _select_fallback_session_manager():
@@ -627,9 +644,6 @@ async def _handle_agent_event(event: dict):
                             "[EventBus] direct task_result reply delivered (detail_len=%d)",
                             len(detail_text),
                         )
-                        print(
-                            f"[EventBus] direct task_result reply: {detail_text[:60]}"
-                        )
                         return
 
                 # Build structured callback and enqueue for LLM injection
@@ -882,7 +896,6 @@ async def _handle_agent_event(event: dict):
                             "[EventBus] agent_notification sent to frontend (text_len=%d)",
                             len(text),
                         )
-                        print(f"[EventBus] agent_notification text: {text[:60]}")
                     except Exception as e:
                         logger.warning(
                             "[EventBus] agent_notification WS send failed: %s", e
@@ -932,8 +945,22 @@ async def _handle_agent_event(event: dict):
                     "[EventBus] task_update dropped: WebSocket not connected for lanlan=%s",
                     lanlan,
                 )
-    except Exception as e:
-        logger.debug(f"handle_agent_event error: {e}")
+    except Exception as exc:
+        # 这个兜底 except 包住整个 agent event 分发，而 event payload 里带用户对话
+        # 文本——异常消息很可能把它捎进来。所以 logger 只写异常类型；完整 traceback
+        # 走 print（同 proactive 原文的处理方式），且只在 DEBUG 级下输出。
+        #
+        # 不能用 logger.debug(exc_info=True)：源码运行且 log_level<=DEBUG 时
+        # setup_logging 会挂一个只收 DEBUG 的 RotatingFileHandler 落到 logs/
+        # （utils/logger_config.py），那等于把隐私文本持久化了。仓库规则见
+        # .agent/rules/neko-guide.md 与 docs/contributing/code-style.md：
+        # 涉及用户隐私（原始对话）的 log 只能用 print，不得使用 logger。
+        logger.warning(
+            "[EventBus] handle_agent_event failed (error_type=%s)",
+            type(exc).__name__,
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            traceback.print_exc()
 
 
 async def _refresh_character_globals():
@@ -1071,7 +1098,15 @@ async def _init_character_resources(k: str, is_new_character: bool):
             # 旧 manager 持有的后台任务（如 idle session reset loop）必须显式
             # cancel，否则强引用 self 让旧 manager 永远不被 GC——多次 reload 后
             # 积累 N 份的 idle loop 各自 60s 醒一次。
+            old_user_language = None
+            old_user_language_explicit = False
             if rs.session_manager is not None:
+                old_user_language = getattr(rs.session_manager, "user_language", None)
+                old_user_language_explicit = getattr(
+                    rs.session_manager,
+                    "_user_language_explicit",
+                    False,
+                )
                 try:
                     rs.session_manager.shutdown()
                 except Exception as e:
@@ -1086,6 +1121,9 @@ async def _init_character_resources(k: str, is_new_character: bool):
 
             # 将websocket锁存储到session manager中，供cleanup()使用
             new_mgr.websocket_lock = rs.websocket_lock
+            if old_user_language_explicit:
+                new_mgr.user_language = old_user_language
+                new_mgr._user_language_explicit = True
 
             # 恢复websocket引用（如果存在）
             if old_websocket:
@@ -1163,6 +1201,9 @@ async def _init_character_resources(k: str, is_new_character: bool):
                     f"ws://127.0.0.1:{MONITOR_SERVER_PORT}",
                     {"bullet": False, "monitor": True},
                     _status_cb,
+                    user_language_provider=(
+                        lambda _name=k: _get_explicit_session_user_language(_name)
+                    ),
                 ),
                 name=f"SyncConnector-{k}",
             )
