@@ -3043,6 +3043,11 @@ class ImageGeneratorPlugin(NekoPluginBase):
 
     @staticmethod
     def _display_markdown(image_url: str) -> str:
+        # The chat frontend renders Markdown images without any size constraint,
+        # which would let a 1–2MB generated image blow up the dialog.  A CSS
+        # guard in styles.css (.message-block-markdown img) caps them at 280px,
+        # matching the native .message-block-image bounds.  The image part is
+        # still pushed alongside for future hosts that render native image parts.
         return (
             f"### 图片已生成\n\n![AI 生成图片]({image_url})\n\n[打开原图]({image_url})"
         )
