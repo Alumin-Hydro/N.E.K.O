@@ -3054,20 +3054,31 @@ class ImageGeneratorPlugin(NekoPluginBase):
         geometry: tuple[int, int] | None,
         fallback_markdown: str,
     ) -> bool:
-        """Push the generated image to the chat as a native image part.
+        """Push the generated image to the chat.
 
-        Sending a real image part (not Markdown text) lets the chat renderer
-        use its aspect-ratio path when width/height are known, so generated
-        images no longer go through the size-less ``object-fit: cover`` crop
-        that made results look inconsistent."""
-        part: dict[str, Any] = {"type": "image", "url": image_url}
+        The v2 ``parts`` schema supports native ``image`` parts, but the
+        current host pipeline drops URL-based media parts before they reach
+        the chat frontend.  To ensure the user actually sees the result we
+        send a Markdown text part containing the image URL as the primary
+        payload, and keep the native image part alongside it for future
+        hosts that learn to render image parts directly.
+
+        The Markdown text drives the ``passthrough_to_chat_bubble`` path
+        (visibility=["chat"], ai_behavior="blind"), which renders the
+        Markdown verbatim — including the ``![...](url)`` image tag — in
+        the chat bubble.
+        """
+        image_part: dict[str, Any] = {"type": "image", "url": image_url}
         if geometry is not None:
-            part["width"], part["height"] = geometry
+            image_part["width"], image_part["height"] = geometry
         try:
             self.push_message(
                 visibility=["chat"],
                 ai_behavior="blind",
-                parts=[part],
+                parts=[
+                    {"type": "text", "text": fallback_markdown},
+                    image_part,
+                ],
                 source="image_generator",
                 priority=2,
                 metadata={"event_type": "image_generated"},
@@ -3078,8 +3089,8 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 "ImageGenerator chat image push failed: failure_class={}",
                 type(exc).__name__,
             )
-        # Older hosts may reject image parts; fall back to the Markdown text
-        # push so the paid result is never silently lost.
+        # Older hosts may reject multi-part messages; fall back to a
+        # text-only push so the paid result is never silently lost.
         try:
             self.push_message(
                 visibility=["chat"],

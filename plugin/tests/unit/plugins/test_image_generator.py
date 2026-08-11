@@ -737,13 +737,16 @@ async def test_host_simulation_startup_generate_and_shutdown(
     assert client.is_closed is True
     assert len(client.post_calls) == 1
     assert client.post_calls[0]["url"].endswith("/images/generations")
-    first_part = ctx.pushed[0]["parts"][0]
-    assert first_part["type"] == "image"
-    assert first_part["url"].startswith(
+    parts = ctx.pushed[0]["parts"]
+    assert parts[0]["type"] == "text"
+    assert "![AI 生成图片]" in parts[0]["text"]
+    image_part = parts[1]
+    assert image_part["type"] == "image"
+    assert image_part["url"].startswith(
         "http://127.0.0.1:48916/plugin/image_generator/ui/generated/"
     )
-    assert first_part["width"] > 0
-    assert first_part["height"] > 0
+    assert image_part["width"] > 0
+    assert image_part["height"] > 0
     assert store.data["api_key"] == SECRET
     assert SECRET not in json.dumps(
         store.data["recent_generations"],
@@ -1655,14 +1658,17 @@ async def test_generate_pushes_small_markdown_without_inline_image_data(
     assert pushed["ai_behavior"] == "blind"
     assert pushed["source"] == "image_generator"
     assert pushed["metadata"] == {"event_type": "image_generated"}
-    part = pushed["parts"][0]
-    assert part["type"] == "image"
-    image_url = part["url"]
+    parts = pushed["parts"]
+    assert parts[0]["type"] == "text"
+    assert "![AI 生成图片]" in parts[0]["text"]
+    image_part = parts[1]
+    assert image_part["type"] == "image"
+    image_url = image_part["url"]
     assert image_url.startswith(
         "http://127.0.0.1:48916/plugin/image_generator/ui/generated/"
     )
-    assert part["width"] > 0
-    assert part["height"] > 0
+    assert image_part["width"] > 0
+    assert image_part["height"] > 0
     serialized_push = json.dumps(pushed, ensure_ascii=False)
     serialized_result = json.dumps(result.value, ensure_ascii=False)
     assert len(serialized_push.encode()) < 256 * 1024

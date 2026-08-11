@@ -1470,8 +1470,11 @@ async def test_real_http_provider_cached_static_asset_and_markdown_contract(
             canonical = translate_push_message(**context.pushed[0])
             assert canonical["visibility"] == ["chat"]
             assert canonical["ai_behavior"] == "blind"
-            assert len(canonical["parts"]) == 1
-            image_part = canonical["parts"][0]
+            assert len(canonical["parts"]) == 2
+            text_part = canonical["parts"][0]
+            assert text_part["type"] == "text"
+            assert "![AI 生成图片]" in text_part["text"]
+            image_part = canonical["parts"][1]
             assert image_part["type"] == "image"
             image_url = image_part["url"]
             parsed_image_url = urlparse(image_url)
