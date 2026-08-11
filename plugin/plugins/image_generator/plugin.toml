@@ -56,12 +56,8 @@ allowed_sizes = [
     "1024x1024",
     "1536x1024",
     "1024x1536",
-    "1792x1024",
-    "1024x1792",
-    "512x512",
-    "256x256",
 ]
-allowed_qualities = ["auto", "standard", "hd", "low", "medium", "high"]
+allowed_qualities = ["auto", "low", "medium", "high"]
 allowed_styles = ["", "auto", "vivid", "natural"]
 output_format = "auto"
 response_format = "b64_json"

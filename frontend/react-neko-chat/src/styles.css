@@ -1388,7 +1388,7 @@ body.neko-electron-runtime .app-shell:not(.chat-surface-mode-compact)[data-focus
    ![alt](url)) must stay inside the same 280px bounds as native image
    blocks, otherwise a full-resolution generation blows up the dialog. */
 .message-block-markdown img {
-  max-width: 280px;
+  max-width: min(280px, 100%);
   max-height: 280px;
   object-fit: contain;
   border-radius: 12px;

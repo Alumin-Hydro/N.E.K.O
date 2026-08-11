@@ -2123,8 +2123,11 @@
         return image;
       }
 
+      let lightboxReturnFocus = null;
+
       function openLightbox(url) {
         if (!url || !elements.lightbox || !elements.lightboxImage) return;
+        lightboxReturnFocus = document.activeElement;
         elements.lightboxImage.src = url;
         elements.lightbox.hidden = false;
         if (elements.lightboxClose) elements.lightboxClose.focus();
@@ -2134,6 +2137,10 @@
         if (!elements.lightbox || elements.lightbox.hidden) return;
         elements.lightbox.hidden = true;
         if (elements.lightboxImage) elements.lightboxImage.removeAttribute('src');
+        if (lightboxReturnFocus && typeof lightboxReturnFocus.focus === 'function') {
+          lightboxReturnFocus.focus();
+        }
+        lightboxReturnFocus = null;
       }
 
       function renderHistory(historyValue) {

@@ -169,12 +169,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "1024x1024",
         "1536x1024",
         "1024x1536",
-        "1792x1024",
-        "1024x1792",
-        "512x512",
-        "256x256",
     ],
-    "allowed_qualities": ["auto", "standard", "hd", "low", "medium", "high"],
+    "allowed_qualities": ["auto", "low", "medium", "high"],
     "allowed_styles": ["", "auto", "vivid", "natural"],
     # Exact OpenAI image file format; "auto" lets the provider choose.
     "output_format": "auto",
@@ -281,6 +277,13 @@ _MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\-]{0,127}$")
 _GENERATED_FILE_PATTERN = re.compile(r"^[0-9a-f]{32}\.(?:png|jpg|webp)$")
 _GENERATED_TEMP_FILE_PATTERN = re.compile(
     r"^\.[0-9a-f]{32}\.(?:png|jpg|webp)\.[0-9a-f]{32}\.tmp$"
+)
+# 280px chat-preview thumbnails live next to their originals and must be
+# accounted for by cache statistics, pruning and startup cleanup exactly
+# like the UUID-only generated files, otherwise repeated generations grow
+# the plugin directory without respecting cache_max_count/cache_max_bytes.
+_GENERATED_THUMB_FILE_PATTERN = re.compile(
+    r"^thumb_[0-9a-f]{32}\.(?:png|jpg|webp)$"
 )
 _BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=\-]{8,}")
 _KEY_LIKE_PATTERN = re.compile(r"(?i)\bsk-[A-Za-z0-9_\-]{8,}")
@@ -1452,6 +1455,7 @@ def _unlink_asset_file(
     if not (
         _GENERATED_FILE_PATTERN.fullmatch(filename)
         or _GENERATED_TEMP_FILE_PATTERN.fullmatch(filename)
+        or _GENERATED_THUMB_FILE_PATTERN.fullmatch(filename)
     ):
         raise OSError("unsafe generated asset filename")
     if _anchored_asset_io_supported():
@@ -2053,9 +2057,21 @@ class ImageGeneratorPlugin(NekoPluginBase):
         self._writable_ui_identity = None
 
         # Legacy fallback: data-directory static_ui. Reached only when the
-        # installed tree is read-only; newer hosts serve this fine, frozen
-        # hosts will 404 generated images (surfaced as a panel warning via
-        # asset_cache_available=False when generation actually runs).
+        # installed tree is read-only; newer hosts serve this fine. Frozen
+        # hosts ignore STATIC_UI_REGISTER directory overrides and keep
+        # serving the install-tree static/, so files written here would 404
+        # even though generation and panel state report success — detect
+        # that case and fail the asset cache instead of reporting a live
+        # one (surfaced to the panel as asset_cache_available=False).
+        if self._frozen_static_ui_overrides_ignored():
+            self.logger.warning(
+                "ImageGenerator data-directory static UI is unserved on this "
+                "frozen host; generated-asset cache disabled"
+            )
+            self._asset_dir = None
+            self._writable_ui_dir = None
+            self._writable_ui_identity = None
+            return False
         raw_writable_ui = self.data_path("static_ui")
         expected_writable_ui = self.data_path().resolve() / "static_ui"
         self._writable_ui_identity = None
@@ -2125,6 +2141,43 @@ class ImageGeneratorPlugin(NekoPluginBase):
             self._writable_ui_identity = None
         return fallback_registered
 
+    def _frozen_static_ui_overrides_ignored(self) -> bool:
+        """Detect hosts that ignore ``STATIC_UI_REGISTER`` directory
+        overrides (the frozen Steam runtime serves only the install-tree
+        ``static/``). Failure of this probe means *unknown*, not *frozen* —
+        we only disable the data-directory fallback when the host
+        demonstrably ignored a registration."""
+        probe = None
+        try:
+            probe_dir = Path(self.data_path()) / ".static_ui_probe"
+            probe_dir.mkdir(parents=True, exist_ok=True)
+            probe = probe_dir / f"{uuid4().hex}.txt"
+            probe.write_text("ok", encoding="utf-8")
+            if not self.register_static_ui(str(probe_dir), cache_control="no-cache"):
+                # Registration itself failed: host may not support overrides
+                # at all; the existing register-result checks downstream
+                # will handle it. Not proof of a frozen host.
+                return False
+            url = (
+                f"{self._resolve_public_origin().rstrip('/')}"
+                f"/plugin/{quote(self.plugin_id, safe='')}/ui/{probe.name}"
+            )
+            # _register_writable_static_ui is synchronous (called from the
+            # async lifecycle without to_thread), so probe with a blocking
+            # client here — it runs once at startup and times out fast.
+            with httpx.Client(timeout=5.0) as client:
+                status = client.get(url).status_code
+            return status == 404
+        except Exception:
+            return False
+        finally:
+            if probe is not None:
+                try:
+                    probe.unlink(missing_ok=True)
+                    probe.parent.rmdir()
+                except OSError:
+                    pass
+
     def _asset_dir_is_safe(self) -> bool:
         asset_dir = self._asset_dir
         writable_ui = self._writable_ui_dir
@@ -2174,6 +2227,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 and (
                     _GENERATED_FILE_PATTERN.fullmatch(path.name)
                     or _GENERATED_TEMP_FILE_PATTERN.fullmatch(path.name)
+                    or _GENERATED_THUMB_FILE_PATTERN.fullmatch(path.name)
                 )
             ):
                 files.append(path)
@@ -2395,6 +2449,10 @@ class ImageGeneratorPlugin(NekoPluginBase):
         except Exception:
             try:
                 self._unlink_cached_file(filename)
+            except OSError:
+                pass
+            try:
+                self._unlink_cached_file(f"thumb_{filename}")
             except OSError:
                 pass
             raise _GenerationFailure(
@@ -3128,7 +3186,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
         if geometry is not None:
             image_part["width"], image_part["height"] = geometry
         try:
-            self.push_message(
+            receipt = self.push_message(
                 visibility=["chat"],
                 ai_behavior="blind",
                 parts=[
@@ -3139,7 +3197,15 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 priority=2,
                 metadata={"event_type": "image_generated"},
             )
-            return True
+            if not isinstance(receipt, Mapping) or receipt.get("submitted", True):
+                return True
+            # The message plane accepted the call but refused submission
+            # (backpressure, transport unavailable, ...). Do not report
+            # success — fall through to the text-only retry so the paid
+            # result still reaches the chat.
+            self.logger.warning(
+                "ImageGenerator chat image push rejected: failure_class=MessagePlaneRefused"
+            )
         except Exception as exc:
             self.logger.warning(
                 "ImageGenerator chat image push failed: failure_class={}",
@@ -3148,7 +3214,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
         # Older hosts may reject multi-part messages; fall back to a
         # text-only push so the paid result is never silently lost.
         try:
-            self.push_message(
+            receipt = self.push_message(
                 visibility=["chat"],
                 ai_behavior="blind",
                 parts=[{"type": "text", "text": fallback_markdown}],
@@ -3156,7 +3222,12 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 priority=2,
                 metadata={"event_type": "image_generated"},
             )
-            return True
+            if not isinstance(receipt, Mapping) or receipt.get("submitted", True):
+                return True
+            self.logger.warning(
+                "ImageGenerator chat display rejected: failure_class=MessagePlaneRefused"
+            )
+            return False
         except Exception as exc:
             self.logger.warning(
                 "ImageGenerator chat display failed: failure_class={}",
@@ -3188,7 +3259,15 @@ class ImageGeneratorPlugin(NekoPluginBase):
                     for part in (prompt, size, quality, style, auto_show_override)
                 ).encode("utf-8")
             ).hexdigest()
-            dedup_key = candidate_key
+            # Check-and-register must be atomic: a lookup here followed by
+            # registration after an await would let two identical concurrent
+            # calls both observe an empty `_inflight` and each start their own
+            # generation, defeating the double-billing protection exactly for
+            # the dual-dispatch scenario it exists for. If another identical
+            # call arrives while `_run_dedup_generation` (started below,
+            # await-free) is still in its synchronous prefix, that call sees
+            # the in-flight task and collapses onto it instead of billing a
+            # second generation.
             existing = self._inflight.get(candidate_key)
             if existing is not None:
                 self.logger.info(
@@ -3204,6 +3283,46 @@ class ImageGeneratorPlugin(NekoPluginBase):
                     # run so the caller still gets a real error/result rather
                     # than a stale exception.
                     pass
+            else:
+                dedup_key = candidate_key
+                self._inflight[dedup_key] = asyncio.ensure_future(
+                    self._run_dedup_generation(
+                        prompt=prompt,
+                        size=size,
+                        quality=quality,
+                        style=style,
+                        action=action,
+                        auto_show_override=auto_show_override,
+                    )
+                )
+                self.logger.info(
+                    "ImageGenerator request registered: action={} prompt_len={}",
+                    action,
+                    len(str(prompt)),
+                )
+                try:
+                    return await self._inflight[dedup_key]
+                finally:
+                    self._inflight.pop(dedup_key, None)
+        return await self._run_dedup_generation(
+            prompt=prompt,
+            size=size,
+            quality=quality,
+            action=action,
+            auto_show_override=auto_show_override,
+        )
+
+    async def _run_dedup_generation(
+        self,
+        *,
+        prompt: Any,
+        size: Any = None,
+        quality: Any = None,
+        style: Any = None,
+        action: str,
+        auto_show_override: bool | None,
+    ):
+        """Run one real (deduplicated) generation end to end."""
         try:
             settings, api_key = await self._generation_config_snapshot()
             cleaned_prompt, resolved_size, resolved_quality, resolved_style = (
@@ -3335,13 +3454,6 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 auto_show_override=auto_show_override,
             )
 
-        if dedup_key is not None:
-            task = asyncio.ensure_future(_run_generation())
-            self._inflight[dedup_key] = task
-            try:
-                return await task
-            finally:
-                self._inflight.pop(dedup_key, None)
         return await _run_generation()
 
     async def _finalize_success(
@@ -3706,6 +3818,19 @@ class ImageGeneratorPlugin(NekoPluginBase):
             )
             await self._acquire_lock(self._history_lock)
             try:
+                # Snapshot the stored history BEFORE any mutation so a
+                # mid-transaction Store failure can roll it back: the
+                # sanitize below rewrites and truncates with the *proposed*
+                # limit, and restore_previous_configuration() only covers
+                # settings and the credential.
+                history_snapshot_ok, old_history = await self._store_get_checked(
+                    _HISTORY_STORE_KEY,
+                    None,
+                )
+                if not history_snapshot_ok:
+                    return Err(
+                        SdkError("无法在保存前安全读取生成历史（StoreError）")
+                    )
                 history_safe = await self._sanitize_history_before_secret_change(
                     secrets=secrets,
                     history_limit=int(validated["history_limit"]),
@@ -3729,6 +3854,22 @@ class ImageGeneratorPlugin(NekoPluginBase):
                             old_settings,
                         )
                     if not settings_restored:
+                        return False, False
+                    # Roll the history back alongside settings and the
+                    # credential: the sanitize above already persisted a
+                    # rewritten, possibly truncated history using the proposed
+                    # limit, so without this the save reports failure while
+                    # older generation records are permanently lost.
+                    if old_history is None:
+                        history_restored, _ = await self._store_delete(
+                            _HISTORY_STORE_KEY
+                        )
+                    else:
+                        history_restored = await self._store_set(
+                            _HISTORY_STORE_KEY,
+                            old_history,
+                        )
+                    if not history_restored:
                         return False, False
                     # The rollback credential may become durable in a worker
                     # thread just as this task is cancelled. Publish the old

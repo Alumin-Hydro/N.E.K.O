@@ -2710,3 +2710,123 @@ async def test_dashscope_rejects_private_image_url(
 
     assert result.is_err()
     assert "不安全" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_identical_generate_calls_share_one_provider_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Two identical generate_image calls racing on the event loop must
+    collapse onto ONE provider request (double-billing protection). The
+    check-and-register on `_inflight` must happen before the first await,
+    or both callers observe an empty dict and each start their own
+    generation."""
+    plugin, ctx, store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+    prepare_asset_cache(plugin, tmp_path)
+    client = FakeClient([FakeResponse(generation_payload())])
+    install_client(plugin, monkeypatch, client)
+
+    first, second = await asyncio.gather(
+        plugin.generate_image(prompt="画一只并发猫"),
+        plugin.generate_image(prompt="画一只并发猫"),
+    )
+
+    assert first.is_ok()
+    assert second.is_ok()
+    # One paid provider request, not two.
+    assert len(client.post_calls) == 1
+    assert not plugin._inflight
+
+
+@pytest.mark.asyncio
+async def test_chat_push_refused_submission_returns_display_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When the message plane refuses submission (returns
+    ``{"submitted": false}`` instead of raising), the tool result must keep
+    the fallback display_markdown so the paid image is never lost behind a
+    bare success message."""
+    plugin, ctx, store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+    prepare_asset_cache(plugin, tmp_path)
+    client = FakeClient([FakeResponse(generation_payload())])
+    install_client(plugin, monkeypatch, client)
+    monkeypatch.setattr(
+        plugin.ctx,
+        "push_message",
+        lambda **kwargs: {"submitted": False},
+    )
+
+    result = await plugin.generate_image(prompt="画一只被拒收的猫")
+
+    assert result.is_ok()
+    assert "display_markdown" in result.value
+    assert "image_url" in result.value
+    assert "![AI 生成图片]" in result.value["display_markdown"]
+    assert "可通过返回的链接查看" in result.value["message"]
+
+
+@pytest.mark.asyncio
+async def test_thumbnails_count_toward_cache_bounds_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """thumb_<uuid>.<ext> files must be recognized by cache statistics,
+    pruning and startup cleanup exactly like the UUID-only originals."""
+    plugin, ctx, store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
+    asset_dir = prepare_asset_cache(plugin, tmp_path)
+
+    original = asset_dir / f"{'a' * 32}.png"
+    thumb = asset_dir / f"thumb_{'a' * 32}.png"
+    original.write_bytes(PNG_BYTES)
+    thumb.write_bytes(PNG_BYTES)
+
+    stats = plugin._cache_stats_sync()
+    assert stats["count"] == 2
+    assert stats["total_bytes"] == 2 * len(PNG_BYTES)
+
+    # Pruning with a zero budget must evict the thumbnail as well.
+    plugin._settings = effective_config(
+        cache_max_count=1, cache_max_bytes=len(PNG_BYTES)
+    )["image_generator"]
+    pruned = plugin._prune_cache_sync(plugin._settings_snapshot())
+    assert pruned["count"] == 1
+    remaining = [p.name for p in asset_dir.iterdir()]
+    assert len(remaining) == 1
+
+
+@pytest.mark.asyncio
+async def test_settings_save_failure_rolls_back_truncated_history(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """If the settings commit fails after history was already sanitized and
+    truncated with the proposed (lower) limit, the stored history must be
+    restored — the save reports failure without permanently deleting older
+    generation records."""
+    old_history = [
+        {
+            "time": f"2026-08-01T00:00:{minute:02d}+00:00",
+            "model": "gpt-image-1",
+            "prompt": f"旧记录 {minute}",
+            "result_url": "",
+            "status": "succeeded",
+        }
+        for minute in range(5)
+    ]
+    store = FakeStore(
+        data={"api_key": SECRET, "recent_generations": old_history}
+    )
+    # Fail the settings write only; key/history writes keep working so the
+    # rollback path can prove it restores the history.
+    store.fail_set_keys = {"settings"}
+    plugin, ctx, _store = make_plugin(store=store)
+
+    payload = await encrypted_save_payload(plugin, history_limit=2)
+    result = await plugin.save_settings(**payload)
+
+    assert result.is_err()
+    assert store.data["recent_generations"] == old_history
+    # The old credential must also survive the failed transaction.
+    assert store.data["api_key"] == SECRET

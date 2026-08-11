@@ -1,10 +1,12 @@
 # Image Generator · 图片生成器
 
 `image_generator` 让 N.E.K.O 的猫娘从普通聊天中响应“画一张……”等请求，也可从
-插件管理面板手动测试。插件只调用用户配置的 OpenAI-compatible Images API，不附带
-额度或 API 密钥。
+插件管理面板手动测试。插件只调用用户自行配置的图像生成服务，不附带额度或 API
+密钥。当前支持两类 provider：**OpenAI-compatible Images API** 与
+**阿里云百炼（DashScope）原生异步文生图**，通过面板“API 风味”选择
+（`openai_compatible` 或 `dashscope_native`）。
 
-## API 契约
+## API 契约 — OpenAI-compatible provider
 
 插件发送：
 
@@ -29,10 +31,35 @@ Content-Type: application/json
 公网与内网服务必须使用 HTTPS；只有 `localhost`、`127.0.0.0/8` 或 `::1`
 回环开发地址允许使用普通 HTTP。
 
-兼容范围有意保持清晰：当前只支持 Bearer 密钥、固定追加
+兼容范围有意保持清晰：OpenAI-compatible 模式只支持 Bearer 密钥、固定追加
 `/images/generations`、不带查询参数的 Base URL，以及 `auto` 或 `宽x高`
 形式的尺寸。需要 `api-key` 请求头、`api-version` 查询参数（常见于部分 Azure
-部署）或符号尺寸的服务不在本版本支持范围内。
+部署）或符号尺寸的服务不在本模式支持范围内。
+
+## API 契约 — 阿里云百炼（DashScope 原生异步）
+
+`dashscope_native` 模式使用百炼原生异步任务 API，**不**走上面的
+`/images/generations` 同步契约（万相系列模型在 OpenAI 兼容模式下会返回
+`model_not_supported`）：
+
+```http
+POST <api_base_url>/api/v1/services/aigc/text2image/image-synthesis
+Authorization: Bearer <API key>
+X-DashScope-Async: enable
+Content-Type: application/json
+```
+
+- 请求体：`{"model": ..., "input": {"prompt": ...}, "parameters": {"size": ...}}`。
+- 提交返回 `output.task_id`；插件随后轮询
+  `GET <api_base_url>/api/v1/tasks/{task_id}`（同样 Bearer 认证）直到任务
+  `SUCCEEDED` / `FAILED` / `CANCELED` 或超出面板总超时。
+- 成功响应在 `output.results[*].url` 提供限时 OSS 下载链接；插件会对该 URL 做
+  与 Base64 路径相同的大小限制与容器嗅探后下载保存。这是唯一允许的服务端二次
+  请求，目标仅限任务响应内返回的结果 URL。
+- Base URL 示例：`https://dashscope.aliyuncs.com`（北京）或
+  `https://dashscope-intl.aliyuncs.com`（新加坡），不要包含
+  `/api/v1/services/...` 之后的部分。尺寸用 `宽*高` 形式（如 `1024*1024`），
+  具体可用值以所用万相模型文档为准。
 
 ## 安全与存储
 
