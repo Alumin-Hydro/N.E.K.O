@@ -578,18 +578,26 @@ def install_client(
 # ---------------------------------------------------------------------------
 
 
-def test_generate_image_is_llm_tool_only_with_bounded_schema() -> None:
-    # The plugin_entry registration was intentionally dropped: the host
-    # broadcast both registrations to the model, which fired the tool twice
-    # per user request and billed the provider twice. generate_image must
-    # stay LLM-tool-only; the panel drives test_generation instead.
+def test_generate_image_registers_for_both_dialog_llm_and_task_executor() -> None:
+    # The host has two independent dispatch paths and generate_image must be
+    # reachable from both or "draw X" silently no-ops on one:
+    #   * dialog LLM  -> @llm_tool (LLM_TOOL_META_ATTR)
+    #   * TaskExecutor -> @plugin_entry (EVENT_META_ATTR), because api_runtime
+    #     strips __llm_tool__* entries from the router's agent-visible view.
+    # Both share _generate's in-flight dedup so a double-fire collapses into
+    # one provider call. Dropping the plugin_entry (an earlier attempt to fix
+    # double-render) broke TaskExecutor routing — that regression is what this
+    # test now guards.
     method = ImageGeneratorPlugin.generate_image
-    assert not hasattr(method, EVENT_META_ATTR)
+    assert hasattr(method, EVENT_META_ATTR), "TaskExecutor plugin_entry missing"
     tool = getattr(method, LLM_TOOL_META_ATTR)
+    entry = getattr(method, EVENT_META_ATTR)
 
     assert tool.name == "generate_image"
     assert tool.parameters == GENERATE_IMAGE_SCHEMA
     assert tool.timeout_seconds == 300.0
+    assert entry.id == "generate_image"
+    assert entry.timeout == 300.0
     assert GENERATE_IMAGE_SCHEMA["required"] == ["prompt"]
     assert GENERATE_IMAGE_SCHEMA["additionalProperties"] is False
     assert GENERATE_IMAGE_SCHEMA["properties"]["prompt"]["maxLength"] == 4_000

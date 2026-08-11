@@ -1592,8 +1592,9 @@ def test_test_generation_is_hidden_from_agent_routing_but_generate_image_is_not(
     # The metadata must survive collect_entries so the host filter can read it.
     assert test_entry.meta.metadata.get("agent_hidden") is True
 
-    # The LLM-facing generate_image entry must NOT be hidden.
-    gen_entry = entries.get(entry_id_for_tool("generate_image"))
+    # The LLM-facing generate_image plugin_entry must NOT be hidden — it is
+    # the TaskExecutor-reachable path now that test_generation is hidden.
+    gen_entry = entries.get("generate_image")
     assert gen_entry is not None
     assert gen_entry.meta.metadata.get("agent_hidden") is not True
 

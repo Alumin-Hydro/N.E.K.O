@@ -3352,15 +3352,28 @@ class ImageGeneratorPlugin(NekoPluginBase):
         return Ok(_redact_structure(result_fields, self._known_secrets_snapshot(api_key)))
 
     # ------------------------------------------------------------------
-    # Primary capability — registered as an LLM tool ONLY.
+    # Primary capability — TWO registrations, one per caller, deliberately.
     #
-    # This method used to carry both @llm_tool and @plugin_entry. The host
-    # broadcasts both registrations to the model, so a single "draw X"
-    # request fired the tool twice (~20s apart, the second call with a
-    # model-rewritten prompt): every user-visible image was billed twice and
-    # displayed twice. The panel uses test_generation, not this entry, so the
-    # plugin_entry registration is safe to drop. The in-flight dedup in
-    # _generate is kept as a second line of defense.
+    # The host has two independent dispatch paths and a plugin must register
+    # for BOTH or "draw X" silently does nothing on one of them:
+    #
+    #   1. Dialog LLM direct tool call -> @llm_tool. Canonical path: the
+    #      dialog model gets the full JSON schema, passes typed args, runs
+    #      synchronously. api_runtime.py strips ``__llm_tool__*`` entries from
+    #      the TaskExecutor's view, so this registration is invisible to the
+    #      automatic router.
+    #
+    #   2. Agent TaskExecutor routing -> @plugin_entry. The router LLM picks an
+    #      entry_id from the plugin's *agent-visible* entries. Because (1) is
+    #      stripped from that view, an llm_tool-only registration is
+    #      unreachable here — the router's validator rejects
+    #      "entry_id 'generate_image' does not exist" and the request dies.
+    #
+    # Both entries below share ``_generate`` and its in-flight dedup lock, so
+    # if the two paths ever fire for the same request the second call is
+    # collapsed into the first instead of double-billing. Earlier I dropped
+    # the plugin_entry to fix a double-render; the real fix for that was the
+    # push/display_instruction change (c0aa5828), not removing the entry.
     # ------------------------------------------------------------------
 
     @llm_tool(
@@ -3373,6 +3386,17 @@ class ImageGeneratorPlugin(NekoPluginBase):
             "成功后图片会自动展示在聊天中，无需重复调用。"
         ),
         parameters=GENERATE_IMAGE_SCHEMA,
+        timeout=300.0,
+    )
+    @plugin_entry(
+        id="generate_image",
+        name="生成图片",
+        description=(
+            "根据用户描述生成一张图片并发送到聊天。用于“画一张……”“生成图片”"
+            "“帮我画”等明确图像创作请求；prompt 必填，size/quality/style 可省略"
+            "并用面板默认值。"
+        ),
+        input_schema=GENERATE_IMAGE_SCHEMA,
         timeout=300.0,
     )
     async def generate_image(
