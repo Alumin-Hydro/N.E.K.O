@@ -958,6 +958,7 @@ class CoreConfigMixin:
             'ASSIST_API_KEY_GEMINI': DEFAULT_CORE_API_KEY,
             'ASSIST_API_KEY_KIMI': DEFAULT_CORE_API_KEY,
             'ASSIST_API_KEY_KIMI_CODE': DEFAULT_CORE_API_KEY,
+            'ASSIST_API_KEY_KIMI_K3': DEFAULT_CORE_API_KEY,
             'ASSIST_API_KEY_DEEPSEEK': DEFAULT_CORE_API_KEY,
             'ASSIST_API_KEY_DOUBAO': DEFAULT_CORE_API_KEY,
             'ASSIST_API_KEY_DOUBAO_TTS': '',
@@ -1049,6 +1050,7 @@ class CoreConfigMixin:
         config['ASSIST_API_KEY_GEMINI'] = core_cfg.get('assistApiKeyGemini', '') or _fb('gemini')
         config['ASSIST_API_KEY_KIMI'] = core_cfg.get('assistApiKeyKimi', '') or _fb('kimi')
         config['ASSIST_API_KEY_KIMI_CODE'] = core_cfg.get('assistApiKeyKimiCode', '') or _fb('kimi_code')
+        config['ASSIST_API_KEY_KIMI_K3'] = core_cfg.get('assistApiKeyKimiK3', '') or _fb('kimi_k3')
         config['ASSIST_API_KEY_DEEPSEEK'] = core_cfg.get('assistApiKeyDeepseek', '') or _fb('deepseek')
         config['ASSIST_API_KEY_DOUBAO'] = core_cfg.get('assistApiKeyDoubao', '') or _fb('doubao')
         config['ASSIST_API_KEY_DOUBAO_TTS'] = core_cfg.get('assistApiKeyDoubaoTts', '')

@@ -976,6 +976,11 @@ def _identify_provider_label(url: str, is_free: bool) -> str:
     url_lower = url.lower()
     for domain, name in _KNOWN_PROVIDERS.items():
         if domain in url_lower:
+            # api.kimi.com hosts two distinct APIs on different paths:
+            # /coding (Anthropic Messages, "Kimi Code") vs /coding/v1
+            # (OpenAI-compatible, "Kimi K3"). Disambiguate by path.
+            if domain == "api.kimi.com" and "/coding/v1" in url_lower:
+                name = "Kimi K3"
             if is_free:
                 return f"{name}(免费)"
             return name

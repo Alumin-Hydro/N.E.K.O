@@ -13,7 +13,7 @@ _ASSIST_API_KEY_FIELDS = (
     'assistApiKeyDoubao', 'assistApiKeyDoubaoTts', 'assistApiKeyMinimax',
     'assistApiKeyMinimaxIntl', 'assistApiKeyMimo',
     'assistApiKeyMimoTokenPlan', 'assistApiKeyElevenlabs', 'assistApiKeyGrok',
-    'assistApiKeyClaude', 'assistApiKeyKimiCode', 'assistApiKeyOpenrouter',
+    'assistApiKeyClaude', 'assistApiKeyKimiCode', 'assistApiKeyKimiK3', 'assistApiKeyOpenrouter',
 )
 
 _MODEL_TYPES = (

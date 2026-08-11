@@ -188,6 +188,18 @@
       "vision_model": "kimi-for-coding",
       "agent_model": "kimi-for-coding"
     },
+    "kimi_k3": {
+      "key": "kimi_k3",
+      "name": "Kimi K3（月之暗面）",
+      "description": "Kimi K3 多模态对话模型，OpenAI 兼容接口，262K 上下文，支持视觉与工具调用",
+      "openrouter_url": "https://api.kimi.com/coding/v1",
+      "conversation_model": "k3",
+      "summary_model": "k3",
+      "correction_model": "k3",
+      "emotion_model": "k3",
+      "vision_model": "k3",
+      "agent_model": "k3"
+    },
     "deepseek": {
       "key": "deepseek",
       "name": "DeepSeek",
@@ -346,6 +358,7 @@
     "gemini": "ASSIST_API_KEY_GEMINI",
     "kimi": "ASSIST_API_KEY_KIMI",
     "kimi_code": "ASSIST_API_KEY_KIMI_CODE",
+    "kimi_k3": "ASSIST_API_KEY_KIMI_K3",
     "deepseek": "ASSIST_API_KEY_DEEPSEEK",
     "doubao": "ASSIST_API_KEY_DOUBAO",
     "doubao_tts": "ASSIST_API_KEY_DOUBAO_TTS",
@@ -396,6 +409,10 @@
     },
     "kimi_code": {
       "config_field": "assistApiKeyKimiCode",
+      "restricted": false
+    },
+    "kimi_k3": {
+      "config_field": "assistApiKeyKimiK3",
       "restricted": false
     },
     "doubao": {

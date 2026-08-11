@@ -44,7 +44,7 @@ CORE_CONFIG_ASSIST_API_KEY_FIELDS = (
     'assistApiKeyDoubao', 'assistApiKeyDoubaoTts', 'assistApiKeyMinimax',
     'assistApiKeyMinimaxIntl', 'assistApiKeyMimo',
     'assistApiKeyMimoTokenPlan', 'assistApiKeyElevenlabs', 'assistApiKeyGrok',
-    'assistApiKeyClaude', 'assistApiKeyKimiCode', 'assistApiKeyOpenrouter',
+    'assistApiKeyClaude', 'assistApiKeyKimiCode', 'assistApiKeyKimiK3', 'assistApiKeyOpenrouter',
 )
 
 CORE_CONFIG_MODEL_API_KEY_FIELDS = tuple(
@@ -204,6 +204,7 @@ async def get_core_config_api():
             "assistApiKeyGemini": core_cfg.get('assistApiKeyGemini', '') or _fb('gemini'),
             "assistApiKeyKimi": core_cfg.get('assistApiKeyKimi', '') or _fb('kimi'),
             "assistApiKeyKimiCode": core_cfg.get('assistApiKeyKimiCode', '') or _fb('kimi_code'),
+            "assistApiKeyKimiK3": core_cfg.get('assistApiKeyKimiK3', '') or _fb('kimi_k3'),
             "assistApiKeyDeepseek": core_cfg.get('assistApiKeyDeepseek', '') or _fb('deepseek'),
             "assistApiKeyDoubao": core_cfg.get('assistApiKeyDoubao', '') or _fb('doubao'),
             "assistApiKeyDoubaoTts": core_cfg.get('assistApiKeyDoubaoTts', '') or _doubao_tts_shared_key,
