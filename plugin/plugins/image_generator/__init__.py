@@ -2294,7 +2294,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
         *,
         extension: str,
         secrets: str | Iterable[str] | None = None,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str | None]:
         asset_dir = self._asset_dir
         writable_ui = self._writable_ui_dir
         expected_identity = self._writable_ui_identity
@@ -2403,7 +2403,11 @@ class ImageGeneratorPlugin(NekoPluginBase):
             ) from None
         finally:
             self._cache_lock.release()
-        return image_url, filename
+
+        # Generate a thumbnail so the chat preview does not blow up the dialog.
+        # The full-size original is still linked for users who want to inspect it.
+        thumb_url = await self._generate_thumbnail(target, filename, extension)
+        return image_url, filename, thumb_url
 
     # ------------------------------------------------------------------
     # Safe provider request and output handling
@@ -3041,15 +3045,62 @@ class ImageGeneratorPlugin(NekoPluginBase):
         finally:
             self._history_lock.release()
 
-    @staticmethod
-    def _display_markdown(image_url: str) -> str:
+    # ------------------------------------------------------------------
+    # Thumbnail generation (chat preview)
+    # ------------------------------------------------------------------
+
+    async def _generate_thumbnail(
+        self,
+        target: Path,
+        filename: str,
+        extension: str,
+    ) -> str | None:
+        """Generate a 280px thumbnail next to the original so the chat preview
+        does not blow up the dialog.
+
+        The Steam frozen runtime ships no PIL, so we shell out to PowerShell
+        System.Drawing on Windows.  If anything fails we simply return None
+        and the caller falls back to the original URL — the preview is a
+        convenience, not a hard dependency.
+        """
+        thumb_name = f"thumb_{filename}"
+        thumb_path = target.with_name(thumb_name)
+        # Windows-only: System.Drawing is the most reliable built-in image
+        # resizer on the Steam deck (no PIL in the frozen runtime).
+        ps_script = (
+            "Add-Type -AssemblyName System.Drawing; "
+            "$img = [System.Drawing.Image]::FromFile('{src}'); "
+            "$ratio = [Math]::Min(280 / $img.Width, 280 / $img.Height); "
+            "$w = [int]($img.Width * $ratio); $h = [int]($img.Height * $ratio); "
+            "$bmp = New-Object System.Drawing.Bitmap($w, $h); "
+            "$g = [System.Drawing.Graphics]::FromImage($bmp); "
+            "$g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic; "
+            "$g.DrawImage($img, 0, 0, $w, $h); "
+            "$bmp.Save('{dst}', [System.Drawing.Imaging.ImageFormat]::Png); "
+            "$g.Dispose(); $bmp.Dispose(); $img.Dispose()"
+        ).format(src=str(target).replace("'", "''"), dst=str(thumb_path).replace("'", "''"))
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "powershell", "-NoProfile", "-Command", ps_script,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=15.0)
+            if proc.returncode == 0 and thumb_path.is_file():
+                return self._asset_url(thumb_name)
+        except Exception:
+            pass
+        return None
+
+    def _display_markdown(self, image_url: str, thumb_url: str | None = None) -> str:
         # The chat frontend renders Markdown images without any size constraint,
-        # which would let a 1–2MB generated image blow up the dialog.  A CSS
-        # guard in styles.css (.message-block-markdown img) caps them at 280px,
-        # matching the native .message-block-image bounds.  The image part is
-        # still pushed alongside for future hosts that render native image parts.
+        # which would let a 1–2MB generated image blow up the dialog.  Use the
+        # thumbnail (if available) for the inline preview, and link the full
+        # original separately.  The image part is still pushed alongside for
+        # future hosts that render native image parts with proper bounds.
+        preview_url = thumb_url or image_url
         return (
-            f"### 图片已生成\n\n![AI 生成图片]({image_url})\n\n[打开原图]({image_url})"
+            f"### 图片已生成\n\n![AI 生成图片]({preview_url})\n\n[打开原图]({image_url})"
         )
 
     def _push_chat_image(
@@ -3218,7 +3269,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
                         "生成图片超过了配置的总超时时间，请稍后重试",
                         "GenerationTimeout",
                     ) from None
-                image_url, _filename = await self._save_asset(
+                image_url, _filename, thumb_url = await self._save_asset(
                     image_bytes,
                     extension=extension,
                     secrets=self._known_secrets_snapshot(api_key),
@@ -3279,6 +3330,7 @@ class ImageGeneratorPlugin(NekoPluginBase):
                 action=action,
                 image_bytes=image_bytes,
                 image_url=image_url,
+                thumb_url=thumb_url,
                 revised_prompt=revised_prompt,
                 auto_show_override=auto_show_override,
             )
@@ -3301,10 +3353,11 @@ class ImageGeneratorPlugin(NekoPluginBase):
         action: str,
         image_bytes: bytes,
         image_url: str,
+        thumb_url: str | None,
         revised_prompt: Any,
         auto_show_override: bool | None,
     ):
-        markdown = self._display_markdown(image_url)
+        markdown = self._display_markdown(image_url, thumb_url=thumb_url)
         should_show = (
             bool(settings["auto_show_in_chat"])
             if auto_show_override is None
