@@ -1242,9 +1242,22 @@ class MMDAnimation {
             this._analyser = analyser;
             this._ownsAnalyser = false; // 外部传入的 analyser 不由我们管理
         }
+        // 五元音共振峰分析器：可用则懒实例化，每帧产出 {aa,ee,ih,oh,ou} 权重，
+        // 由 mmd-expression.update 映射到 あ/い/う/え/お morph。不可用时保持
+        // 旧单通道 getLipSyncValue 路径，向后兼容旧缓存页面。
+        if (analyser && typeof window !== 'undefined' && typeof window.FormantLipSyncAnalyzer === 'function') {
+            try {
+                this._formantAnalyzer = new window.FormantLipSyncAnalyzer(analyser);
+            } catch (e) {
+                console.warn('[MMD Animation] FormantLipSyncAnalyzer 实例化失败，回退单通道口型', e);
+                this._formantAnalyzer = null;
+            }
+        } else {
+            this._formantAnalyzer = null;
+        }
         this._lipSyncActive = true;
         this._lipSyncEnabled = true;
-        console.log('[MMD Animation] 口型同步已启动 (startLipSync)');
+        console.log('[MMD Animation] 口型同步已启动 (startLipSync)', { formant: !!this._formantAnalyzer });
     }
 
     stopLipSync() {

@@ -69,3 +69,42 @@ def test_fallback_path_still_clears_other_vowels_before_aa():
     )[0]
     assert "if (!name || vowel === 'aa') continue;" in method
     assert "expressionManager.setValue(name, 0);" in method
+
+
+# ─────────────────────── MMD 侧（共享同一分析器）───────────────────────
+
+
+def test_mmd_animation_lazy_instantiates_formant_analyzer():
+    """mmd-animation.startLipSync lazily builds the analyzer, with fallback."""
+    source = _read("static/mmd/mmd-animation.js")
+    assert "new window.FormantLipSyncAnalyzer(analyser)" in source
+    assert "this._formantAnalyzer = null;" in source  # 失败/缺失回退
+    # 构造期不引用全局类：实例化必须发生在 startLipSync 内而非 constructor
+    assert "startLipSync(analyser) {" in source
+
+
+def test_mmd_expression_prefers_formant_then_falls_back():
+    """mmd-expression.update tries formant path first, then legacy setMouth."""
+    source = _read("static/mmd/mmd-expression.js")
+    method = source.split("update(delta) {", 1)[1]
+    formant_branch = method.index("anim._formantAnalyzer")
+    fallback_branch = method.index("anim.getLipSyncValue()")
+    assert formant_branch < fallback_branch
+
+
+def test_mmd_expression_formant_maps_all_five_vowels():
+    """Formant path maps analyzer keys (aa/ee/ih/oh/ou) to MMD vowels and writes
+    every vowel each frame (including 0), overriding idle-VMD mouth residue."""
+    source = _read("static/mmd/mmd-expression.js")
+    # 键映射表完整覆盖五元音
+    assert "aa: 'a'" in source
+    assert "ih: 'i'" in source
+    assert "ou: 'u'" in source
+    assert "ee: 'e'" in source
+    assert "oh: 'o'" in source
+    # formant 路径按映射全写 morph（含 0 目标值）
+    formant_method = source.split("if (anim._formantAnalyzer) {", 1)[1].split(
+        "anim.getLipSyncValue()", 1
+    )[0]
+    assert "weights[formantKey] ?? 0" in formant_method
+    assert "this.setMorphWeight(name, target);" in formant_method
