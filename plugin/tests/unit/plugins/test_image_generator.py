@@ -1650,7 +1650,15 @@ async def test_generate_pushes_small_markdown_without_inline_image_data(
     }
     assert "已直接发送" in result.value["message"]
     assert "不要再" in result.value["display_instruction"]
-    assert len(list(asset_dir.iterdir())) == 1
+    # Exactly one paid original; the 280px chat-preview thumbnail may or may
+    # not exist (it is only produced where PowerShell System.Drawing is
+    # available, e.g. the Windows CI runner, never on macOS/Linux).
+    originals = [
+        path
+        for path in asset_dir.iterdir()
+        if not path.name.startswith("thumb_")
+    ]
+    assert len(originals) == 1
 
     assert len(ctx.pushed) == 1
     pushed = ctx.pushed[0]
@@ -1797,7 +1805,15 @@ async def test_history_and_file_cache_are_bounded_and_secret_free(
     assert len(history) == 2
     assert all(item["status"] == "succeeded" for item in history)
     assert all(len(item["prompt_excerpt"]) <= 180 for item in history)
-    assert len(list(asset_dir.iterdir())) == 2
+    # cache_max_count bounds paid originals; each may carry an optional
+    # 280px chat-preview thumbnail (Windows PowerShell only), so assert on
+    # originals rather than the raw directory listing.
+    originals = [
+        path
+        for path in asset_dir.iterdir()
+        if not path.name.startswith("thumb_")
+    ]
+    assert len(originals) == 2
     assert store.data["api_key"] == SECRET
     stored_history = json.dumps(history, ensure_ascii=False)
     assert SECRET not in stored_history
