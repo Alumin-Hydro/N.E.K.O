@@ -146,7 +146,7 @@ class FormantLipSyncAnalyzer {
     /**
      * 推进一帧，产出限幅、平滑后的五元音目标权重。
      * @param {number} delta 距上一帧的秒数
-     * @returns {Record<string,number>} 各元音应写入的权重（已含 0.7 缩放）
+     * @returns {Record<string,number>} 各元音应写入的权重（上限由 CAP 约束）
      */
     update(delta) {
         if (!this.analyser || !this.bins) {
@@ -154,7 +154,9 @@ class FormantLipSyncAnalyzer {
         }
 
         const { volume, weights } = this.sample();
-        const amp = Math.min(volume * 0.9, 1) ** 0.7;
+        // 0.5 次幂（平方根）提升中低音量响应：平稳语音的 bandEnergy 很少顶到 1，
+        // 高次幂会把日常说话的振幅进一步压小，导致嘴张不开。
+        const amp = Math.min(volume * 0.9, 1) ** 0.5;
 
         const projected = { aa: 0, ee: 0, ih: 0, oh: 0, ou: 0 };
         for (const key of VOWEL_KEYS) {
@@ -199,7 +201,7 @@ class FormantLipSyncAnalyzer {
             // 帧率无关指数趋近：30fps 与 144fps 下嘴部运动一致。
             const rate = 1 - Math.exp(-(to > from ? ATTACK : RELEASE) * delta);
             this.state[key] = from + (to - from) * rate;
-            out[key] = (this.state[key] <= 0.01 ? 0 : this.state[key]) * 0.7;
+            out[key] = (this.state[key] <= 0.01 ? 0 : this.state[key]);
         }
         return out;
     }
