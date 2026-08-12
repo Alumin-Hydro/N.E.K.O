@@ -1829,7 +1829,14 @@ async def test_history_and_file_cache_are_bounded_and_secret_free(
     assert cleared.is_ok()
     assert cleared.value["count"] == 0
     assert "recent_generations" not in store.data
-    assert len(list(asset_dir.iterdir())) == 2
+    # clear_history wipes stored originals; each may still carry its
+    # platform-dependent thumb_* preview, so assert on originals only.
+    remaining_originals = [
+        path
+        for path in asset_dir.iterdir()
+        if not path.name.startswith("thumb_")
+    ]
+    assert len(remaining_originals) == 2
 
 
 @pytest.mark.asyncio
@@ -2896,3 +2903,66 @@ async def test_cache_pruning_groups_originals_with_windows_thumbnails(
     assert plugin._cache_stats_sync()["count"] == 2
     for thumb_path in thumbs:
         assert (asset_dir / thumb_path.name[len("thumb_") :]).is_file()
+
+
+@pytest.mark.asyncio
+async def test_full_generation_pipeline_with_simulated_windows_thumbnails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Simulate the Windows CI runner end to end: force _generate_thumbnail
+    to actually produce a thumb_* file beside every original, then run the
+    REAL generate_image pipeline three times under cache_max_count=2 and
+    assert the cache stays bounded with no orphaned thumbnails. This is the
+    exact shape that kept failing on windows-latest (where PowerShell
+    System.Drawing genuinely runs) but passed silently on macOS (where the
+    thumbnail helper returns None)."""
+    store = FakeStore(data={"api_key": SECRET})
+    plugin, ctx, _store = make_plugin(store=store)
+    asset_dir = prepare_asset_cache(plugin, tmp_path)
+    plugin._settings = copy.deepcopy(DEFAULT_SETTINGS)
+    plugin._settings.update(
+        {"history_limit": 2, "cache_max_count": 2, "auto_show_in_chat": True}
+    )
+    install_client(
+        plugin,
+        monkeypatch,
+        FakeClient(
+            [
+                FakeResponse(generation_payload()),
+                FakeResponse(generation_payload()),
+                FakeResponse(generation_payload()),
+            ]
+        ),
+    )
+
+    real_thumbnail = plugin._generate_thumbnail
+
+    async def fake_thumbnail(target, filename, extension):
+        thumb_name = f"thumb_{filename}"
+        (target.with_name(thumb_name)).write_bytes(PNG_BYTES)
+        return plugin._asset_url(thumb_name)
+
+    monkeypatch.setattr(plugin, "_generate_thumbnail", fake_thumbnail)
+
+    for index in range(3):
+        result = await plugin.generate_image(prompt=f"windows 形态 第{index}张")
+        assert result.is_ok(), result
+
+    originals = [
+        path for path in asset_dir.iterdir() if not path.name.startswith("thumb_")
+    ]
+    thumbs = [
+        path for path in asset_dir.iterdir() if path.name.startswith("thumb_")
+    ]
+    # cache_max_count=2 bounds paid originals as generation GROUPS.
+    assert len(originals) == 2
+    assert plugin._cache_stats_sync()["count"] == 2
+    # No orphaned thumbnails: every thumb still has its original.
+    for thumb_path in thumbs:
+        assert (asset_dir / thumb_path.name[len("thumb_") :]).is_file()
+    # History projection stays bounded and secret-free.
+    history = store.data["recent_generations"]
+    assert len(history) == 2
+    serialized = json.dumps(history, ensure_ascii=False)
+    assert SECRET not in serialized
