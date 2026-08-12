@@ -108,3 +108,10 @@ def test_mmd_expression_formant_maps_all_five_vowels():
     )[0]
     assert "weights[formantKey] ?? 0" in formant_method
     assert "this.setMorphWeight(name, target);" in formant_method
+
+
+def test_mmd_init_loads_shared_formant_module():
+    """mmd-init.js must load the shared formant analyzer, otherwise MMD-only
+    mode never defines window.FormantLipSyncAnalyzer and silently degrades."""
+    source = _read("static/mmd/mmd-init.js")
+    assert "/static/vrm/vrm-lipsync-formant.js" in source
