@@ -2257,20 +2257,43 @@ class ImageGeneratorPlugin(NekoPluginBase):
             files_with_stats.append((path, stat.st_size, stat.st_mtime))
         files_with_stats.sort(key=lambda item: (item[2], item[0].name), reverse=True)
 
+        # Group each original with its chat-preview thumbnail: the pair is
+        # one logical generation result and must share a single
+        # cache_max_count slot, otherwise a thumbnail can evict its own
+        # original (or vice versa) and leave an orphaned file behind.
+        groups: dict[str, dict[str, Any]] = {}
+        for path, size, mtime in files_with_stats:
+            name = path.name
+            key = name[len("thumb_") :] if name.startswith("thumb_") else name
+            group = groups.setdefault(
+                key,
+                {"paths": [], "size": 0, "mtime": 0.0},
+            )
+            group["paths"].append(path)
+            group["size"] += size
+            group["mtime"] = max(group["mtime"], mtime)
+        ordered_groups = sorted(
+            groups.values(),
+            key=lambda group: group["mtime"],
+            reverse=True,
+        )
+
         kept_count = 0
         kept_bytes = 0
         max_count = int(settings["cache_max_count"])
         max_bytes = int(settings["cache_max_bytes"])
-        for path, size, _mtime in files_with_stats:
+        for group in ordered_groups:
+            size = group["size"]
             keep = kept_count < max_count and kept_bytes + size <= max_bytes
             if keep:
                 kept_count += 1
                 kept_bytes += size
                 continue
-            try:
-                self._unlink_cached_file(path.name)
-            except OSError:
-                pass
+            for path in group["paths"]:
+                try:
+                    self._unlink_cached_file(path.name)
+                except OSError:
+                    pass
         # Report actual on-disk state, including files whose deletion failed,
         # instead of optimistic counters from the intended pruning plan.
         return self._cache_stats_sync()

@@ -2789,7 +2789,9 @@ async def test_thumbnails_count_toward_cache_bounds_and_cleanup(
     tmp_path: Path,
 ) -> None:
     """thumb_<uuid>.<ext> files must be recognized by cache statistics,
-    pruning and startup cleanup exactly like the UUID-only originals."""
+    pruning and startup cleanup. An original and its thumbnail form ONE
+    logical generation result: the pair shares a single cache_max_count
+    slot and is evicted together, never leaving an orphaned thumbnail."""
     plugin, ctx, store = make_plugin(store=FakeStore(data={"api_key": SECRET}))
     asset_dir = prepare_asset_cache(plugin, tmp_path)
 
@@ -2802,14 +2804,21 @@ async def test_thumbnails_count_toward_cache_bounds_and_cleanup(
     assert stats["count"] == 2
     assert stats["total_bytes"] == 2 * len(PNG_BYTES)
 
-    # Pruning with a zero budget must evict the thumbnail as well.
+    # One group (original + thumbnail) with room for one generation and
+    # enough bytes for the pair: the group is kept whole.
     plugin._settings = effective_config(
-        cache_max_count=1, cache_max_bytes=len(PNG_BYTES)
+        cache_max_count=1, cache_max_bytes=2 * len(PNG_BYTES)
     )["image_generator"]
     pruned = plugin._prune_cache_sync(plugin._settings_snapshot())
-    assert pruned["count"] == 1
-    remaining = [p.name for p in asset_dir.iterdir()]
-    assert len(remaining) == 1
+    assert pruned["count"] == 2
+
+    # A zero budget must evict the pair together — no orphaned thumbnail.
+    plugin._settings = effective_config(
+        cache_max_count=0, cache_max_bytes=10**9
+    )["image_generator"]
+    pruned = plugin._prune_cache_sync(plugin._settings_snapshot())
+    assert pruned["count"] == 0
+    assert list(asset_dir.iterdir()) == []
 
 
 @pytest.mark.asyncio
