@@ -2801,7 +2801,9 @@ async def test_thumbnails_count_toward_cache_bounds_and_cleanup(
     thumb.write_bytes(PNG_BYTES)
 
     stats = plugin._cache_stats_sync()
-    assert stats["count"] == 2
+    # count is in generation groups (original + its thumbnail = 1);
+    # total_bytes covers every file on disk.
+    assert stats["count"] == 1
     assert stats["total_bytes"] == 2 * len(PNG_BYTES)
 
     # One group (original + thumbnail) with room for one generation and
@@ -2810,7 +2812,8 @@ async def test_thumbnails_count_toward_cache_bounds_and_cleanup(
         cache_max_count=1, cache_max_bytes=2 * len(PNG_BYTES)
     )["image_generator"]
     pruned = plugin._prune_cache_sync(plugin._settings_snapshot())
-    assert pruned["count"] == 2
+    assert pruned["count"] == 1
+    assert len(list(asset_dir.iterdir())) == 2
 
     # A zero budget must evict the pair together — no orphaned thumbnail.
     plugin._settings = effective_config(
@@ -2855,3 +2858,41 @@ async def test_settings_save_failure_rolls_back_truncated_history(
     assert store.data["recent_generations"] == old_history
     # The old credential must also survive the failed transaction.
     assert store.data["api_key"] == SECRET
+
+
+@pytest.mark.asyncio
+async def test_cache_pruning_groups_originals_with_windows_thumbnails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Simulate the Windows CI runner: every saved asset gains a thumb_*
+    preview. cache_max_count bounds GENERATION GROUPS, three saves with
+    a budget of two keep exactly two originals and leave no orphaned
+    thumbnails."""
+    store = FakeStore(data={"api_key": SECRET})
+    plugin, _ctx, _store = make_plugin(store=store)
+    asset_dir = prepare_asset_cache(plugin, tmp_path)
+    plugin._settings = copy.deepcopy(DEFAULT_SETTINGS)
+    plugin._settings.update(
+        {"history_limit": 2, "cache_max_count": 2, "auto_show_in_chat": False}
+    )
+
+    for _index in range(3):
+        _url, filename, _thumb = await plugin._save_asset(
+            PNG_BYTES, extension="png"
+        )
+        # PowerShell System.Drawing runs after the in-save prune on the
+        # Windows host; the NEXT save's prune is what must bound the pair.
+        (asset_dir / f"thumb_{filename}").write_bytes(PNG_BYTES)
+        plugin._prune_cache_sync(plugin._settings)
+
+    originals = [
+        path for path in asset_dir.iterdir() if not path.name.startswith("thumb_")
+    ]
+    thumbs = [
+        path for path in asset_dir.iterdir() if path.name.startswith("thumb_")
+    ]
+    assert len(originals) == 2
+    assert plugin._cache_stats_sync()["count"] == 2
+    for thumb_path in thumbs:
+        assert (asset_dir / thumb_path.name[len("thumb_") :]).is_file()

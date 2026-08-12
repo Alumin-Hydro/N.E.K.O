@@ -2309,14 +2309,25 @@ class ImageGeneratorPlugin(NekoPluginBase):
             self._cache_lock.release()
 
     def _cache_stats_sync(self) -> dict[str, int]:
+        # ``count`` is measured in generation groups (an original plus its
+        # chat-preview thumbnail), matching the pruning unit in
+        # _prune_cache_sync and the cache_max_count semantics enforced by
+        # _save_asset's post-write check. Bytes are summed over all files.
         count = 0
         total_bytes = 0
+        seen_groups: set[str] = set()
         for path in self._cache_files():
+            name = path.name
+            if _GENERATED_TEMP_FILE_PATTERN.fullmatch(name):
+                continue
+            key = name[len("thumb_") :] if name.startswith("thumb_") else name
             try:
                 total_bytes += path.stat().st_size
-                count += 1
             except OSError:
                 continue
+            if key not in seen_groups:
+                seen_groups.add(key)
+                count += 1
         return {"count": count, "total_bytes": total_bytes}
 
     async def _cache_stats(self) -> dict[str, int]:
