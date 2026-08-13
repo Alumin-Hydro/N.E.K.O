@@ -1264,7 +1264,7 @@ class MMDAnimation {
         this._lipSyncActive = false;
         this._lipSyncEnabled = false;
         if (this.manager.expression) {
-            this.manager.expression.setMouth(0);
+            this.manager.expression.resetAllLipMorphs();
         }
         console.log('[MMD Animation] 口型同步已停止 (stopLipSync)');
     }

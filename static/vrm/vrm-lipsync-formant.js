@@ -183,13 +183,22 @@ class FormantLipSyncAnalyzer {
 
         // 词内短暂停顿保持嘴型（闭嘴于每个爆破音会显得口吃），
         // 超过 IDLE_MS 才认定为真停顿并闭嘴。
+        //
+        // 关键：idle 窗口内即使 amp/winnerVal 低于门限也不产生全零 target，
+        // 而是保持当前 state 不变（target = state），避免爆破音间隙嘴部
+        // 快速闭合→张开的抖动。只有持续 idle 超过 IDLE_MS 才真正归零。
         const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-        let silent = amp < SILENCE_VOL || winnerVal < SILENCE_GAIN;
-        if (!silent) this.lastActiveAt = now;
-        if (now - this.lastActiveAt > IDLE_MS) silent = true;
+        const belowThreshold = amp < SILENCE_VOL || winnerVal < SILENCE_GAIN;
+        if (!belowThreshold) this.lastActiveAt = now;
+        const idleExpired = (now - this.lastActiveAt) > IDLE_MS;
 
         const target = { aa: 0, ee: 0, ih: 0, oh: 0, ou: 0 };
-        if (!silent) {
+        if (idleExpired) {
+            // 真停顿：全零 target → release 平滑闭嘴
+        } else if (belowThreshold) {
+            // idle 窗口内的短暂低音量：保持当前 state，不动
+            for (const key of VOWEL_KEYS) target[key] = this.state[key];
+        } else {
             target[winner] = Math.min(CAP, winnerVal);
             target[runner] = Math.min(CAP * 0.5, runnerVal * 0.6);
         }

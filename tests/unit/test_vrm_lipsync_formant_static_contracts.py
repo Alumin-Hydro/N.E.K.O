@@ -115,3 +115,22 @@ def test_mmd_init_loads_shared_formant_module():
     mode never defines window.FormantLipSyncAnalyzer and silently degrades."""
     source = _read("static/mmd/mmd-init.js")
     assert "/static/vrm/vrm-lipsync-formant.js" in source
+
+
+def test_mmd_expression_has_reset_all_lip_morphs():
+    """resetAllLipMorphs() must exist and iterate all five vowel keys in
+    lipMorphNames, writing 0 to every morph."""
+    source = _read("static/mmd/mmd-expression.js")
+    assert "resetAllLipMorphs()" in source
+    method = source.split("resetAllLipMorphs()", 1)[1].split("\n    }", 1)[0]
+    assert "Object.keys(this.lipMorphNames)" in method
+    assert "this.setMorphWeight(name, 0)" in method
+
+
+def test_mmd_stop_lip_sync_calls_reset_all():
+    """stopLipSync must call resetAllLipMorphs() (not setMouth(0)) so that
+    formant-driven い/う/え morphs are also cleared."""
+    source = _read("static/mmd/mmd-animation.js")
+    stop_method = source.split("stopLipSync()", 1)[1].split("\n    }", 1)[0]
+    assert "resetAllLipMorphs()" in stop_method
+    assert "setMouth(0)" not in stop_method

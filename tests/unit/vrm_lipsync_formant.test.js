@@ -112,14 +112,36 @@ test('top-2：最多两个元音有非零权重', () => {
 
 test('静音（无谱峰、低能量）时所有元音收敛到 0', () => {
     const { FormantLipSyncAnalyzer } = loadModule();
-    // 全零频谱：volume≈0 → 触发静音
+    // 全零频谱：volume≈0 → 触发静音；但需先让 idle 超时（IDLE_MS=160ms），
+    // 否则 idle 窗口内保持 state 不归零。
     const silent = makeAnalyser([]);
     const a = new FormantLipSyncAnalyzer(silent);
     let out = null;
+    // 30 帧 × 16.7ms ≈ 500ms > IDLE_MS(160ms)，确保 idle 超时后归零
     for (let i = 0; i < 30; i++) out = a.update(1 / 60);
     for (const [k, v] of Object.entries(out)) {
         assert.ok(v <= 0.001, `静音时 ${k} 应为 0，实际 ${v}`);
     }
+});
+
+test('idle 窗口内短暂静音不归零，保持当前嘴型', () => {
+    const { FormantLipSyncAnalyzer, setNow } = loadModule();
+    // 先驱动到有声音的稳态
+    const voiced = vowelAnalyser(850, 1400); // aa
+    const a = new FormantLipSyncAnalyzer(voiced);
+    let out = null;
+    for (let i = 0; i < 60; i++) out = a.update(1 / 60);
+    assert.ok(out.aa > 0.1, `有声稳态 aa=${out.aa} 应 > 0.1`);
+    const steadyAa = out.aa;
+
+    // 切到静音分析器，但在 idle 窗口内（< IDLE_MS=160ms）
+    const silent = makeAnalyser([]);
+    a.analyser = silent;
+    // 跑 8 帧 ≈ 133ms < 160ms
+    for (let i = 0; i < 8; i++) out = a.update(1 / 60);
+    // idle 窗口内应保持稳态值，不归零
+    assert.ok(out.aa > steadyAa * 0.7,
+        `idle 窗口内 aa=${out.aa} 应保持接近稳态 ${steadyAa}，不应归零`);
 });
 
 test('平滑是渐进的：单帧不会从 0 跳到目标（攻击平滑）', () => {

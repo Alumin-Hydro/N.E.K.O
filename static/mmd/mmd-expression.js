@@ -291,6 +291,19 @@ class MMDExpression {
         }
     }
 
+    /**
+     * 统一重置全部五元音口型 morph 为 0。
+     * stopLipSync / 切换表情时调用，防止 formant 模式下
+     * い/う/え 等 morph 残留（setMouth(0) 只清 あ + お×0.3）。
+     */
+    resetAllLipMorphs() {
+        for (const vowel of Object.keys(this.lipMorphNames)) {
+            for (const name of (this.lipMorphNames[vowel] || [])) {
+                this.setMorphWeight(name, 0);
+            }
+        }
+    }
+
     // ═══════════════════ 帧更新 ═══════════════════
 
     // 分析器输出的 VRM blendshape 键 → MMD 五元音 morph 键（lipMorphNames 的键）
