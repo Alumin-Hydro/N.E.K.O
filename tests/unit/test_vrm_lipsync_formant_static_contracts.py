@@ -129,7 +129,7 @@ def test_mmd_expression_has_reset_all_lip_morphs():
 
 def test_mmd_stop_lip_sync_calls_reset_all():
     """stopLipSync must call resetAllLipMorphs() (not setMouth(0)) so that
-    formant-driven い/う/え morphs are also cleared."""
+    formant-driven i/u/e morphs are also cleared."""
     source = _read("static/mmd/mmd-animation.js")
     stop_method = source.split("stopLipSync()", 1)[1].split("\n    }", 1)[0]
     assert "resetAllLipMorphs()" in stop_method

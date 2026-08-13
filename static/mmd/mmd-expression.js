@@ -321,7 +321,9 @@ class MMDExpression {
                 // 五元音共振峰路径：每帧产出 {aa,ee,ih,oh,ou} 连续权重，映射到
                 // あ/い/う/え/お morph 全显式写入（含 0）。五元音全覆盖天然覆盖
                 // 待机 VMD 可能残留的口型轨道，无需单独清零步骤。
-                const weights = anim._formantAnalyzer.update(delta || 0.016);
+                const weights = anim._formantAnalyzer.update(
+                    Number.isFinite(delta) ? Math.max(0, delta) : 0.016
+                );
                 const map = this.constructor.FORMANT_TO_MMD_VOWEL;
                 for (const formantKey of Object.keys(map)) {
                     const vowel = map[formantKey];
