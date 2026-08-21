@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title data-i18n="page.title">Discord 适配器</title>
+    <link rel="stylesheet" href="./style.css?v=0.1.0">
+</head>
+<body>
+    <main class="app-container">
+        <header class="hero">
+            <div>
+                <p class="eyebrow">N.E.K.O · DISCORD</p>
+                <h1 data-i18n="page.title">Discord 适配器</h1>
+                <p class="subtitle" data-i18n="page.subtitle">让猫娘进入你的 Discord 服务器：频道里 @ 她、私信她，发图片和文档给她看。</p>
+            </div>
+            <button id="btn-refresh" class="button secondary" type="button" data-i18n="actions.refresh">刷新状态</button>
+        </header>
+
+        <!-- 状态卡片 -->
+        <section class="card status-card">
+            <div class="section-head">
+                <h2 data-i18n="status.title">运行状态</h2>
+                <span id="status-pill" class="pill idle"><span class="dot"></span><span id="status-text" data-i18n="status.stopped">未连接</span></span>
+            </div>
+            <div class="stat-grid">
+                <div class="stat"><div class="k" data-i18n="status.bot">Bot 账号</div><div class="v" id="stat-bot">—</div></div>
+                <div class="stat"><div class="k" data-i18n="status.guilds">已加入服务器</div><div class="v" id="stat-guilds">0</div></div>
+                <div class="stat"><div class="k" data-i18n="status.messages">今日回复</div><div class="v" id="stat-messages">0</div></div>
+                <div class="stat"><div class="k" data-i18n="status.last_error">最近错误</div><div class="v" id="stat-error" style="font-size:13px">—</div></div>
+            </div>
+            <div class="actions" style="margin-top:16px">
+                <button id="btn-start" class="button primary" type="button" data-i18n="actions.start">开始监听</button>
+                <button id="btn-stop" class="button danger" type="button" data-i18n="actions.stop" hidden>停止监听</button>
+            </div>
+        </section>
+
+        <!-- 基础设置 -->
+        <section class="card">
+            <div class="section-head">
+                <h2 data-i18n="basic.title">基础设置</h2>
+                <span id="credential-pill" class="pill idle" data-i18n="basic.token_not_saved">Token 未保存</span>
+            </div>
+            <div class="grid">
+                <div class="field">
+                    <label for="cfg-bot-token" data-i18n="basic.token_label">Bot Token</label>
+                    <div class="token-row">
+                        <input id="cfg-bot-token" type="password" autocomplete="off" spellcheck="false" data-i18n-placeholder="basic.token_placeholder" placeholder="粘贴 Discord Bot Token">
+                        <button id="btn-toggle-token" class="button ghost" type="button">👁</button>
+                    </div>
+                    <small id="state-bot-token" data-i18n="basic.token_not_saved">未保存</small>
+                </div>
+                <details class="guide">
+                    <summary data-i18n="guide.title">如何创建 Discord Bot？（四步）</summary>
+                    <ol>
+                        <li data-i18n="guide.step1">打开 Discord Developer Portal，点 New Application 创建一个应用。</li>
+                        <li data-i18n="guide.step2">左侧 Bot 页 → Reset Token → 复制 Token 粘贴到上方。</li>
+                        <li>
+                            <div class="warn" data-i18n="guide.step3">关键：同一 Bot 页面往下找到 Privileged Gateway Intents，打开 Message Content Intent，否则猫娘收不到消息内容。</div>
+                        </li>
+                        <li data-i18n="guide.step4">左侧 OAuth2 → URL Generator → 勾 bot → Bot Permissions 勾 Send Messages / Read Message History / Embed Links / Attach Files → 打开底部生成的链接，把 Bot 邀请进你的服务器。</li>
+                    </ol>
+                </details>
+                <div class="field">
+                    <label for="cfg-trigger-mode" data-i18n="basic.trigger_label">什么时候回复</label>
+                    <select id="cfg-trigger-mode">
+                        <option value="mention" data-i18n="basic.trigger_mention">频道里被 @ 时 + 所有私信（默认）</option>
+                        <option value="all" data-i18n="basic.trigger_all">白名单频道内的所有消息 + 所有私信</option>
+                        <option value="dm_only" data-i18n="basic.trigger_dm">仅私信</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="cfg-admin-ids" data-i18n="basic.admin_label">管理员用户 ID</label>
+                    <input id="cfg-admin-ids" type="text" spellcheck="false" placeholder="123456789012345678, 234567890123456789">
+                    <small data-i18n="basic.admin_hint">Discord 设置 → 高级 → 打开「开发者模式」→ 右键用户头像 → 复制用户 ID。管理员会被猫娘当作主人。</small>
+                </div>
+                <div class="actions">
+                    <button id="btn-test" class="button secondary" type="button" data-i18n="actions.test">测试连接</button>
+                </div>
+                <p id="test-result"></p>
+            </div>
+        </section>
+
+        <!-- 高级设置 -->
+        <section class="card">
+            <details class="advanced">
+                <summary data-i18n="advanced.title">高级设置</summary>
+                <div class="grid two" style="margin-top:14px">
+                    <div class="field">
+                        <label for="cfg-permission-mode" data-i18n="advanced.permission_label">谁能和猫娘说话</label>
+                        <select id="cfg-permission-mode">
+                            <option value="allow_list" data-i18n="advanced.permission_allow">仅信任用户（默认）</option>
+                            <option value="open" data-i18n="advanced.permission_open">所有人</option>
+                            <option value="deny_list" data-i18n="advanced.permission_deny">除黑名单外所有人</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="cfg-channel-whitelist" data-i18n="advanced.channel_label">频道白名单 ID</label>
+                        <input id="cfg-channel-whitelist" type="text" spellcheck="false" placeholder="留空 = 全部频道（仅「所有消息」模式生效）">
+                    </div>
+                    <div class="field">
+                        <label for="cfg-guild-whitelist" data-i18n="advanced.guild_label">服务器白名单 ID</label>
+                        <input id="cfg-guild-whitelist" type="text" spellcheck="false" placeholder="留空 = 全部服务器">
+                    </div>
+                    <div class="field">
+                        <label for="cfg-max-concurrent" data-i18n="advanced.concurrent_label">同时处理消息数</label>
+                        <input id="cfg-max-concurrent" type="number" min="1" max="20" step="1" value="3">
+                    </div>
+                    <div class="field">
+                        <label for="cfg-connect-timeout" data-i18n="advanced.connect_timeout_label">AI 连接超时（秒）</label>
+                        <input id="cfg-connect-timeout" type="number" min="1" max="120" step="1" value="10">
+                    </div>
+                    <div class="field">
+                        <label for="cfg-turn-timeout" data-i18n="advanced.turn_timeout_label">AI 回复超时（秒）</label>
+                        <input id="cfg-turn-timeout" type="number" min="5" max="600" step="1" value="60">
+                    </div>
+                    <div class="field">
+                        <label for="cfg-max-attachment" data-i18n="advanced.attachment_label">单附件上限（MB）</label>
+                        <input id="cfg-max-attachment" type="number" min="1" max="25" step="1" value="10">
+                    </div>
+                    <div class="field">
+                        <label for="cfg-proxy" data-i18n="advanced.proxy_label">代理 URL（可选）</label>
+                        <input id="cfg-proxy" type="text" spellcheck="false" placeholder="http://127.0.0.1:7890">
+                    </div>
+                </div>
+            </details>
+        </section>
+
+        <!-- 信任用户 -->
+        <section class="card">
+            <div class="section-head">
+                <h2 data-i18n="users.title">信任用户</h2>
+                <span class="pill" id="trusted-count">0 人</span>
+            </div>
+            <p class="hint" data-i18n="users.hint">「谁能和猫娘说话」为仅信任用户时，只有这里列出的用户能触发回复。</p>
+            <div class="user-form">
+                <input id="user-uid" type="text" spellcheck="false" placeholder="Discord 用户 ID（纯数字）">
+                <select id="user-level">
+                    <option value="trusted" data-i18n="users.level_trusted">信任</option>
+                    <option value="admin" data-i18n="users.level_admin">管理员</option>
+                </select>
+                <input id="user-nickname" type="text" spellcheck="false" data-i18n-placeholder="users.nickname_placeholder" placeholder="昵称（可选）">
+                <button id="btn-add-user" class="button secondary" type="button" data-i18n="users.add">添加</button>
+            </div>
+            <div id="trusted-users"></div>
+        </section>
+
+        <!-- 保存 -->
+        <section class="card">
+            <div class="actions">
+                <button id="btn-save" class="button primary" type="button" data-i18n="actions.save">保存设置</button>
+                <button id="btn-reset" class="button secondary" type="button" data-i18n="actions.reset">恢复默认</button>
+            </div>
+            <p class="hint" data-i18n="actions.save_hint">保存后点击「开始监听」生效；监听中无法修改配置。</p>
+        </section>
+    </main>
+
+    <div id="toast"></div>
+    <script src="./i18n.js?v=0.1.0"></script>
+    <script src="./script.js?v=0.1.0"></script>
+</body>
+</html>
