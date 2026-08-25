@@ -327,14 +327,19 @@ class MMDExpression {
         if (anim && anim._lipSyncEnabled) {
             if (anim._formantAnalyzer) {
                 // 五元音共振峰路径：每帧产出 {aa,ee,ih,oh,ou} 连续权重，映射到
-                // あ/い/う/え/お morph 全显式写入（含 0）。五元音全覆盖天然覆盖
-                // 待机 VMD 可能残留的口型轨道，无需单独清零步骤。
+                // あ/い/う/え/お morph。
                 // delta 的夹紧（非有限值回退、负值归零、上界截断）已收口到
                 // FormantLipSyncAnalyzer.update 内部，两条接入路径不再各自防御。
                 const weights = anim._formantAnalyzer.update(delta);
                 const map = FORMANT_TO_MMD_VOWEL;
+                // 发声帧写全五个（含 0），覆盖待机 VMD 可能残留的口型轨道；
+                // 静音帧只把 lip sync 主驱动的 あ/お 归零，不碰 い/う/え，
+                // 让待机 VMD 的口型轨道照常播放——与旧单通道路径
+                // 「清零只在 lipValue>0.05 分支执行」的取舍保持一致。
+                const speaking = FORMANT_KEYS.some((k) => (weights[k] ?? 0) > 0);
                 for (const formantKey of FORMANT_KEYS) {
                     const vowel = map[formantKey];
+                    if (!speaking && vowel !== 'a' && vowel !== 'o') continue;
                     const target = weights[formantKey] ?? 0;
                     for (const name of (this.lipMorphNames[vowel] || [])) {
                         this.setMorphWeight(name, target);

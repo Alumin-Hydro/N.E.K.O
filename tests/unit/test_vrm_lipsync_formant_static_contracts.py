@@ -463,6 +463,28 @@ def test_mmd_expression_formant_maps_all_five_vowels():
     assert "this.setMorphWeight(name, target);" in formant_method
 
 
+def test_mmd_silent_frames_leave_iue_to_the_idle_motion():
+    """On silent frames only あ/お are zeroed; い/う/え are left alone.
+
+    Deliberate, and the same trade-off the legacy path makes: its clear-loop for
+    い/う/え runs only inside the ``lipValue > 0.05`` branch, so non-speech frames
+    keep playing whatever mouth track the idle VMD motion drives. Writing all
+    five every frame would hold those three morphs flat for as long as
+    _lipSyncEnabled is set.
+    """
+    source = _read("static/mmd/mmd-expression.js")
+    formant_method = source.split("if (anim._formantAnalyzer) {", 1)[1].split(
+        "anim.getLipSyncValue()", 1
+    )[0]
+    assert "const speaking = FORMANT_KEYS.some(" in formant_method
+    assert "if (!speaking && vowel !== 'a' && vowel !== 'o') continue;" in formant_method
+
+    # The legacy branch this mirrors must keep its own gate.
+    legacy = source.split("anim.getLipSyncValue()", 1)[1]
+    assert "if (lipValue > 0.05) {" in legacy
+    assert "for (const phoneme of ['i', 'u', 'e'])" in legacy
+
+
 def test_mmd_formant_map_is_hoisted_not_rebuilt_per_frame():
     """The key map is a frozen module constant, not a literal built per frame.
 
