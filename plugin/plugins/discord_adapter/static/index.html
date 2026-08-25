@@ -74,6 +74,48 @@
                     <input id="cfg-admin-ids" type="text" spellcheck="false" placeholder="123456789012345678, 234567890123456789">
                     <small data-i18n="basic.admin_hint">Discord 设置 → 高级 → 打开「开发者模式」→ 右键用户头像 → 复制用户 ID。管理员会被猫娘当作主人。</small>
                 </div>
+
+                <!-- 网络代理（基础用户可见） -->
+                <div class="field">
+                    <label for="cfg-proxy" data-i18n="basic.proxy_label">网络代理（可选）</label>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <input id="cfg-proxy" type="text" spellcheck="false" placeholder="http://127.0.0.1:7890" style="flex:1">
+                        <button id="btn-proxy-help" class="button secondary" type="button" data-i18n="basic.proxy_help_btn">怎么填？</button>
+                    </div>
+                    <p class="hint" data-i18n="basic.proxy_hint">如果 Discord 连不上，多半是需要代理。填你电脑上的 VPN/代理软件端口，通常 7890（Clash 系）或 1080（v2ray）。</p>
+                    <details id="proxy-guide" style="margin-top:8px;display:none">
+                        <summary style="cursor:pointer;color:var(--accent);font-size:13px" data-i18n="basic.proxy_guide_title">展开查看常见 VPN 设置教程</summary>
+                        <div style="margin-top:10px;padding:12px;background:var(--bg-secondary);border-radius:8px;font-size:13px;line-height:1.6">
+                            <p style="margin:0 0 8px" data-i18n="basic.proxy_guide_intro"><strong>常见软件端口速查：</strong></p>
+                            <table style="width:100%;border-collapse:collapse;font-size:12px">
+                                <tr style="border-bottom:1px solid var(--border)">
+                                    <td style="padding:6px 4px;font-weight:600">FlClash / Clash Verge / Clash Meta</td>
+                                    <td style="padding:6px 4px">7890</td>
+                                </tr>
+                                <tr style="border-bottom:1px solid var(--border)">
+                                    <td style="padding:6px 4px;font-weight:600">Clash for Windows</td>
+                                    <td style="padding:6px 4px">7890</td>
+                                </tr>
+                                <tr style="border-bottom:1px solid var(--border)">
+                                    <td style="padding:6px 4px;font-weight:600">v2rayN / v2rayNG</td>
+                                    <td style="padding:6px 4px">10809</td>
+                                </tr>
+                                <tr style="border-bottom:1px solid var(--border)">
+                                    <td style="padding:6px 4px;font-weight:600">Shadowsocks</td>
+                                    <td style="padding:6px 4px">1080</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding:6px 4px;font-weight:600">其他软件</td>
+                                    <td style="padding:6px 4px">看设置里的「本地端口」或「SOCKS5/HTTP 端口」</td>
+                                </tr>
+                            </table>
+                            <p style="margin:12px 0 4px" data-i18n="basic.proxy_guide_lan"><strong>关键：打开「允许局域网连接」</strong></p>
+                            <p style="margin:0;color:var(--text-secondary)" data-i18n="basic.proxy_guide_lan_desc">N.E.K.O 可能运行在其他设备（如手机、另一台电脑），需要 VPN 软件开启「允许局域网连接」或「Allow LAN」，否则代理只对浏览器生效。</p>
+                            <p style="margin:8px 0 0;color:var(--text-secondary)" data-i18n="basic.proxy_guide_format"><strong>格式：</strong>http://IP地址:端口，本机填 http://127.0.0.1:7890，其他设备填 http://电脑IP:7890</p>
+                        </div>
+                    </details>
+                </div>
+
                 <div class="actions">
                     <button id="btn-test" class="button secondary" type="button" data-i18n="actions.test">测试连接</button>
                 </div>
@@ -117,10 +159,6 @@
                     <div class="field">
                         <label for="cfg-max-attachment" data-i18n="advanced.attachment_label">单附件上限（MB）</label>
                         <input id="cfg-max-attachment" type="number" min="1" max="25" step="1" value="10">
-                    </div>
-                    <div class="field">
-                        <label for="cfg-proxy" data-i18n="advanced.proxy_label">代理 URL（可选）</label>
-                        <input id="cfg-proxy" type="text" spellcheck="false" placeholder="http://127.0.0.1:7890">
                     </div>
                 </div>
             </details>

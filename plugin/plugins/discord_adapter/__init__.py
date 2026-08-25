@@ -22,8 +22,10 @@ from plugin.sdk.plugin import (
 from .attachment import AttachmentProcessor
 from .config_store import DiscordConfigStore
 from .gateway_client import DiscordGatewayClient
+from .memory_bridge import DiscordMemoryBridge
 from .permission import PermissionManager
 from .rest_client import DiscordRestClient
+from .sandbox import execute_code as sandbox_execute_code
 
 UI_ASSET_VERSION = "0.1.0"
 
@@ -124,6 +126,7 @@ class DiscordAdapterPlugin(NekoPluginBase):
         self.rest_client: Optional[DiscordRestClient] = None
         self.attachment_processor: Optional[AttachmentProcessor] = None
         self.permission_mgr: Optional[PermissionManager] = None
+        self.memory_bridge = DiscordMemoryBridge(self)
 
         # 运行状态
         self._running = False
@@ -152,6 +155,9 @@ class DiscordAdapterPlugin(NekoPluginBase):
         # Bot 自身身份（READY/@me 之后可用）
         self._bot_user_id: str = ""
         self._bot_username: str = ""
+
+        # 长期记忆桥（memory_server 127.0.0.1:48912）
+        self.memory_bridge = DiscordMemoryBridge(self)
 
         # 状态统计（面板可读）
         self._stats: dict[str, Any] = {
@@ -563,6 +569,17 @@ class DiscordAdapterPlugin(NekoPluginBase):
             if session_key not in self._channel_sessions:
                 self.logger.info(f"为 Discord 会话 {session_key} 创建新的 AI 会话")
 
+                # 拉取长期记忆注入 system prompt（best-effort，失败不阻塞）
+                bootstrap_memory = ""
+                try:
+                    bootstrap_memory = await self.memory_bridge.fetch_bootstrap_memory(
+                        her_name
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        f"拉取长期记忆失败（跳过注入）: {type(exc).__name__}"
+                    )
+
                 reply_chunks: list[str] = []
 
                 async def on_text_delta(text: str, is_first: bool):
@@ -575,6 +592,221 @@ class DiscordAdapterPlugin(NekoPluginBase):
                     on_text_delta=on_text_delta,
                 )
 
+                # 注册 LLM 工具（recall_memory + send_image + send_file + execute_code）
+                from main_logic.tool_calling import ToolDefinition, ToolResult
+
+                tools = [
+                    ToolDefinition(
+                        name="recall_memory",
+                        description="回忆过去的对话记忆。当你需要想起之前和用户聊过的内容时使用。",
+                        parameters={
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "要检索的记忆关键词或主题",
+                                },
+                                "time": {
+                                    "type": "string",
+                                    "description": "可选的时间范围描述，如'昨天'、'上周'",
+                                },
+                            },
+                            "required": [],
+                        },
+                        metadata={"source": "discord_adapter"},
+                    ),
+                    ToolDefinition(
+                        name="send_image",
+                        description="发送一张图片到当前 Discord 频道。支持图片 URL 或 base64 数据。",
+                        parameters={
+                            "type": "object",
+                            "properties": {
+                                "url_or_b64": {
+                                    "type": "string",
+                                    "description": "图片的 http/https URL 或 base64 编码字符串",
+                                },
+                                "caption": {
+                                    "type": "string",
+                                    "description": "图片说明文字（可选）",
+                                },
+                            },
+                            "required": ["url_or_b64"],
+                        },
+                        metadata={"source": "discord_adapter"},
+                    ),
+                    ToolDefinition(
+                        name="send_file",
+                        description="发送一个文件到当前 Discord 频道。支持文件 URL 或本地路径。",
+                        parameters={
+                            "type": "object",
+                            "properties": {
+                                "path_or_url": {
+                                    "type": "string",
+                                    "description": "文件的 http/https URL 或本地文件路径",
+                                },
+                                "filename": {
+                                    "type": "string",
+                                    "description": "显示的文件名（可选，默认从 URL/路径推断）",
+                                },
+                            },
+                            "required": ["path_or_url"],
+                        },
+                        metadata={"source": "discord_adapter"},
+                    ),
+                    ToolDefinition(
+                        name="execute_code",
+                        description="在沙盒中执行一小段代码并返回输出。用于计算、数据处理、格式转换等。",
+                        parameters={
+                            "type": "object",
+                            "properties": {
+                                "language": {
+                                    "type": "string",
+                                    "description": "编程语言：python 或 javascript",
+                                },
+                                "code": {
+                                    "type": "string",
+                                    "description": "要执行的源代码",
+                                },
+                            },
+                            "required": ["language", "code"],
+                        },
+                        metadata={"source": "discord_adapter"},
+                    ),
+                ]
+                user_session.set_tools(tools)
+
+                async def _on_tool_call(tool_call):
+                    from main_logic.tool_calling import ToolResult
+
+                    if tool_call.name == "recall_memory":
+                        query = tool_call.arguments.get("query", "")
+                        try:
+                            result = await self.memory_bridge.query_relevant_memory(
+                                her_name, query
+                            )
+                            return ToolResult(
+                                call_id=tool_call.call_id,
+                                name=tool_call.name,
+                                output=result.text or "没有找到相关记忆",
+                            )
+                        except Exception as exc:
+                            self.logger.warning(
+                                f"recall_memory 调用失败（返回空结果）: {type(exc).__name__}"
+                            )
+                            return ToolResult(
+                                call_id=tool_call.call_id,
+                                name=tool_call.name,
+                                output="没有找到相关记忆",
+                            )
+
+                    elif tool_call.name == "send_image":
+                        url_or_b64 = tool_call.arguments.get("url_or_b64", "")
+                        caption = tool_call.arguments.get("caption", "")
+                        try:
+                            # 下载或解码
+                            if url_or_b64.startswith(("http://", "https://")):
+                                file_bytes = await self._download_url_bytes(url_or_b64)
+                                filename = url_or_b64.split("/")[-1].split("?")[0] or "image.png"
+                            else:
+                                import base64
+                                file_bytes = base64.b64decode(url_or_b64)
+                                filename = "image.png"
+
+                            # 推断 content type
+                            ct = "image/png"
+                            if filename.lower().endswith((".jpg", ".jpeg")):
+                                ct = "image/jpeg"
+                            elif filename.lower().endswith(".gif"):
+                                ct = "image/gif"
+                            elif filename.lower().endswith(".webp"):
+                                ct = "image/webp"
+
+                            await self.rest_client.create_message_with_attachment(
+                                channel_id=session_key.split(":")[-1],
+                                content=caption,
+                                file_bytes=file_bytes,
+                                filename=filename,
+                                content_type=ct,
+                            )
+                            return ToolResult(
+                                call_id=tool_call.call_id,
+                                name=tool_call.name,
+                                output="图片已发送",
+                            )
+                        except Exception as exc:
+                            self.logger.warning(f"send_image 失败: {type(exc).__name__}: {exc}")
+                            return ToolResult(
+                                call_id=tool_call.call_id,
+                                name=tool_call.name,
+                                output=f"发送图片失败: {type(exc).__name__}",
+                                is_error=True,
+                            )
+
+                    elif tool_call.name == "send_file":
+                        path_or_url = tool_call.arguments.get("path_or_url", "")
+                        filename = tool_call.arguments.get("filename", "")
+                        try:
+                            if path_or_url.startswith(("http://", "https://")):
+                                file_bytes = await self._download_url_bytes(path_or_url)
+                                if not filename:
+                                    filename = path_or_url.split("/")[-1].split("?")[0] or "file.bin"
+                            else:
+                                import pathlib
+                                p = pathlib.Path(path_or_url)
+                                file_bytes = p.read_bytes()
+                                if not filename:
+                                    filename = p.name
+
+                            await self.rest_client.create_message_with_attachment(
+                                channel_id=session_key.split(":")[-1],
+                                content="",
+                                file_bytes=file_bytes,
+                                filename=filename,
+                                content_type="application/octet-stream",
+                            )
+                            return ToolResult(
+                                call_id=tool_call.call_id,
+                                name=tool_call.name,
+                                output=f"文件 {filename} 已发送",
+                            )
+                        except Exception as exc:
+                            self.logger.warning(f"send_file 失败: {type(exc).__name__}: {exc}")
+                            return ToolResult(
+                                call_id=tool_call.call_id,
+                                name=tool_call.name,
+                                output=f"发送文件失败: {type(exc).__name__}",
+                                is_error=True,
+                            )
+
+                    elif tool_call.name == "execute_code":
+                        language = tool_call.arguments.get("language", "")
+                        code = tool_call.arguments.get("code", "")
+                        try:
+                            output = await sandbox_execute_code(language, code)
+                            return ToolResult(
+                                call_id=tool_call.call_id,
+                                name=tool_call.name,
+                                output=output,
+                            )
+                        except Exception as exc:
+                            self.logger.warning(f"execute_code 失败: {type(exc).__name__}: {exc}")
+                            return ToolResult(
+                                call_id=tool_call.call_id,
+                                name=tool_call.name,
+                                output=f"执行失败: {type(exc).__name__}",
+                                is_error=True,
+                            )
+
+                    return ToolResult(
+                        call_id=tool_call.call_id,
+                        name=tool_call.name,
+                        output=f"unknown tool {tool_call.name}",
+                        is_error=True,
+                        error_message=f"unknown tool {tool_call.name}",
+                    )
+
+                user_session.set_tool_call_handler(_on_tool_call)
+
                 system_prompt = await self._build_session_instructions(
                     her_name=her_name,
                     master_name=master_name,
@@ -585,6 +817,11 @@ class DiscordAdapterPlugin(NekoPluginBase):
                     user_title=user_title,
                     is_dm=is_dm,
                 )
+                if bootstrap_memory:
+                    system_prompt = (
+                        f"{system_prompt}\n\n======长期记忆======\n"
+                        f"{bootstrap_memory}\n======长期记忆结束======"
+                    )
 
                 await asyncio.wait_for(
                     user_session.connect(instructions=system_prompt),
@@ -735,6 +972,21 @@ class DiscordAdapterPlugin(NekoPluginBase):
 
     # ===== Reply sending =====
 
+    async def _download_url_bytes(self, url: str, max_bytes: int = 10 * 1024 * 1024) -> bytes:
+        """Download bytes from a URL with size cap (for send_image/send_file tools)."""
+        import httpx
+        async with httpx.AsyncClient(timeout=30.0, proxy=self._settings.get("proxy_url") or None) as client:
+            async with client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes(65536):
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError(f"Download exceeds {max_bytes} bytes")
+                    chunks.append(chunk)
+                return b"".join(chunks)
+
     async def _send_reply(self, channel_id: str, reply_text: str) -> None:
         """AI 回复 → Markdown 图片转 embed → 分段 → REST 发回原频道。"""
         if not self.rest_client:
@@ -799,13 +1051,37 @@ class DiscordAdapterPlugin(NekoPluginBase):
                 await self._release_session_lock(session_key, session_lock)
 
     async def _finalize_session(self, session_key: str, reason: str) -> bool:
-        """关闭并移除会话"""
+        """关闭并移除会话，同时推送对话摘要到 memory_server"""
         session_data = self._channel_sessions.get(session_key)
         if not session_data:
             return False
         session = session_data.get("session")
         try:
             if session:
+                # 先推送摘要到 memory_server（best-effort，失败不阻塞关闭）
+                try:
+                    messages = getattr(session, "_conversation_history", [])
+                    # 只保留 role/content 的纯 dict 列表，避免 SystemMessage 等对象
+                    history = [
+                        {"role": m.get("role"), "content": m.get("content")}
+                        for m in messages
+                        if isinstance(m, dict)
+                    ]
+                    if not history:
+                        history = [
+                            {"role": getattr(m, "type", None) or getattr(m, "role", None),
+                             "content": getattr(m, "content", "")}
+                            for m in messages
+                        ]
+                    her_name = session_data.get("her_name", "")
+                    if her_name and history:
+                        await self.memory_bridge.post_memory_history(
+                            "process", her_name, history
+                        )
+                except Exception as mem_exc:
+                    self.logger.warning(
+                        f"[{reason}] 推送记忆摘要失败 {session_key}: {type(mem_exc).__name__}"
+                    )
                 await session.close()
             self._channel_sessions.pop(session_key, None)
             self.logger.info(f"[{reason}] Discord 会话已关闭: {session_key}")
@@ -847,6 +1123,7 @@ class DiscordAdapterPlugin(NekoPluginBase):
             max_reconnect_attempts=int(
                 self._settings.get("max_reconnect_attempts") or 5
             ),
+            proxy_url=proxy_url,
             logger=self.logger,
         )
 

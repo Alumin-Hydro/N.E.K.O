@@ -323,6 +323,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     const input = document.getElementById('cfg-bot-token');
     input.type = input.type === 'password' ? 'text' : 'password';
   });
+  document.getElementById('btn-proxy-help').addEventListener('click', () => {
+    const guide = document.getElementById('proxy-guide');
+    guide.style.display = guide.style.display === 'none' ? 'block' : 'none';
+  });
   document.getElementById('btn-test').addEventListener('click', testConnection);
   document.getElementById('btn-start').addEventListener('click', () => toggleListening(true));
   document.getElementById('btn-stop').addEventListener('click', () => toggleListening(false));

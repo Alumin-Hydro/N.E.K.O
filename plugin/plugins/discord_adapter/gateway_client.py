@@ -45,6 +45,8 @@ class DiscordGatewayClient:
         reconnect_backoff_seconds: Initial reconnect backoff seconds.
         max_reconnect_attempts: Max consecutive reconnect attempts before giving
             up (reported via on_state_change('max_retries', ...)).
+        proxy_url: Optional HTTP proxy URL for Gateway WebSocket connection
+            (e.g. http://127.0.0.1:7890). Uses HTTP CONNECT tunnel.
         logger: Logger with info/warning/error methods.
     """
 
@@ -57,6 +59,7 @@ class DiscordGatewayClient:
         on_state_change: Optional[Callable[[str, str], Awaitable[None]]] = None,
         reconnect_backoff_seconds: float = 3.0,
         max_reconnect_attempts: int = 5,
+        proxy_url: str = "",
         logger: Any = None,
     ):
         self._token = token
@@ -65,6 +68,7 @@ class DiscordGatewayClient:
         self._on_state_change = on_state_change
         self._backoff_base = reconnect_backoff_seconds
         self._max_attempts = max_reconnect_attempts
+        self._proxy_url = str(proxy_url or "").strip() or None
         self._logger = logger
 
         self._ws: Any = None
@@ -152,7 +156,14 @@ class DiscordGatewayClient:
 
     async def _connect_once(self) -> None:
         url = self._resume_url if (self._session_id and self._resume_url) else GATEWAY_URL
-        async with websockets.connect(url, max_size=16 * 1024 * 1024) as ws:
+        connect_kwargs: dict[str, Any] = {"max_size": 16 * 1024 * 1024}
+
+        if self._proxy_url:
+            # websockets 15.x natively supports HTTP CONNECT proxies.
+            connect_kwargs["proxy"] = self._proxy_url
+            self._log("info", f"Using proxy: {self._proxy_url}")
+
+        async with websockets.connect(url, **connect_kwargs) as ws:
             self._ws = ws
             # --- Hello ---
             hello = await self._recv(ws)

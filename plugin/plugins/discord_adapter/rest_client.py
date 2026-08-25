@@ -139,6 +139,68 @@ class DiscordRestClient:
             body["embeds"] = embeds
         return await self._request("POST", f"/channels/{channel_id}/messages", json_body=body)
 
+    async def create_message_with_attachment(
+        self,
+        channel_id: str,
+        content: str = "",
+        *,
+        file_bytes: bytes = b"",
+        filename: str = "image.png",
+        content_type: str = "image/png",
+    ) -> dict[str, Any]:
+        """Send a message with a single file attachment (multipart/form-data).
+
+        Args:
+            channel_id: Target channel ID.
+            content: Optional text content (<= 2000 chars).
+            file_bytes: Raw file bytes.
+            filename: Display filename.
+            content_type: MIME type (e.g. image/png, image/jpeg).
+        """
+        import json as _json
+
+        boundary = "----NekoDiscordBoundary"
+        payload_json = _json.dumps({"content": content})
+
+        # Build multipart body manually (httpx multipart is fine too, but
+        # manual gives us exact control over the payload_json field name).
+        lines: list[bytes] = []
+        # payload_json part
+        lines.append(f"--{boundary}\r\n".encode())
+        lines.append(
+            b'Content-Disposition: form-data; name="payload_json"\r\n'
+            b"Content-Type: application/json\r\n\r\n"
+        )
+        lines.append(payload_json.encode())
+        lines.append(b"\r\n")
+        # files[0] part
+        lines.append(f"--{boundary}\r\n".encode())
+        lines.append(
+            f'Content-Disposition: form-data; name="files[0]"; filename="{filename}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n".encode()
+        )
+        lines.append(file_bytes)
+        lines.append(b"\r\n")
+        lines.append(f"--{boundary}--\r\n".encode())
+
+        body_bytes = b"".join(lines)
+        headers = {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        }
+
+        client = self._get_client()
+        resp = await client.post(
+            f"/channels/{channel_id}/messages",
+            content=body_bytes,
+            headers=headers,
+        )
+        if resp.status_code >= 400:
+            raise DiscordRestError(
+                f"Discord API POST /channels/{channel_id}/messages failed: HTTP {resp.status_code}",
+                status=resp.status_code,
+            )
+        return resp.json()
+
     async def download_attachment(
         self, url: str, max_bytes: int = 10 * 1024 * 1024
     ) -> bytes:
