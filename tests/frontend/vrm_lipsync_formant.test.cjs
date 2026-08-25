@@ -14,7 +14,11 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-const projectRoot = path.resolve(__dirname, '..', '..');
+// 与 tests/frontend/vrm_motion_*.test.cjs 同一套定位方式：直接 `node <file>` 时
+// __dirname 可用；经 tests/node_harness.run_node_script 拉起时脚本被写到临时目录，
+// __dirname 指不到仓库，此时回落到 harness 传进来的 cwd。
+const fileRoot = path.resolve(__dirname, '..', '..');
+const projectRoot = fs.existsSync(path.join(fileRoot, 'static')) ? fileRoot : process.cwd();
 const modulePath = path.join(projectRoot, 'static', 'vrm', 'vrm-lipsync-formant.js');
 const moduleSource = fs.readFileSync(modulePath, 'utf8');
 

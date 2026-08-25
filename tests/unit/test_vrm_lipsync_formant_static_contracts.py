@@ -14,10 +14,11 @@ Two layers guard this feature:
 """
 import re
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.node_harness import run_node_script
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -52,15 +53,19 @@ def test_formant_behaviour_suite():
         pytest.skip("node not found")
 
     test_path = PROJECT_ROOT / "tests" / "frontend" / "vrm_lipsync_formant.test.cjs"
-    # encoding is pinned explicitly: the suite names its cases in Chinese and a
-    # stock English Windows runner decodes subprocess output as cp1252, which
-    # turns a passing suite into a UnicodeDecodeError.
-    result = subprocess.run(
-        [node_path, "--test", str(test_path)],
+    # Goes through the shared launcher rather than a hand-rolled subprocess call:
+    # it pins the temp-file form (Windows' 32767-char command line) and UTF-8 in
+    # both directions, which this suite needs because it names its cases in
+    # Chinese. tests/unit/test_node_harness_contract.py enforces that.
+    #
+    # The launcher runs `node <file>` with no --test flag; node:test still
+    # executes every case and still exits non-zero on failure, and the suite
+    # resolves the repo from cwd when __dirname points at the temp copy.
+    result = run_node_script(
+        node_path,
+        test_path.read_text(encoding="utf-8"),
         cwd=PROJECT_ROOT,
         capture_output=True,
-        text=True,
-        encoding="utf-8",
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
