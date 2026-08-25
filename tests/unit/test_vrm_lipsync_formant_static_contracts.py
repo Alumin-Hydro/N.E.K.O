@@ -69,9 +69,27 @@ def test_formant_behaviour_suite():
 # ─────────────────────────────── loader chains ───────────────────────────────
 
 
+# The array names each loader chain is expected to expose. Pinned so that a
+# regex that silently stops matching one of them fails loudly instead of
+# vacuously reporting "nothing to check". An earlier version of the pattern
+# allowed `[` to be followed by anything, so `const failedModules = [];` matched
+# lazily all the way to the *next* array's closing bracket and swallowed
+# `mmdModules` whole -- the MMD chain was then never checked on its own.
+EXPECTED_CHAIN_ARRAYS = {
+    "static/vrm/vrm-init.js": {"parallelModules"},
+    "static/mmd/mmd-init.js": {"parallelModules"},
+    "static/js/model_manager/runtime-loaders.js": {"vrmModules", "mmdModules"},
+    "static/js/character_card_manager/model-previews.js": {"vrmModules", "mmdModules"},
+}
+
+
 def _module_arrays(source):
-    """Yield ``(name, body)`` for every JS array literal of /static/ module paths."""
-    for match in re.finditer(r"const\s+(\w+)\s*=\s*\[(.*?)\n\s*\];", source, re.S):
+    """Yield ``(name, body)`` for every multi-line JS array of /static/ paths.
+
+    Requiring a newline right after ``[`` is what keeps empty arrays such as
+    ``const failedModules = [];`` from matching and eating a later array.
+    """
+    for match in re.finditer(r"const\s+(\w+)\s*=\s*\[[ \t]*\n(.*?)\n\s*\];", source, re.S):
         name, body = match.group(1), match.group(2)
         if "/static/" in body:
             yield name, body
@@ -96,7 +114,15 @@ def test_chains_that_load_animation_also_load_the_analyzer(chain):
     """
     source = _read(chain)
     arrays = list(_module_arrays(source))
-    assert arrays, f"{chain}: no module arrays parsed -- the matcher has drifted"
+    names = {name for name, _ in arrays}
+
+    # Parser-drift guard. Without pinning the names, a pattern that stops
+    # matching one array turns this test into a no-op that still reports green.
+    missing = EXPECTED_CHAIN_ARRAYS[chain] - names
+    assert not missing, (
+        f"{chain}: expected module arrays {sorted(missing)} were not parsed "
+        f"(got {sorted(names)}) -- the matcher has drifted"
+    )
 
     consumers = [
         (name, body)
@@ -174,28 +200,50 @@ def test_vowel_key_tables_agree():
 # ───────────────────────────── host analyser ownership ───────────────────────
 
 
-def test_f2_search_window_covers_rounded_vowels():
-    """The F2 window must reach below the rounded vowels' reference centres.
+def test_f2_search_floor_is_not_lowered():
+    """F2 must keep searching from 1000Hz up, and from a fixed floor.
 
-    ou sits at 800Hz and oh at 900Hz. Searching F2 from 1000Hz up leaves both
-    permanently outside the window, and since ou and ih share an F1 of 350Hz,
-    F2 is the only thing that separates them -- "u" then resolves as "i".
+    This guards a change that was tried and reverted. Dropping the floor to
+    700Hz so the rounded vowels' reference centres (ou 800, oh 900) fall inside
+    the window looks right on the parameter table but is a net regression: a
+    voiced spectrum falls monotonically past F1, and a real F2 peak sits
+    10-25dB below F1, so at a 700Hz floor the F1 skirt is usually the loudest
+    bin in the window and the peak-pick returns the floor itself. Measured on
+    225 frames of real formant data (Peterson-Barney / Hillenbrand values,
+    5 f0 x 3 F1 bandwidths), top-1 accuracy went 96.9% -> 84.4%, with ee->oh
+    and aa->oh flips, and the rounded vowels gained nothing -- the max
+    normalisation in sample() means an unreachable centre does not stop a vowel
+    from winning, so the motivating premise was false to begin with.
+
+    A relative floor (max(F2_MIN_HZ, f1 * ratio)) was also tried; it is inert
+    for four of the five reference vowels and far too small to clear F1's skirt
+    where it does bind.
     """
     source = _read("static/vrm/vrm-lipsync-formant.js")
     f2_min = int(source.split("const F2_MIN_HZ = ", 1)[1].split(";", 1)[0])
-    centres = []
-    table = source.split("const VOWEL_FORMANTS = Object.freeze({", 1)[1].split("});", 1)[0]
-    for hit in re.finditer(r"f2:\s*(\d+)", table):
-        centres.append(int(hit.group(1)))
-    assert centres, "could not parse the vowel formant table"
-    assert f2_min <= min(centres), (
-        f"F2 search starts at {f2_min}Hz but the lowest reference centre is "
-        f"{min(centres)}Hz; that vowel can never win"
+    assert f2_min >= 1000, (
+        f"F2 search floor is {f2_min}Hz; below 1000Hz the F1 skirt wins the "
+        f"peak-pick and front vowels collapse onto the rounded ones"
+    )
+    sample = source.split("sample() {", 1)[1].split("\n        }", 1)[0]
+    assert "this._peakBetween(F2_MIN_HZ, F2_MAX_HZ)" in sample, (
+        "F2 window must be the fixed [F2_MIN_HZ, F2_MAX_HZ]; a floor derived "
+        "from the measured f1 tracks F1's skirt instead of rejecting it"
     )
 
-    # F2 is also floated above F1 so a dominant F1 peak cannot be picked as F2.
-    ratio = float(source.split("const F2_MIN_RATIO_OVER_F1 = ", 1)[1].split(";", 1)[0])
-    assert ratio > 1.0, "F2 must start strictly above F1, else the F1 peak wins twice"
+
+def test_peak_frequency_has_a_floor():
+    """_peakBetween must never return 0Hz.
+
+    Bin width follows the host fftSize. A small host FFT leaves only a couple
+    of bins below 1kHz, and bin 0's centre frequency is 0Hz; that reaches
+    sample() as Math.log2(0 / v.f1) = -Infinity and zeroes all five vowel
+    weights at once, so the winner degenerates to a constant.
+    """
+    source = _read("static/vrm/vrm-lipsync-formant.js")
+    assert "const MIN_PEAK_HZ = " in source
+    peak_method = source.split("_peakBetween(minHz, maxHz) {", 1)[1].split("\n        }", 1)[0]
+    assert "Math.max(MIN_PEAK_HZ," in peak_method
 
 
 def test_analyzer_never_writes_host_analyser_config():
@@ -265,12 +313,37 @@ def test_vrm_analyzer_construction_is_guarded():
 
 
 def test_update_lipsync_prefers_formant_then_falls_back():
-    """_updateLipSync tries the formant path first, then falls back to volume."""
+    """_updateLipSync tries the formant path first, and the branches are exclusive.
+
+    Ordering alone is not enough to assert: without the ``return`` the formant
+    path falls through into the legacy single-channel driver, which then
+    overwrites all five vowels with its volume-only 'aa' write every frame --
+    the feature is off but every ordering assertion still holds.
+    """
     source = _read("static/vrm/vrm-animation.js")
     method = source.split("_updateLipSync(delta) {", 1)[1]
     formant_branch = method.index("this._updateLipSyncFormant(expressionManager, delta);")
     fallback_branch = method.index("getByteFrequencyData(this.frequencyData)")
     assert formant_branch < fallback_branch
+
+    between = method[formant_branch:fallback_branch]
+    assert "return;" in between, (
+        "the formant branch must return; otherwise it falls through into the "
+        "legacy path and the vowel weights are immediately overwritten"
+    )
+
+
+def test_mmd_formant_branch_is_exclusive():
+    """Same exclusivity requirement on the MMD side of update()."""
+    source = _read("static/mmd/mmd-expression.js")
+    method = source.split("update(delta) {", 1)[1]
+    formant_branch = method.index("anim._formantAnalyzer")
+    fallback_branch = method.index("anim.getLipSyncValue()")
+    between = method[formant_branch:fallback_branch]
+    assert "return;" in between, (
+        "the formant branch must return; otherwise setMouth() overwrites the "
+        "vowel morphs in the same frame"
+    )
 
 
 def test_formant_path_writes_all_five_vowels_with_preset_fallback():

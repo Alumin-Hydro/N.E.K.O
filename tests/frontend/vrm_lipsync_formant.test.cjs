@@ -73,6 +73,11 @@ function makeAnalyser(peaks, overrides = {}) {
 }
 
 // 某元音的一帧发声：F1 最强、F2 次强，再加谐波与高频底噪。
+//
+// 注意这是"孤立谱峰"语料：峰之间是硬零。它够用来验平滑、门限、键映射这类
+// 与谱形无关的行为，但**不能**用来判断共振峰检测的好坏——真实语音在 F1 之后
+// 是单调下降的连续谱，F1 的裙边会盖过高频，而这里没有裙边。判别质量一律用
+// 下面的 source-filter 合成语料（synthVowelAnalyser）来测。
 function vowelAnalyser(f1, f2) {
     return makeAnalyser([
         { hz: f1, level: 210 },
@@ -82,6 +87,100 @@ function vowelAnalyser(f1, f2) {
         { hz: 3400, level: 40 },
     ]);
 }
+
+// ───────────────── source-filter 元音合成（判别质量专用）─────────────────
+//
+// 声门脉冲串 → 两个一极点(-12dB/oct) → 级联二极点共振器 → 唇辐射(+6dB/oct)，
+// 再按 Web Audio 的真实映射转成 byte：Blackman 窗、DFT、20log10、
+// [minDecibels,maxDecibels] = [-100,-30] 夹到 0..255。
+// 这样谱形带真实的裙边与倾斜，"F1 裙边压过 F2 峰"这类失效模式才可能被表达出来。
+function synthSignal(f0, formants, n) {
+    const y = new Float64Array(n);
+    const period = SAMPLE_RATE / f0;
+    for (let k = 0; k * period < n; k++) y[Math.floor(k * period)] = 1;
+    for (let p = 0; p < 2; p++) {                       // 声门源 -12dB/oct
+        const a = Math.exp(-2 * Math.PI * 100 / SAMPLE_RATE);
+        let prev = 0;
+        for (let i = 0; i < n; i++) { y[i] = (1 - a) * y[i] + a * prev; prev = y[i]; }
+    }
+    for (const [F, B] of formants) {                    // 共振器（DC 归一化）
+        const r = Math.exp(-Math.PI * B / SAMPLE_RATE);
+        const th = 2 * Math.PI * F / SAMPLE_RATE;
+        const a1 = 2 * r * Math.cos(th), a2 = -r * r, b0 = 1 - a1 - a2;
+        let y1 = 0, y2 = 0;
+        for (let i = 0; i < n; i++) { const v = b0 * y[i] + a1 * y1 + a2 * y2; y2 = y1; y1 = v; y[i] = v; }
+    }
+    let prev = 0;                                       // 唇辐射 +6dB/oct
+    for (let i = 0; i < n; i++) { const v = y[i] - prev; prev = y[i]; y[i] = v; }
+    let peak = 0;
+    for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(y[i]));
+    // 归一到真实音频量级；不归一的话整条谱会被 minDecibels 夹成 0，
+    // 那时测的是搜索窗常量而不是算法。
+    if (peak > 0) { const g = 0.5 / peak; for (let i = 0; i < n; i++) y[i] *= g; }
+    return y;
+}
+
+const BLACKMAN = new Float64Array(HOST_FFT_SIZE);
+for (let i = 0; i < HOST_FFT_SIZE; i++) {
+    BLACKMAN[i] = 0.42
+        - 0.5 * Math.cos(2 * Math.PI * i / (HOST_FFT_SIZE - 1))
+        + 0.08 * Math.cos(4 * Math.PI * i / (HOST_FFT_SIZE - 1));
+}
+
+function byteSpectrum(sig) {
+    const N = HOST_FFT_SIZE;
+    const re = new Float64Array(N), im = new Float64Array(N);
+    for (let i = 0; i < N; i++) re[i] = sig[i] * BLACKMAN[i];
+    for (let i = 1, j = 0; i < N; i++) {                // bit reversal
+        let bit = N >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
+    }
+    for (let len = 2; len <= N; len <<= 1) {            // radix-2 FFT
+        const ang = -2 * Math.PI / len;
+        const wr = Math.cos(ang), wi = Math.sin(ang);
+        for (let i = 0; i < N; i += len) {
+            let cwr = 1, cwi = 0;
+            for (let k = 0; k < len / 2; k++) {
+                const ur = re[i + k], ui = im[i + k];
+                const vr = re[i + k + len / 2] * cwr - im[i + k + len / 2] * cwi;
+                const vi = re[i + k + len / 2] * cwi + im[i + k + len / 2] * cwr;
+                re[i + k] = ur + vr; im[i + k] = ui + vi;
+                re[i + k + len / 2] = ur - vr; im[i + k + len / 2] = ui - vi;
+                const nwr = cwr * wr - cwi * wi; cwi = cwr * wi + cwi * wr; cwr = nwr;
+            }
+        }
+    }
+    const bins = new Uint8Array(N / 2);
+    for (let i = 0; i < N / 2; i++) {
+        const mag = Math.hypot(re[i], im[i]) / N;
+        const db = 20 * Math.log10(Math.max(mag, 1e-12));
+        bins[i] = Math.max(0, Math.min(255, Math.round((db + 100) / 70 * 255)));
+    }
+    return bins;
+}
+
+/** 一个说着给定共振峰的嗓音，做成 analyser。 */
+function synthVowelAnalyser(f0, [F1, F2, F3, F4], b1 = 90) {
+    const bins = byteSpectrum(
+        synthSignal(f0, [[F1, b1], [F2, 110], [F3, 140], [F4, 200]], HOST_FFT_SIZE)
+    );
+    return makeAnalyser([], { getByteFrequencyData(out) { out.set(bins.subarray(0, out.length)); } });
+}
+
+// 真实共振峰（Peterson-Barney / Hillenbrand 量级 + 日语五元音），映射到分析器的键
+const REAL_VOWELS = [
+    ['aa', '男 /ɑ/', [730, 1090, 2440, 3400]],
+    ['aa', '女 /ɑ/', [850, 1220, 2810, 3600]],
+    ['aa', '日 /a/', [750, 1200, 2500, 3400]],
+    ['ee', '男 /ɛ/', [530, 1840, 2480, 3500]],
+    ['ee', '女 /ɛ/', [610, 2330, 2990, 3700]],
+    ['ee', '日 /e/', [500, 1900, 2600, 3500]],
+    ['ih', '男 /i/', [270, 2290, 3010, 3700]],
+    ['ih', '女 /i/', [310, 2790, 3310, 3900]],
+    ['ih', '日 /i/', [300, 2300, 3000, 3700]],
+];
 
 // 驱动 analyzer 若干帧，同步推进被 mock 的 performance.now()。
 // 时钟必须跟着走：IDLE_MS 的判定读的是 performance.now()，不推进的话
@@ -116,36 +215,63 @@ test('重复加载幂等：第二次执行不抛、类身份不变', () => {
     assert.equal(context.window.FormantLipSyncAnalyzer, FormantLipSyncAnalyzer);
 });
 
-// ─────────────── 五元音判别（含 greptile 指出的圆唇元音）───────────────
+// ─────────────────────────── 五元音判别 ───────────────────────────
+//
+// 判别质量一律用下面的 source-filter 合成语料。曾经这里有一组"把参考 F1/F2
+// 原样喂回去"的孤立谱峰用例，两个毛病：
+//   1. 语料把参考表当输入又当答案，测不出距离度量由什么构成——把 d1 整个删掉
+//      （F1 不参与判别）它照样全绿；
+//   2. 谱峰之间是硬零，没有 F1 裙边，真实的失效模式表达不出来，
+//      反倒对 F2 窗内那个人造底噪峰过度敏感。
+// vowelAnalyser 仍用于与谱形无关的行为（平滑、门限、键映射）。
 
-const VOWEL_CASES = [
-    ['aa', 850, 1400],
-    ['ee', 550, 2100],
-    ['ih', 350, 2700],
-    ['oh', 500, 900],
-    ['ou', 350, 800],
-];
-
-for (const [want, f1, f2] of VOWEL_CASES) {
-    test(`共振峰指向 ${want}(F1=${f1} F2=${f2}) 时该元音权重最高`, () => {
-        const { FormantLipSyncAnalyzer, setNow } = loadModule();
-        const a = new FormantLipSyncAnalyzer(vowelAnalyser(f1, f2));
-        const { out } = runFrames(a, setNow, 40);
-        const top = ranked(out);
-        assert.equal(top[0][0], want, `期望 ${want} 最强，实际 ${JSON.stringify(out)}`);
-        assert.ok(out[want] > 0, `${want} 应被激活`);
-    });
-}
-
-test('圆唇元音 ou 不会被误判成 ih —— 两者 F1 相同，只能靠 F2 区分', () => {
-    // 回归锁：ou(350,800) 与 ih(350,2700) 的 F1 完全一致。F2 搜索窗若从
-    // 1000Hz 起搜，ou 的参考中心 800Hz 永远落在窗外，距离项恒大于零，
-    // 结果必然翻给 ih —— 嘴型从"圆唇闭后"跳成"展唇闭前"，正好相反。
+test('真实语音谱：前元音不会塌到圆唇元音（F2 窗下调的回归锁）', () => {
+    // 这条用 source-filter 合成语料，不用孤立谱峰——因为要守的失效模式正是
+    // "F1 的裙边盖过真实 F2 峰"，而孤立谱峰语料里根本没有裙边，表达不出来。
+    //
+    // 历史：曾把 F2 窗下界从 1000Hz 放到 700Hz（想让 ou/oh 的参考中心进窗），
+    // 结果 _peakBetween 在窗底就撞上 F1 的裙边、直接返回窗底，/e/ 与 /a/ 成片
+    // 翻成 oh。本语料下正确率 96.9% -> 84.4%。
     const { FormantLipSyncAnalyzer, setNow } = loadModule();
-    const a = new FormantLipSyncAnalyzer(vowelAnalyser(350, 800));
-    const { out } = runFrames(a, setNow, 40);
-    assert.ok(out.ou > out.ih,
-        `ou=${out.ou} 应强于 ih=${out.ih}（F2 搜索窗必须覆盖 800Hz）`);
+    const failures = [];
+    let total = 0, correct = 0;
+    for (const [want, label, formants] of REAL_VOWELS) {
+        for (const f0 of [95, 110, 130, 180, 230]) {
+            for (const b1 of [60, 90, 130]) {
+                const a = new FormantLipSyncAnalyzer(synthVowelAnalyser(f0, formants, b1));
+                const { out } = runFrames(a, setNow, 30);
+                const got = ranked(out)[0][0];
+                total++;
+                if (got === want) correct++;
+                else failures.push(`${label}(f0=${f0},B1=${b1}) 期望 ${want} 实得 ${got}`);
+            }
+        }
+    }
+    const rate = correct / total;
+    assert.ok(rate >= 0.9,
+        `真实共振峰语料判别率 ${(rate * 100).toFixed(1)}% (${correct}/${total}) 应 >= 90%。\n` +
+        failures.slice(0, 8).join('\n'));
+});
+
+test('圆唇元音在真实语音谱下不被判成展唇元音', () => {
+    const { FormantLipSyncAnalyzer, setNow } = loadModule();
+    const ROUNDED = [
+        ['oh', '男 /ɔ/', [570, 840, 2410, 3400]],
+        ['oh', '日 /o/', [500, 900, 2500, 3400]],
+        ['ou', '男 /u/', [300, 870, 2240, 3400]],
+        ['ou', '女 /u/', [370, 950, 2670, 3600]],
+    ];
+    const bad = [];
+    for (const [want, label, formants] of ROUNDED) {
+        for (const f0 of [110, 180]) {
+            const a = new FormantLipSyncAnalyzer(synthVowelAnalyser(f0, formants));
+            const { out } = runFrames(a, setNow, 30);
+            const got = ranked(out)[0][0];
+            // 同为圆唇（oh/ou 互判）视觉上可接受；翻成 aa/ee/ih 才是唇形判反。
+            if (got !== 'oh' && got !== 'ou') bad.push(`${label}(f0=${f0}) -> ${got}`);
+        }
+    }
+    assert.deepEqual(bad, [], `圆唇元音被判成展唇口型: ${bad.join(', ')}`);
 });
 
 test('top-2：最多两个元音有非零权重', () => {
@@ -159,13 +285,19 @@ test('top-2：最多两个元音有非零权重', () => {
 
 // ─────────────── 静音 / idle 窗口 ───────────────
 
-test('静音超过 IDLE_MS 后所有元音收敛到 0', () => {
+test('静音超过 IDLE_MS 后所有元音从张嘴态收敛到 0', () => {
+    // 必须先驱动到有声稳态再切静音：直接用静音分析器构造，断言的只是
+    // "0 保持 0"，release 逻辑一行都没跑到，IDLE_MS 改成多少都绿。
     const { FormantLipSyncAnalyzer, setNow } = loadModule();
-    const a = new FormantLipSyncAnalyzer(makeAnalyser([]));
-    // 30 帧 × 16.7ms ≈ 500ms > IDLE_MS(160ms)
-    const { out } = runFrames(a, setNow, 30);
+    const a = new FormantLipSyncAnalyzer(vowelAnalyser(850, 1400));
+    const voiced = runFrames(a, setNow, 60);
+    assert.ok(voiced.out.aa > 0.1, `前置条件：有声稳态 aa=${voiced.out.aa} 应 > 0.1`);
+
+    a.attach(makeAnalyser([]));
+    // 30 帧 × 16.7ms ≈ 500ms > IDLE_MS(160ms)，足够走完 release
+    const { out } = runFrames(a, setNow, 30, { startNow: voiced.now });
     for (const [k, v] of Object.entries(out)) {
-        assert.ok(v <= 0.001, `静音时 ${k} 应为 0，实际 ${v}`);
+        assert.ok(v <= 0.001, `静音超时后 ${k} 应归零，实际 ${v}`);
     }
 });
 
@@ -238,17 +370,24 @@ test('释放慢于攻击：同一段位移，闭嘴耗时严格多于张嘴', ()
         `攻击(${'50'})应快于释放(${'30'})，故闭嘴帧数必须更多`);
 });
 
-test('帧率无关：60fps 与 30fps 在相同时长后到达相近权重', () => {
+test('帧率无关：60fps 与 30fps 在爬升途中就一致，不只是终点一致', () => {
+    // 跑满 1 秒两边都早已饱和到同一个稳态，那样比的是"目标值相同"，
+    // 对任何依赖帧率的平滑律都成立。要在**上升沿中段**取样才有分辨力：
+    // 若把 rate 写成与 delta 无关的常数（如 0.3），30fps 的位移会明显落后。
     const { FormantLipSyncAnalyzer, setNow } = loadModule();
+    const MID_MS = 40;   // 远早于饱和（ATTACK=50 的时间常数约 20ms）
+
     const a60 = new FormantLipSyncAnalyzer(vowelAnalyser(850, 1400));
-    runFrames(a60, setNow, 60, { delta: 1 / 60 }); // 1 秒
+    runFrames(a60, setNow, Math.round(MID_MS / (1000 / 60)), { delta: 1 / 60 });
 
     const a30 = new FormantLipSyncAnalyzer(vowelAnalyser(850, 1400));
-    runFrames(a30, setNow, 30, { delta: 1 / 30 }); // 1 秒
+    runFrames(a30, setNow, Math.round(MID_MS / (1000 / 30)), { delta: 1 / 30 });
 
+    assert.ok(a60.state.aa > 0.02 && a60.state.aa < 0.95 * 0.7,
+        `取样点必须落在上升沿中段，实测 aa=${a60.state.aa}（已饱和则该用例失去分辨力）`);
     const diff = Math.abs(a60.state.aa - a30.state.aa);
-    assert.ok(diff < 0.05,
-        `帧率无关性：60fps ${a60.state.aa} vs 30fps ${a30.state.aa} 差异 ${diff} 应 < 0.05`);
+    assert.ok(diff < 0.02,
+        `帧率无关性：${MID_MS}ms 处 60fps=${a60.state.aa} vs 30fps=${a30.state.aa} 差异 ${diff} 应 < 0.02`);
 });
 
 // ─────────────── 宿主 analyser 归属 ───────────────

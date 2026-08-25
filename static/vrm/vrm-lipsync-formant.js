@@ -64,21 +64,36 @@
 
     // F1/F2 搜索窗（Hz）。
     //
-    // F2 的下界必须低到能观测圆唇元音的 F2：ou 的参考中心是 800Hz、oh 是 900Hz。
-    // 早期版本从 1000Hz 起搜，这两个中心永远落在搜索窗外，对数距离项恒大于零，
-    // 于是五元音里有两个天然拿不到 winner——真人说"う/お"时嘴型会跳到别的元音。
+    // F2 从 1000Hz 起搜，**不要**为了让 ou(800)/oh(900) 的参考中心落进窗内而下调。
+    // 试过，是净回归，已回退：
+    //
+    //   动机看着成立——那两个中心在窗外，对数距离项恒大于零。但权重是按
+    //   max 归一化的（见 sample()），"赢家恒为 1"，绝对距离大不妨碍夺冠；
+    //   ou 与 oh 靠 F1 轴（350 / 500）就足以和展唇元音分开。所以那两个元音
+    //   本来就没有"天然拿不到 winner"的问题，改动想解决的是个不存在的问题。
+    //
+    //   代价却是实的：语音频谱在 F1 之后单调下降，真实 F2 峰比 F1 低 10~25dB。
+    //   窗底压到 700Hz 后，F1 的裙边在窗底往往比真正的 F2 峰还高，_peakBetween
+    //   于是返回窗口最低那个 bin。实测 male /ɛ/（F1=530 B=60、F2=1840 B=110、
+    //   F0=110、净 -6dB/oct、宿主 2048@48kHz）：byte@680=204 > byte@1840=194，
+    //   F2 被测成 680Hz，/e/ 于是驱动 oh 口型；同一帧在 1000Hz 窗下测得 1875Hz，
+    //   判定正确。扫 F1 带宽 {60,70,90,130} × 额外声门倾斜 {0,-6,-12} 共 12 组，
+    //   10 组两窗判定分歧，几乎全是低窗更差，且 ou/oh 一格也没变好。
+    //
+    // 结论：1000Hz 这条线是在"避开 F1 裙边"和"够低能测到圆唇 F2"之间的既有折中，
+    // 动它需要真机录音佐证，不能只看参考表的区间包含关系。
     const F1_MIN_HZ = 200;
     const F1_MAX_HZ = 1000;
-    const F2_MIN_HZ = 700;
+    const F2_MIN_HZ = 1000;
     const F2_MAX_HZ = 3000;
-    // F2 按定义高于 F1，故起搜点还要在 F1 之上留一档比例间隔，
-    // 避免把 F1 峰的 FFT 旁瓣误当成 F2。1.15 在 850Hz 处约合 130Hz，
-    // 即 43Hz 分辨率下的 3 个 bin。
-    const F2_MIN_RATIO_OVER_F1 = 1.15;
 
     // 音量取样带宽（Hz）
     const BAND_MIN_HZ = 200;
     const BAND_MAX_HZ = 4000;
+
+    // 峰值频率的下限。见 _peakBetween：低分辨率宿主下 bin 0 会让 log2(0) 变成
+    // -Infinity，把五个元音权重一起打成 0。取一个远低于任何参考 F1 的值。
+    const MIN_PEAK_HZ = 50;
 
     // 平滑与门限常数。攻击快于释放是真实发声的肌肉特性（嘴快速张开、缓慢闭合），
     // 反过来会产生廉价 lip-sync 的"橡皮嘴"感。
@@ -181,7 +196,14 @@
             return Math.min(n - 1, Math.max(0, raw));
         }
 
-        /** 频段 [minHz,maxHz] 内的峰值所在频率（Hz）。 */
+        /**
+         * 频段 [minHz,maxHz] 内的峰值所在频率（Hz）。
+         *
+         * 返回值下限夹到 MIN_PEAK_HZ：bin 宽度取决于宿主 fftSize，宿主给一个很小的
+         * fftSize 时（MMD 自建 analyser 是 256）低频只剩两三个 bin，bin 0 的中心频率
+         * 是 0Hz，一路传到 sample() 里就是 Math.log2(0 / v.f1) = -Infinity，五个元音
+         * 权重全变 0、winner 退化成常量。夹一个下限比在下游到处判 Infinity 干净。
+         */
         _peakBetween(minHz, maxHz) {
             const n = this.bins.length;
             const from = this._binOf(minHz);
@@ -196,7 +218,7 @@
                     at = i;
                 }
             }
-            return (at / n) * this.nyquist;
+            return Math.max(MIN_PEAK_HZ, (at / n) * this.nyquist);
         }
 
         /** 频段 [minHz,maxHz] 的平均能量，归一到 0..1。 */
@@ -220,13 +242,7 @@
             const volume = this._bandEnergy(BAND_MIN_HZ, BAND_MAX_HZ);
 
             const f1 = this._peakBetween(F1_MIN_HZ, F1_MAX_HZ);
-            // F2 起搜点同时受两个下界约束：绝对下界 F2_MIN_HZ 保证圆唇元音的参考
-            // 中心（ou 800Hz / oh 900Hz）落在窗内；相对下界 f1 * ratio 保证 F2 > F1
-            // 且不会捡到 F1 峰的旁瓣。
-            const f2 = this._peakBetween(
-                Math.max(F2_MIN_HZ, f1 * F2_MIN_RATIO_OVER_F1),
-                F2_MAX_HZ
-            );
+            const f2 = this._peakBetween(F2_MIN_HZ, F2_MAX_HZ);
 
             // 连续权重而非硬分类：one-hot 没有次优项，会让 top-2 混合退化成单元音跳变。
             // 在对数频率域度量距离——共振峰感知上按倍乘变化（300->600 与 1200->2400 同级），
