@@ -213,6 +213,28 @@ def test_analyzer_never_writes_host_analyser_config():
     assert "analyser.frequencyBinCount" in source
 
 
+def test_host_owns_the_shared_analyser_format():
+    """The owner of S.globalAnalyser configures it, once, at creation.
+
+    Both knobs have to be set there rather than by a consumer: the default
+    smoothingTimeConstant of 0.8 is too sluggish for vowel discrimination
+    (vowel switches take 4-8 frames instead of 2-3 at 60fps), and moving the
+    setting into the analyzer is what made it trample a shared node.
+    """
+    source = _read("static/app/app-audio-playback.js")
+    creation = source.split("S.globalAnalyser = S.audioPlayerContext.createAnalyser();", 1)[1]
+    creation = creation.split("S.spatialPannerNode", 1)[0]
+    assert "S.globalAnalyser.fftSize = 2048;" in creation
+    assert "smoothingTimeConstant" in creation, (
+        "the shared analyser must pin its frequency smoothing explicitly; "
+        "relying on the 0.8 default costs ~42ms of vowel-switch latency"
+    )
+    value = float(
+        creation.split("S.globalAnalyser.smoothingTimeConstant = ", 1)[1].split(";", 1)[0]
+    )
+    assert 0.0 <= value <= 0.6, f"smoothing {value} is too sluggish for vowel discrimination"
+
+
 # ───────────────────────────────── VRM wiring ────────────────────────────────
 
 
