@@ -842,20 +842,32 @@ class VRMAnimation {
         });
 
     }
+    /**
+     * 某元音本帧该写哪个表情名。
+     *
+     * updateMouthExpressionMapping 只在匹配成功时落映射，模型的 expressions
+     * 结构不被它那三个分支识别时会一个都匹配不上；这时回退到 VRM 预设名本身
+     * （'aa'/'ih'/…），与旧单通道路径的 `this.mouthExpressions.aa || 'aa'` 同源。
+     *
+     * 写入与清零必须共用这一个解析：清零侧若仍按"映射为空就跳过"处理，回退写进去
+     * 的那些表情就没人清，stopLipSync 之后嘴型会卡在最后一帧。
+     */
+    _mouthExpressionName(vowel) {
+        return this.mouthExpressions[vowel] || vowel;
+    }
+
     resetMouthExpressions() {
         const vrm = this.manager.currentModel?.vrm;
         if (!vrm?.expressionManager) return;
 
-        Object.values(this.mouthExpressions).forEach(name => {
-            if (name) {
-                try {
-                    vrm.expressionManager.setValue(name, 0);
-                } catch (e) {
-                    console.warn(`[VRM LipSync] 重置表情失败: ${name}`, e);
-                }
+        for (const vowel of VRMAnimation.VOWEL_KEYS) {
+            const name = this._mouthExpressionName(vowel);
+            try {
+                vrm.expressionManager.setValue(name, 0);
+            } catch (e) {
+                console.warn(`[VRM LipSync] 重置表情失败: ${name}`, e);
             }
-        });
-
+        }
     }
     _updateLipSync(delta) {
         if (!this.manager.currentModel?.vrm?.expressionManager) return;
@@ -892,14 +904,15 @@ class VRMAnimation {
 
         this.currentMouthWeight += (targetWeight - this.currentMouthWeight) * (12.0 * delta);
         const finalWeight = Math.max(0, this.currentMouthWeight);
-        const mouthOpenName = this.mouthExpressions.aa || 'aa';
+        const mouthOpenName = this._mouthExpressionName('aa');
 
         // 待机 VRMA 的 mixer.update 可能在本帧已写入 ih/ou/ee/oh 等口型轨道；
         // _updateLipSync 在 mixer 之后执行，但只覆盖 aa，剩余四个元音残留会与 aa
         // 叠加成混合口型。这里在写入 aa 之前先把其他口型表情置 0，确保语音口型同步
         // 期间嘴部完全由 lip sync 驱动，不被待机动作的口型轨道影响。
-        for (const [vowel, name] of Object.entries(this.mouthExpressions)) {
-            if (!name || vowel === 'aa') continue;
+        for (const vowel of VRMAnimation.VOWEL_KEYS) {
+            if (vowel === 'aa') continue;
+            const name = this._mouthExpressionName(vowel);
             try {
                 expressionManager.setValue(name, 0);
             } catch (e) {
@@ -932,12 +945,8 @@ class VRMAnimation {
         const weights = this._lipSyncAnalyzer.update(delta);
 
         for (const vowel of VRMAnimation.VOWEL_KEYS) {
-            // updateMouthExpressionMapping 只在匹配成功时写入映射，模型的
-            // expressions 结构不被三个分支识别时会一个都匹配不上。旧单通道路径
-            // 遇到这种情况仍用 `this.mouthExpressions.aa || 'aa'` 打到 VRM 预设名
-            // 上，嘴还能动；此处对五个元音一律沿用同样的回退，否则枚举失败会让
-            // 嘴完全不动，而且因为 setValue 根本没被调用，连告警都不会打。
-            const name = this.mouthExpressions[vowel] || vowel;
+            // 与 resetMouthExpressions 共用同一个名字解析——写入集必须等于清零集。
+            const name = this._mouthExpressionName(vowel);
             const target = weights[vowel] ?? 0;
             try {
                 expressionManager.setValue(name, target);

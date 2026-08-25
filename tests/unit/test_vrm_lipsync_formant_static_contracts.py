@@ -352,7 +352,7 @@ def test_mmd_formant_branch_is_exclusive():
 
 
 def test_formant_path_writes_all_five_vowels_with_preset_fallback():
-    """Formant path writes every vowel each frame and keeps the preset fallback.
+    """Formant path writes every vowel each frame, via the shared name resolver.
 
     The legacy path drove ``this.mouthExpressions.aa || 'aa'``, so a model whose
     expression list could not be enumerated still moved its mouth. Skipping
@@ -363,9 +363,43 @@ def test_formant_path_writes_all_five_vowels_with_preset_fallback():
     formant_method = source.split("_updateLipSyncFormant(expressionManager, delta) {", 1)[1]
     formant_method = formant_method.split("\n    }", 1)[0]
     assert "VRMAnimation.VOWEL_KEYS" in formant_method
-    assert "this.mouthExpressions[vowel] || vowel" in formant_method
+    assert "this._mouthExpressionName(vowel)" in formant_method
     assert "expressionManager.setValue(name, target);" in formant_method
     assert "continue;" not in formant_method, "unmapped vowels must not be skipped"
+
+
+def test_mouth_write_set_equals_reset_set():
+    """Whatever lip-sync writes, stopLipSync must be able to clear.
+
+    The preset-name fallback only fires when the expression mapping came up
+    empty -- exactly the case where a reset loop keyed on "skip if the mapping
+    is empty" clears nothing. The two sides would then disagree precisely when
+    the fallback is load-bearing, and the mouth stays frozen at its last frame
+    after speech ends. Both sides therefore go through _mouthExpressionName.
+    """
+    source = _read("static/vrm/vrm-animation.js")
+    assert "_mouthExpressionName(vowel) {" in source
+    resolver = source.split("_mouthExpressionName(vowel) {", 1)[1].split("\n    }", 1)[0]
+    assert "this.mouthExpressions[vowel] || vowel" in resolver
+
+    reset = source.split("resetMouthExpressions() {", 1)[1].split("\n    }", 1)[0]
+    assert "VRMAnimation.VOWEL_KEYS" in reset, "reset must cover every vowel key"
+    assert "this._mouthExpressionName(vowel)" in reset, (
+        "reset must resolve names the same way the write paths do"
+    )
+    assert "if (name)" not in reset, (
+        "skipping unmapped vowels on reset is what leaves fallback-driven "
+        "expressions stuck after stopLipSync"
+    )
+
+    # Neither write path may re-derive the name locally.
+    for marker in (
+        "_updateLipSyncFormant(expressionManager, delta) {",
+        "_updateLipSync(delta) {",
+    ):
+        body = source.split(marker, 1)[1].split("\n    }", 1)[0]
+        assert "mouthExpressions.aa || 'aa'" not in body
+        assert "this.mouthExpressions[vowel] || vowel" not in body
 
 
 def test_fallback_path_still_clears_other_vowels_before_aa():
@@ -374,7 +408,7 @@ def test_fallback_path_still_clears_other_vowels_before_aa():
     method = source.split("_updateLipSync(delta) {", 1)[1].split(
         "_updateLipSyncFormant(expressionManager, delta) {", 1
     )[0]
-    assert "if (!name || vowel === 'aa') continue;" in method
+    assert "if (vowel === 'aa') continue;" in method
     assert "expressionManager.setValue(name, 0);" in method
 
 
