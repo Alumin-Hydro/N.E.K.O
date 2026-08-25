@@ -836,6 +836,14 @@ class VRMAnimation {
             expressionNames = Object.keys(exprs);
         }
 
+        // 先清空再枚举。VRMManager 只在 this.animation 为空时才 new（vrm-manager.js
+        // 的 _initModules），换模型复用同一个实例并重调本方法，而下面只在匹配成功时
+        // 落值。不清的话，新模型没匹配上的元音会留着上一个模型的表情名，
+        // _mouthExpressionName 拿到一个非空的陈旧名字就不会回退到 VRM 预设名——
+        // setValue 打在新模型不存在的表情上被静默忽略，那个元音彻底不动。
+        // 陈旧值比空值更糟，正是因为空值还能回退。
+        for (const vowel of VRMAnimation.VOWEL_KEYS) this.mouthExpressions[vowel] = null;
+
         VRMAnimation.VOWEL_KEYS.forEach(vowel => {
             const match = expressionNames.find(name => name.toLowerCase() === vowel || name.toLowerCase().includes(vowel));
             if (match) this.mouthExpressions[vowel] = match;

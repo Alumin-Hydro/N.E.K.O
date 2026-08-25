@@ -402,6 +402,24 @@ def test_mouth_write_set_equals_reset_set():
         assert "this.mouthExpressions[vowel] || vowel" not in body
 
 
+def test_mapping_is_rebuilt_not_merged_on_model_switch():
+    """updateMouthExpressionMapping clears before it enumerates.
+
+    VRMManager only constructs VRMAnimation when it has none, so switching
+    models reuses the instance and re-runs this method, while the match loop
+    only assigns on a hit. Left uncleared, a vowel the new model does not match
+    keeps the previous model's expression name -- and a stale name is worse
+    than an empty one, because _mouthExpressionName only falls back to the VRM
+    preset when the mapping is empty. setValue then targets an expression the
+    new model does not have, is silently ignored, and that vowel stops moving.
+    """
+    source = _read("static/vrm/vrm-animation.js")
+    method = source.split("updateMouthExpressionMapping() {", 1)[1].split("\n    }", 1)[0]
+    clear_at = method.index("this.mouthExpressions[vowel] = null;")
+    assign_at = method.index("if (match) this.mouthExpressions[vowel] = match;")
+    assert clear_at < assign_at, "the clear must happen before the match loop"
+
+
 def test_fallback_path_still_clears_other_vowels_before_aa():
     """Fallback single-channel path keeps the clear-others-then-write-aa guard."""
     source = _read("static/vrm/vrm-animation.js")
