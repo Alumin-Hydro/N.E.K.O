@@ -120,6 +120,8 @@ async function ensureMmdModulesLoaded() {
     }
 
     const mmdModules = [
+        // 同 vrmModules：MMD 与 VRM 复用同一个共振峰分析器实现。
+        '/static/vrm/vrm-lipsync-formant.js',
         '/static/mmd/mmd-core.js',
         '/static/mmd/mmd-animation.js',
         '/static/mmd/mmd-expression.js',
@@ -129,6 +131,7 @@ async function ensureMmdModulesLoaded() {
     ];
 
     for (const moduleSrc of mmdModules) {
+        if (moduleSrc.includes('vrm-lipsync-formant') && typeof window.FormantLipSyncAnalyzer !== 'undefined') continue;
         if (moduleSrc.includes('mmd-manager') && typeof window.MMDManager !== 'undefined') continue;
         if (moduleSrc.includes('mmd-core') && typeof window.MMDCore !== 'undefined') continue;
 

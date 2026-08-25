@@ -12,6 +12,7 @@ Two layers guard this feature:
   analyzer stays lazily constructed behind a fallback, and that both avatar
   pipelines write every vowel each frame.
 """
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -68,21 +69,50 @@ def test_formant_behaviour_suite():
 # ─────────────────────────────── loader chains ───────────────────────────────
 
 
-@pytest.mark.parametrize("chain", LOADER_CHAINS)
-def test_every_loader_chain_ships_the_shared_analyzer(chain):
-    """Each VRM/MMD loader chain lists the shared formant analyzer.
+def _module_arrays(source):
+    """Yield ``(name, body)`` for every JS array literal of /static/ module paths."""
+    for match in re.finditer(r"const\s+(\w+)\s*=\s*\[(.*?)\n\s*\];", source, re.S):
+        name, body = match.group(1), match.group(2)
+        if "/static/" in body:
+            yield name, body
 
-    Enumerating the chains here (rather than spot-checking vrm-init.js) is the
-    point: the first version of this feature wired only vrm-init.js and
-    mmd-init.js, so the model-manager page and the card-maker preview kept the
-    legacy driver. Both of those chains set the ``_vrmModulesLoading`` /
-    ``_mmdModulesLoading`` flags that make the init IIFEs return early, so they
-    cannot inherit the entry from vrm-init.js.
+
+@pytest.mark.parametrize("chain", LOADER_CHAINS)
+def test_chains_that_load_animation_also_load_the_analyzer(chain):
+    """Every module list that pulls in an animation module also pulls the analyzer.
+
+    Asserted per array rather than per file on purpose. runtime-loaders.js holds
+    two independent chains (VRM and MMD) in one file, so a file-level substring
+    check stays green when only one of them carries the entry -- a mutation of
+    exactly that shape survived the first version of this test.
+
+    The predicate is semantic, not a hand-kept list: vrm-animation /
+    mmd-animation are what construct FormantLipSyncAnalyzer, so any chain that
+    loads one of them and omits the analyzer degrades to the legacy driver.
+    The first version of this feature wired only vrm-init.js and mmd-init.js,
+    leaving the model-manager page and the card-maker preview behind; both of
+    those set the ``_vrmModulesLoading`` / ``_mmdModulesLoading`` flags that make
+    the init IIFEs return early, so they cannot inherit the entry from vrm-init.
     """
-    assert FORMANT_MODULE in _read(chain), (
-        f"{chain} does not load {FORMANT_MODULE}; VRM/MMD lip-sync there "
-        f"silently falls back to the legacy single-channel driver"
+    source = _read(chain)
+    arrays = list(_module_arrays(source))
+    assert arrays, f"{chain}: no module arrays parsed -- the matcher has drifted"
+
+    consumers = [
+        (name, body)
+        for name, body in arrays
+        if "vrm-animation.js" in body or "mmd-animation.js" in body
+    ]
+    assert consumers, (
+        f"{chain}: no array loads an animation module -- the matcher has drifted"
     )
+
+    for name, body in consumers:
+        assert FORMANT_MODULE in body, (
+            f"{chain}: array `{name}` loads an animation module but not "
+            f"{FORMANT_MODULE}; lip-sync there silently falls back to the "
+            f"legacy single-channel driver"
+        )
 
 
 def test_shared_analyzer_is_reentrant():
@@ -142,6 +172,30 @@ def test_vowel_key_tables_agree():
 
 
 # ───────────────────────────── host analyser ownership ───────────────────────
+
+
+def test_f2_search_window_covers_rounded_vowels():
+    """The F2 window must reach below the rounded vowels' reference centres.
+
+    ou sits at 800Hz and oh at 900Hz. Searching F2 from 1000Hz up leaves both
+    permanently outside the window, and since ou and ih share an F1 of 350Hz,
+    F2 is the only thing that separates them -- "u" then resolves as "i".
+    """
+    source = _read("static/vrm/vrm-lipsync-formant.js")
+    f2_min = int(source.split("const F2_MIN_HZ = ", 1)[1].split(";", 1)[0])
+    centres = []
+    table = source.split("const VOWEL_FORMANTS = Object.freeze({", 1)[1].split("});", 1)[0]
+    for hit in re.finditer(r"f2:\s*(\d+)", table):
+        centres.append(int(hit.group(1)))
+    assert centres, "could not parse the vowel formant table"
+    assert f2_min <= min(centres), (
+        f"F2 search starts at {f2_min}Hz but the lowest reference centre is "
+        f"{min(centres)}Hz; that vowel can never win"
+    )
+
+    # F2 is also floated above F1 so a dominant F1 peak cannot be picked as F2.
+    ratio = float(source.split("const F2_MIN_RATIO_OVER_F1 = ", 1)[1].split(";", 1)[0])
+    assert ratio > 1.0, "F2 must start strictly above F1, else the F1 peak wins twice"
 
 
 def test_analyzer_never_writes_host_analyser_config():
