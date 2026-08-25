@@ -3,6 +3,12 @@
  * 参考 vrm-expression.js 的情感映射系统
  */
 
+// 共振峰分析器输出的 VRM blendshape 键 → MMD 五元音 morph 键。
+// 冻结在模块作用域，供 update() 每帧零分配读取（见 MMDExpression.FORMANT_TO_MMD_VOWEL）。
+const FORMANT_TO_MMD_VOWEL = Object.freeze({ aa: 'a', ih: 'i', ou: 'u', ee: 'e', oh: 'o' });
+// 遍历顺序也预先固定，避免每帧 Object.keys 分配新数组。
+const FORMANT_KEYS = Object.freeze(Object.keys(FORMANT_TO_MMD_VOWEL));
+
 class MMDExpression {
     constructor(manager) {
         this.manager = manager;
@@ -306,9 +312,11 @@ class MMDExpression {
 
     // ═══════════════════ 帧更新 ═══════════════════
 
-    // 分析器输出的 VRM blendshape 键 → MMD 五元音 morph 键（lipMorphNames 的键）
+    // 分析器输出的 VRM blendshape 键 → MMD 五元音 morph 键（lipMorphNames 的键）。
+    // 引用模块级 frozen 常量而非在 getter 里现造字面量：update() 每帧都会读它，
+    // 每帧新建一个对象 + 一个 Object.keys 数组是 60fps 热路径上的无谓 GC 压力。
     static get FORMANT_TO_MMD_VOWEL() {
-        return { aa: 'a', ih: 'i', ou: 'u', ee: 'e', oh: 'o' };
+        return FORMANT_TO_MMD_VOWEL;
     }
 
     update(delta) {
@@ -321,11 +329,11 @@ class MMDExpression {
                 // 五元音共振峰路径：每帧产出 {aa,ee,ih,oh,ou} 连续权重，映射到
                 // あ/い/う/え/お morph 全显式写入（含 0）。五元音全覆盖天然覆盖
                 // 待机 VMD 可能残留的口型轨道，无需单独清零步骤。
-                const weights = anim._formantAnalyzer.update(
-                    Number.isFinite(delta) ? Math.max(0, delta) : 0.016
-                );
-                const map = this.constructor.FORMANT_TO_MMD_VOWEL;
-                for (const formantKey of Object.keys(map)) {
+                // delta 的夹紧（非有限值回退、负值归零、上界截断）已收口到
+                // FormantLipSyncAnalyzer.update 内部，两条接入路径不再各自防御。
+                const weights = anim._formantAnalyzer.update(delta);
+                const map = FORMANT_TO_MMD_VOWEL;
+                for (const formantKey of FORMANT_KEYS) {
                     const vowel = map[formantKey];
                     const target = weights[formantKey] ?? 0;
                     for (const name of (this.lipMorphNames[vowel] || [])) {

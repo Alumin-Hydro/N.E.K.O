@@ -22,6 +22,20 @@ class VRMAnimation {
     static _animationModuleCache = null;
     static _normalizedRootWarningShown = false;
 
+    // 五元音键表。真相源是 vrm-lipsync-formant.js 的 VOWEL_KEYS
+    // （挂在 window.VRM_LIPSYNC_VOWEL_KEYS）；该脚本与本文件在 vrm-init.js 里
+    // 并行加载、执行顺序不保证，故构造期用这份本地回退，运行期优先取共享表。
+    // 两份内容必须一致，由 test_vowel_key_tables_agree 锁住。
+    static FALLBACK_VOWEL_KEYS = Object.freeze(['aa', 'ee', 'ih', 'oh', 'ou']);
+
+    /** 当前生效的五元音键表（共享表优先，回退到本地常量）。 */
+    static get VOWEL_KEYS() {
+        const shared = (typeof window !== 'undefined') ? window.VRM_LIPSYNC_VOWEL_KEYS : null;
+        return (Array.isArray(shared) && shared.length === 5)
+            ? shared
+            : VRMAnimation.FALLBACK_VOWEL_KEYS;
+    }
+
     constructor(manager) {
         this.manager = manager;
         this._disposed = false;
@@ -41,7 +55,8 @@ class VRMAnimation {
         this.isIdleAnimation = false;  // 当前播放的是否为待机动画
         this.lipSyncActive = false;
         this.analyser = null;
-        this.mouthExpressions = { 'aa': null, 'ih': null, 'ou': null, 'ee': null, 'oh': null };
+        this.mouthExpressions = {};
+        for (const vowel of VRMAnimation.FALLBACK_VOWEL_KEYS) this.mouthExpressions[vowel] = null;
         this.currentMouthWeight = 0;
         this.frequencyData = null;
         // 五元音共振峰口型分析器（FormantLipSyncAnalyzer）。startLipSync 时按 analyser
@@ -774,12 +789,20 @@ class VRMAnimation {
         this.updateMouthExpressionMapping();
         // 惰性实例化共振峰分析器；类缺失（旧缓存页面未加载新脚本）时降级为 null，
         // _updateLipSync 会回退到旧的单通道音量驱动，保证向后兼容。
+        // 构造/换绑一律包 try/catch：与 mmd-animation.startLipSync 对偶——分析器
+        // 是锦上添花，任何异常都只该让口型退回旧路径，绝不能从 startLipSync 抛出去
+        // 打断调用它的 scheduleAudioChunks（那会连带跳过本次音频块的排程记账）。
         if (analyser && typeof window !== 'undefined' && typeof window.FormantLipSyncAnalyzer === 'function') {
-            if (!this._lipSyncAnalyzer) {
-                this._lipSyncAnalyzer = new window.FormantLipSyncAnalyzer(analyser);
-            } else {
-                this._lipSyncAnalyzer.attach(analyser);
-                this._lipSyncAnalyzer.reset();
+            try {
+                if (!this._lipSyncAnalyzer) {
+                    this._lipSyncAnalyzer = new window.FormantLipSyncAnalyzer(analyser);
+                } else {
+                    this._lipSyncAnalyzer.attach(analyser);
+                    this._lipSyncAnalyzer.reset();
+                }
+            } catch (e) {
+                console.warn('[VRM LipSync] FormantLipSyncAnalyzer 初始化失败，回退单通道口型', e);
+                this._lipSyncAnalyzer = null;
             }
         } else {
             this._lipSyncAnalyzer = null;
@@ -813,7 +836,7 @@ class VRMAnimation {
             expressionNames = Object.keys(exprs);
         }
 
-        ['aa', 'ih', 'ou', 'ee', 'oh'].forEach(vowel => {
+        VRMAnimation.VOWEL_KEYS.forEach(vowel => {
             const match = expressionNames.find(name => name.toLowerCase() === vowel || name.toLowerCase().includes(vowel));
             if (match) this.mouthExpressions[vowel] = match;
         });
@@ -908,10 +931,14 @@ class VRMAnimation {
     _updateLipSyncFormant(expressionManager, delta) {
         const weights = this._lipSyncAnalyzer.update(delta);
 
-        for (const [vowel, name] of Object.entries(this.mouthExpressions)) {
+        for (const vowel of VRMAnimation.VOWEL_KEYS) {
+            // updateMouthExpressionMapping 只在匹配成功时写入映射，模型的
+            // expressions 结构不被三个分支识别时会一个都匹配不上。旧单通道路径
+            // 遇到这种情况仍用 `this.mouthExpressions.aa || 'aa'` 打到 VRM 预设名
+            // 上，嘴还能动；此处对五个元音一律沿用同样的回退，否则枚举失败会让
+            // 嘴完全不动，而且因为 setValue 根本没被调用，连告警都不会打。
+            const name = this.mouthExpressions[vowel] || vowel;
             const target = weights[vowel] ?? 0;
-            // 该模型未提供此元音表情时跳过（保持与旧路径一致的容错）。
-            if (!name) continue;
             try {
                 expressionManager.setValue(name, target);
             } catch (e) {
