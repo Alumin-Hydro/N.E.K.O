@@ -5,6 +5,7 @@ Protocol: Hello(op10) -> heartbeat loop(op1) -> Identify(op2) -> READY dispatch
 InvalidSession(op9, resumable=false). Exponential backoff with a hard cap.
 
 Host dependency: websockets ~=15.0.1 (declared in pyproject.toml).
+Fallback: tornado.websocket (available in frozen N.E.K.O runtime).
 """
 
 from __future__ import annotations
@@ -12,10 +13,22 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import ssl
 import sys
 from typing import Any, Awaitable, Callable, Optional
 
-import websockets
+# Prefer tornado (complete in frozen runtime) over websockets (may be stubbed).
+try:
+    from tornado import websocket as _tornado_ws
+    _HAS_TORNADO = True
+except ImportError:
+    _HAS_TORNADO = False
+
+try:
+    import websockets as _websockets_lib
+    _HAS_WEBSOCKETS = True
+except ImportError:
+    _HAS_WEBSOCKETS = False
 
 GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
 
@@ -156,37 +169,47 @@ class DiscordGatewayClient:
 
     async def _connect_once(self) -> None:
         url = self._resume_url if (self._session_id and self._resume_url) else GATEWAY_URL
-        connect_kwargs: dict[str, Any] = {
-            "max_size": 16 * 1024 * 1024,
-            "open_timeout": 20.0,
-        }
-
-        if self._proxy_url:
-            # websockets 15.x natively supports HTTP CONNECT proxies.
-            connect_kwargs["proxy"] = self._proxy_url
-            self._log("info", f"Using proxy: {self._proxy_url}")
-
         self._log("info", f"Connecting to {url} (proxy={'yes' if self._proxy_url else 'no'})...")
-        async with websockets.connect(url, **connect_kwargs) as ws:
-            self._ws = ws
+
+        if _HAS_TORNADO:
+            self._log("info", "Using tornado.websocket")
+            await self._connect_tornado(url)
+        elif _HAS_WEBSOCKETS:
+            self._log("info", "Using websockets library")
+            await self._connect_websockets(url)
+        else:
+            raise RuntimeError("No WebSocket library available (tornado or websockets required)")
+
+    async def _connect_tornado(self, url: str) -> None:
+        """Connect via tornado.websocket (complete in frozen runtime)."""
+        ws = await _tornado_ws.websocket_connect(
+            url,
+            connect_timeout=20.0,
+            max_message_size=16 * 1024 * 1024,
+        )
+        self._ws = ws
+        try:
             # --- Hello ---
-            hello = await self._recv(ws)
+            hello_raw = await ws.read_message()
+            if hello_raw is None:
+                raise RuntimeError("Connection closed during Hello")
+            hello = json.loads(hello_raw)
             if hello.get("op") != OP_HELLO:
                 raise RuntimeError(f"Expected Hello, got op={hello.get('op')}")
             interval_ms = float(hello["d"]["heartbeat_interval"])
             self._heartbeat_task = asyncio.create_task(
-                self._heartbeat_loop(ws, interval_ms / 1000.0)
+                self._heartbeat_loop_tornado(ws, interval_ms / 1000.0)
             )
             # --- Identify or Resume ---
             if self._session_id and self._seq is not None:
-                await self._send(ws, OP_RESUME, {
+                await self._send_tornado(ws, OP_RESUME, {
                     "token": self._token,
                     "session_id": self._session_id,
                     "seq": self._seq,
                 })
                 self._log("info", "Sent Resume")
             else:
-                await self._send(ws, OP_IDENTIFY, {
+                await self._send_tornado(ws, OP_IDENTIFY, {
                     "token": self._token,
                     "intents": INTENTS,
                     "properties": {
@@ -197,9 +220,122 @@ class DiscordGatewayClient:
                 })
                 self._log("info", "Sent Identify")
             # --- Event loop ---
-            await self._event_loop(ws)
+            await self._event_loop_tornado(ws)
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
 
-    async def _event_loop(self, ws: Any) -> None:
+    async def _connect_websockets(self, url: str) -> None:
+        """Connect via websockets library (fallback)."""
+        connect_kwargs: dict[str, Any] = {
+            "max_size": 16 * 1024 * 1024,
+            "open_timeout": 20.0,
+        }
+        if self._proxy_url:
+            connect_kwargs["proxy"] = self._proxy_url
+            self._log("info", f"Using proxy: {self._proxy_url}")
+        async with _websockets_lib.connect(url, **connect_kwargs) as ws:
+            self._ws = ws
+            # --- Hello ---
+            hello = await self._recv_websockets(ws)
+            if hello.get("op") != OP_HELLO:
+                raise RuntimeError(f"Expected Hello, got op={hello.get('op')}")
+            interval_ms = float(hello["d"]["heartbeat_interval"])
+            self._heartbeat_task = asyncio.create_task(
+                self._heartbeat_loop_websockets(ws, interval_ms / 1000.0)
+            )
+            # --- Identify or Resume ---
+            if self._session_id and self._seq is not None:
+                await self._send_websockets(ws, OP_RESUME, {
+                    "token": self._token,
+                    "session_id": self._session_id,
+                    "seq": self._seq,
+                })
+                self._log("info", "Sent Resume")
+            else:
+                await self._send_websockets(ws, OP_IDENTIFY, {
+                    "token": self._token,
+                    "intents": INTENTS,
+                    "properties": {
+                        "os": sys.platform,
+                        "browser": "N.E.K.O",
+                        "device": "N.E.K.O",
+                    },
+                })
+                self._log("info", "Sent Identify")
+            # --- Event loop ---
+            await self._event_loop_websockets(ws)
+
+    # --- Tornado WebSocket implementation ---
+
+    async def _event_loop_tornado(self, ws: Any) -> None:
+        while True:
+            raw = await ws.read_message()
+            if raw is None:
+                self._log("warning", "Connection closed by server")
+                return
+            payload = json.loads(raw)
+            op = payload.get("op")
+            if op == OP_DISPATCH:
+                seq = payload.get("s")
+                if seq is not None:
+                    self._seq = seq
+                event_type = payload.get("t")
+                data = payload.get("d") or {}
+                if event_type == "READY":
+                    self._session_id = data.get("session_id")
+                    self._resume_url = data.get("resume_gateway_url")
+                    self._connected = True
+                    self._log("info", "Gateway READY")
+                    await self._emit_state("connected", "")
+                    if self._on_ready is not None:
+                        asyncio.create_task(self._safe_callback(self._on_ready, data))
+                elif event_type == "MESSAGE_CREATE":
+                    asyncio.create_task(self._safe_callback(self._on_message_create, data))
+            elif op == OP_HEARTBEAT:
+                await self._send_tornado(ws, OP_HEARTBEAT, self._seq)
+            elif op == OP_HEARTBEAT_ACK:
+                pass
+            elif op == OP_RECONNECT:
+                self._log("info", "Server requested reconnect")
+                return
+            elif op == OP_INVALID_SESSION:
+                resumable = bool(payload.get("d"))
+                if not resumable:
+                    self._log("warning", "Invalid session (not resumable); re-Identify")
+                    self._session_id = None
+                    self._seq = None
+                    self._resume_url = None
+                else:
+                    self._log("warning", "Invalid session (resumable)")
+                await asyncio.sleep(random.uniform(1.0, 5.0))
+                return
+            else:
+                self._log("warning", f"Unknown gateway op: {op}")
+
+    async def _heartbeat_loop_tornado(self, ws: Any, interval: float) -> None:
+        await asyncio.sleep(interval * random.random())
+        while True:
+            try:
+                await self._send_tornado(ws, OP_HEARTBEAT, self._seq)
+            except Exception:
+                return
+            await asyncio.sleep(interval)
+
+    async def _send_tornado(self, ws: Any, op: int, data: Any) -> None:
+        await ws.write_message(json.dumps({"op": op, "d": data}))
+
+    # --- websockets library implementation ---
+
+    async def _safe_callback(self, cb: Callable[[dict], Awaitable[None]], data: dict) -> None:
+        try:
+            await cb(data)
+        except Exception as e:
+            self._log("error", f"Event callback error: {type(e).__name__}: {e}")
+
+    async def _event_loop_websockets(self, ws: Any) -> None:
         async for raw in ws:
             payload = json.loads(raw)
             op = payload.get("op")
@@ -220,7 +356,7 @@ class DiscordGatewayClient:
                 elif event_type == "MESSAGE_CREATE":
                     asyncio.create_task(self._safe_callback(self._on_message_create, data))
             elif op == OP_HEARTBEAT:
-                await self._send(ws, OP_HEARTBEAT, self._seq)
+                await self._send_websockets(ws, OP_HEARTBEAT, self._seq)
             elif op == OP_HEARTBEAT_ACK:
                 pass
             elif op == OP_RECONNECT:
@@ -240,29 +376,28 @@ class DiscordGatewayClient:
             else:
                 self._log("warning", f"Unknown gateway op: {op}")
 
-    async def _safe_callback(self, cb: Callable[[dict], Awaitable[None]], data: dict) -> None:
-        try:
-            await cb(data)
-        except Exception as e:
-            self._log("error", f"Event callback error: {type(e).__name__}: {e}")
-
-    async def _heartbeat_loop(self, ws: Any, interval: float) -> None:
-        # First heartbeat with jitter per Discord docs.
+    async def _heartbeat_loop_websockets(self, ws: Any, interval: float) -> None:
         await asyncio.sleep(interval * random.random())
         while True:
             try:
-                await self._send(ws, OP_HEARTBEAT, self._seq)
+                await self._send_websockets(ws, OP_HEARTBEAT, self._seq)
             except Exception:
                 return
             await asyncio.sleep(interval)
 
-    async def _send(self, ws: Any, op: int, data: Any) -> None:
+    async def _send_websockets(self, ws: Any, op: int, data: Any) -> None:
         await ws.send(json.dumps({"op": op, "d": data}))
 
     @staticmethod
-    async def _recv(ws: Any) -> dict[str, Any]:
+    async def _recv_websockets(ws: Any) -> dict[str, Any]:
         raw = await ws.recv()
         return json.loads(raw)
+
+    # --- Backward compatibility aliases for tests ---
+    _event_loop = _event_loop_websockets
+    _heartbeat_loop = _heartbeat_loop_websockets
+    _send = _send_websockets
+    _recv = _recv_websockets
 
     # --- Testable pure helpers ---
 
