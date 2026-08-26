@@ -114,14 +114,32 @@ class DiscordMemoryBridge:
         messages: list[dict[str, Any]],
         *,
         timeout: float = 5.0,
+        source_label: str = "",
     ) -> dict[str, Any]:
-        """POST /{endpoint}/{her_name} → 推送对话摘要（json={"input_history": ...}）。"""
+        """POST /{endpoint}/{her_name} → 推送对话摘要（json={"input_history": ...}）。
+
+        source_label: 非空时在历史开头注入一条 system 消息说明对话来源，
+        让 memory_server 摘要时能区分桌面端 / Discord 端用户。
+        """
+        payload_messages = list(messages)
+        if source_label:
+            payload_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        f"[对话来源说明] 本段对话来自 {source_label}。"
+                        "用户消息可能带 `[频道 #xxx] 用户名:` 或 "
+                        "`[来自 Discord 私信用户 xxx（ID: yyy）]` 前缀；"
+                        "摘要时请保留用户名/来源标注，避免和桌面端用户混淆。"
+                    ),
+                }
+            ] + payload_messages
         async with httpx.AsyncClient(
             timeout=timeout, proxy=None, trust_env=False
         ) as client:
             response = await client.post(
                 f"{self._base_url()}/{endpoint}/{her_name}",
-                json={"input_history": json.dumps(messages, ensure_ascii=False)},
+                json={"input_history": json.dumps(payload_messages, ensure_ascii=False)},
             )
             response.raise_for_status()
             return response.json()

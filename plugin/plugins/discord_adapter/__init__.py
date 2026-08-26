@@ -1112,7 +1112,8 @@ class DiscordAdapterPlugin(NekoPluginBase):
                     her_name = session_data.get("her_name", "")
                     if her_name and history:
                         await self.memory_bridge.post_memory_history(
-                            "process", her_name, history
+                            "process", her_name, history,
+                            source_label="Discord 平台",
                         )
                 except Exception as mem_exc:
                     self.logger.warning(
