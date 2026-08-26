@@ -221,23 +221,16 @@ class _FakeWebSocket:
         self.sent: list[dict] = []
         self.closed = False
 
-    async def send(self, data: str) -> None:
+    async def send_text(self, data: str) -> None:
         self.sent.append(json.loads(data))
 
-    async def recv(self) -> str:
+    async def recv_text(self) -> str | None:
         if not self._incoming:
-            await asyncio.sleep(3600)
+            return None  # Simulate connection closed
         return self._incoming.pop(0)
 
     async def close(self) -> None:
         self.closed = True
-
-    def __aiter__(self):
-        return self._aiter()
-
-    async def _aiter(self):
-        for raw in self._incoming:
-            yield raw
 
 
 @pytest.mark.asyncio
