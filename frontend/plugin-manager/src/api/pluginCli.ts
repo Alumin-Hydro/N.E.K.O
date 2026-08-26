@@ -1,6 +1,7 @@
 /**
  * neko-plugin-cli 相关 API
  */
+import type { AxiosRequestConfig } from 'axios'
 import { get, post } from './index'
 import { API_BASE_URL } from '@/utils/constants'
 
@@ -95,6 +96,7 @@ export interface PluginCliInstallRequest {
   plugins_root?: string
   profiles_root?: string
   on_conflict?: PluginCliConflictStrategy
+  install_source?: 'imported'
   confirm_upgrade?: boolean
   confirmation_token?: string
 }
@@ -140,6 +142,7 @@ export interface PluginCliInstallResponse {
   operation: 'install' | 'upgrade'
   restarted: boolean
   rollback_status: 'not_needed' | 'completed' | 'incomplete'
+  install_source_warning?: string | null
 }
 
 export interface PluginCliAnalyzeRequest {
@@ -196,8 +199,8 @@ export interface PluginCliLocalPackagesResponse {
 /**
  * 列出当前本地可构建插件
  */
-export function getPluginCliPlugins(): Promise<PluginCliLocalPluginsResponse> {
-  return get('/plugin-cli/plugins')
+export function getPluginCliPlugins(config?: AxiosRequestConfig & { preserveMessagesOn404?: boolean }): Promise<PluginCliLocalPluginsResponse> {
+  return get('/plugin-cli/plugins', config)
 }
 
 /**
@@ -232,14 +235,18 @@ export function verifyPluginPackage(payload: PluginCliPackageRef): Promise<Plugi
  * 安装插件包或整合包
  */
 export function installPluginPackage(payload: PluginCliInstallRequest): Promise<PluginCliInstallResponse> {
-  return post('/plugin-cli/install', payload)
+  return post('/plugin-cli/install', payload, {
+    timeout: 300_000,
+  })
 }
 
 /**
  * 检查本地包将执行首次安装、原位升级，还是因冲突被阻止
  */
 export function planPluginInstall(payload: PluginCliInstallPlanRequest): Promise<PluginCliInstallPlanResponse> {
-  return post('/plugin-cli/install-plan', payload)
+  return post('/plugin-cli/install-plan', payload, {
+    timeout: 300_000,
+  })
 }
 
 /**
@@ -270,7 +277,7 @@ export function uploadPluginPackage(file: File): Promise<PluginCliUploadResult> 
   const formData = new FormData()
   formData.append('file', file)
   return post('/plugin-cli/upload', formData, {
-    timeout: 120_000,
+    timeout: 300_000,
   })
 }
 
@@ -290,7 +297,7 @@ export function uploadAndInstallPlugin(
   const query = params.toString()
   const url = `/plugin-cli/upload-and-install${query ? `?${query}` : ''}`
   return post(url, formData, {
-    timeout: 120_000,
+    timeout: 300_000,
   })
 }
 

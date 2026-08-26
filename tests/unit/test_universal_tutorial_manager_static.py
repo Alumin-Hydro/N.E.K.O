@@ -195,6 +195,29 @@ def test_non_home_page_tutorials_are_restored_in_separate_driver_runtime():
     assert "hasCard || hasContainer" not in character_wait_block
 
 
+def test_memory_browser_tutorial_targets_current_responsive_surfaces():
+    page_source = _read_page_manager()
+    block = page_source.split("        getMemoryBrowserSteps() {", 1)[1].split(
+        "        isElementVisible(element) {",
+        1,
+    )[0]
+
+    selectors = [".editor", ".memory-global-actions"]
+    positions = [block.index(f"element: '{selector}'") for selector in selectors]
+    assert positions == sorted(positions)
+    assert "const roleLibraryTarget = document.body.dataset.memoryLayout === 'compact'" in block
+    assert "? '#memory-role-panel'" in block
+    assert ": '#memory-role-library';" in block
+    assert ".tips-container" not in block
+    assert block.count("this.setMemoryBrowserRolePanelOpen(true)") == 3
+    assert "this.setMemoryBrowserRolePanelOpen(false)" not in block
+    assert "this.setMemoryBrowserSettingsPanelOpen(true)" not in block
+    assert "this.prepareMemoryBrowserTutorialUi();" in page_source
+    assert "this.restoreMemoryBrowserTutorialUiState();" in page_source
+    assert "return viewportWidth >= 720;" in page_source
+    assert "this.waitForMemoryBrowserReady().then(() =>" in page_source
+
+
 def test_page_tutorial_manager_ignores_stale_yui_handoff_tokens():
     page_source = _read_page_manager()
 
@@ -234,17 +257,20 @@ def test_page_tutorial_manager_honors_mobile_viewport_bailout():
     assert "!this.shouldAllowCompactDesktopTutorial()" in manage_block
 
 
-def test_page_tutorial_manager_allows_voice_clone_desktop_popup_width():
+def test_page_tutorial_manager_allows_intentional_compact_desktop_pages():
     page_source = _read_page_manager()
 
     compact_block = page_source.split("        shouldAllowCompactDesktopTutorial() {", 1)[1].split(
-        "        }",
+        "        waitForDriver() {",
         1,
     )[0]
 
-    assert "this.currentPage !== 'voice_clone'" in compact_block
+    assert "this.currentPage === 'voice_clone'" in compact_block
+    assert "this.currentPage === 'memory_browser'" in compact_block
     assert "viewportWidth >= 640" in compact_block
+    assert "viewportWidth >= 720" in compact_block
     assert "screenWidth > 768" in compact_block
+    assert "return viewportWidth >= 720;" in compact_block
 
 
 def test_voice_clone_tutorial_targets_visible_dropdown_triggers():
@@ -492,6 +518,43 @@ def test_universal_tutorial_manager_releases_startup_greeting_without_manager_or
     assert "this.dispatchStartupGreetingRelease('avatar-floating-auto-round-check-failed');" in auto_round_block
 
 
+def test_universal_tutorial_manager_rearms_startup_greeting_before_resize_init():
+    source = _read_manager()
+
+    assert "function rearmStartupGreetingWithoutManager(reason, detail = {})" in source
+    rearm_block = source.split(
+        "function rearmStartupGreetingWithoutManager(reason, detail = {})",
+        1,
+    )[1].split("\n}", 1)[0]
+    assert "window.isNekoHomeTutorialPending = true;" in rearm_block
+    assert "window.__NEKO_TUTORIAL_STARTUP_SETTLED__ = false;" in rearm_block
+    assert "delete window.__NEKO_STARTUP_GREETING_RELEASED__;" in rearm_block
+    assert "released: false," in rearm_block
+    assert "window.dispatchEvent(new CustomEvent(STARTUP_GREETING_RELEASE_EVENT" in rearm_block
+    assert "detail: rearmDetail" in rearm_block
+
+    resize_block = source.split(
+        "window.addEventListener('resize', function retryUniversalTutorialManagerInit() {",
+        1,
+    )[1].split("\n    });", 1)[0]
+    rearm_call = "rearmStartupGreetingWithoutManager('tutorial-manager-resize-init'"
+    wait_call = "waitForActiveAutostartPromptClosed().then(function () {"
+    assert rearm_call in resize_block
+    assert wait_call in resize_block
+    assert resize_block.index(rearm_call) < resize_block.index(wait_call)
+    assert resize_block.index(wait_call) < resize_block.index(
+        "return initUniversalTutorialManager();"
+    )
+
+    wait_block = source.split("function waitForActiveAutostartPromptClosed()", 1)[1].split(
+        "\n}",
+        1,
+    )[0]
+    assert "'.modal-overlay-autostart-retention'" in wait_block
+    assert "window.addEventListener('neko:decision-prompt-closed', onPromptClosed);" in wait_block
+    assert "detail.skin === 'autostart-retention'" in wait_block
+
+
 def test_universal_tutorial_manager_resets_and_delays_startup_greeting_release():
     source = _read_manager()
 
@@ -731,8 +794,14 @@ def test_tutorial_live2d_preparing_hides_model_side_controls():
     assert "'live2d-floating-buttons'" in restore_controls_block
     assert "'live2d-lock-icon'" in restore_controls_block
     assert "'live2d-return-button-container'" not in restore_controls_block
-    assert "if (!preserveYuiGuidePreparing && floatingButtons) {" in app_ui_source
-    assert "if (!preserveYuiGuidePreparing && lockIcon) {" in app_ui_source
+    assert (
+        "if (!preserveYuiGuidePreparing && !preserveYuiGuideAvatarMotion && floatingButtons) {"
+        in app_ui_source
+    )
+    assert (
+        "if (!preserveYuiGuidePreparing && !preserveYuiGuideAvatarMotion && lockIcon) {"
+        in app_ui_source
+    )
 
     assert "function isYuiGuideLive2DPreparing()" in live2d_buttons_source
     assert "if (isYuiGuideLive2DPreparing() || isYuiGuideFloatingToolbarSuppressed()) {" in live2d_buttons_source

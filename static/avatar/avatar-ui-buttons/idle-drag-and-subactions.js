@@ -480,6 +480,10 @@ function _clearNekoIdleCat1EdgePeek(containerOrButton) {
     _NEKO_IDLE_CAT1_EDGE_PEEK_CLASSES.forEach((className) => {
         button.classList.remove(className);
     });
+    const art = button.querySelector('.neko-idle-return-art');
+    if (art) {
+        art.style.removeProperty('--neko-idle-return-edge-visual-shift-y');
+    }
     _syncNekoIdleCat1QuestionMarkKeyboardAvailabilityForButton(button);
 }
 
@@ -497,6 +501,33 @@ function _getNekoIdleCat1EdgePeekActiveEdge(containerOrButton) {
         return button.classList.contains(className);
     });
     return activeClass ? activeClass.replace('is-cat1-edge-peek-', '') : '';
+}
+
+function _isNekoIdleCat1TransferredPeekAnchorActive(containerOrButton) {
+    const button = _getNekoIdleCat1EdgePeekButton(containerOrButton);
+    const container = button
+        ? _getNekoIdleReturnContainerFromButton(button)
+        : containerOrButton;
+    return !!(container && typeof container.getAttribute === 'function' &&
+        container.getAttribute('data-neko-live2d-peek-anchor'));
+}
+
+function _isNekoIdleCat1MovementAnchored(containerOrButton) {
+    return _isNekoIdleCat1EdgePeekActive(containerOrButton) ||
+        _isNekoIdleCat1TransferredPeekAnchorActive(containerOrButton);
+}
+
+function _dispatchNekoIdleCat1EdgePeekAfterDragObservation(containerOrButton) {
+    const button = _getNekoIdleCat1EdgePeekButton(containerOrButton);
+    const edge = _getNekoIdleCat1EdgePeekActiveEdge(button);
+    if (!button || !edge) return false;
+    _dispatchNekoCatIdleObservationSource(_NEKO_CAT_IDLE_OBSERVATION_TYPES.EDGE_PEEK_AFTER_DRAG, {
+        source: 'return-ball',
+        tier: button.getAttribute('data-neko-idle-tier'),
+        reason: 'drag-edge-peek',
+        edge: edge
+    });
+    return true;
 }
 
 function _isNekoIdleCat1EdgePeekEligible(containerOrButton) {
@@ -581,20 +612,10 @@ function _applyNekoIdleCat1EdgePeek(container, placement) {
 
 function _applyNekoIdleCat1EdgePeekAfterDrag(container, left, top, viewportWidth, viewportHeight) {
     if (!container || !_isNekoIdleCat1EdgePeekEligible(container)) return false;
-    const button = _getNekoIdleCat1EdgePeekButton(container);
     const w = container.offsetWidth || 64;
     const h = container.offsetHeight || 64;
     const placement = _getNekoIdleCat1EdgePeekPlacement(left, top, w, h, viewportWidth, viewportHeight);
-    const applied = _applyNekoIdleCat1EdgePeek(container, placement);
-    if (applied) {
-        _dispatchNekoCatIdleObservationSource(_NEKO_CAT_IDLE_OBSERVATION_TYPES.EDGE_PEEK_AFTER_DRAG, {
-            source: 'return-ball',
-            tier: button && button.getAttribute('data-neko-idle-tier'),
-            reason: 'drag-edge-peek',
-            edge: placement && placement.edge ? placement.edge : ''
-        });
-    }
-    return applied;
+    return _applyNekoIdleCat1EdgePeek(container, placement);
 }
 
 function _reclampNekoIdleCat1EdgePeekToViewport(containerOrButton) {
@@ -605,13 +626,14 @@ function _reclampNekoIdleCat1EdgePeekToViewport(containerOrButton) {
 
     const w = container.offsetWidth || 64;
     const h = container.offsetHeight || 64;
-    const viewportW = Math.max(w, window.innerWidth || 0);
-    const viewportH = Math.max(h, window.innerHeight || 0);
+    const virtualViewport = _getNekoDesktopVirtualViewportSize();
+    const viewportW = Math.max(w, virtualViewport.width || 0);
+    const viewportH = Math.max(h, virtualViewport.height || 0);
     const hiddenX = w * _NEKO_IDLE_CAT1_EDGE_PEEK_HIDDEN_RATIO;
     const hiddenY = h * _NEKO_IDLE_CAT1_EDGE_PEEK_HIDDEN_RATIO;
     const rawLeft = parseFloat(container.style.left);
     const rawTop = parseFloat(container.style.top);
-    const rect = container.getBoundingClientRect && container.getBoundingClientRect();
+    const rect = _getNekoDesktopVirtualElementRect(container);
     const currentLeft = Number.isFinite(rawLeft) ? rawLeft : (rect ? rect.left : 0);
     const currentTop = Number.isFinite(rawTop) ? rawTop : (rect ? rect.top : 0);
 
@@ -640,11 +662,12 @@ function _restoreNekoIdleCat1EdgePeekBeforeDrag(container) {
     if (!_isNekoIdleCat1EdgePeekEligible(container)) return;
     const w = container.offsetWidth || 64;
     const h = container.offsetHeight || 64;
-    const viewportW = Math.max(w, window.innerWidth || 0);
-    const viewportH = Math.max(h, window.innerHeight || 0);
+    const virtualViewport = _getNekoDesktopVirtualViewportSize();
+    const viewportW = Math.max(w, virtualViewport.width || 0);
+    const viewportH = Math.max(h, virtualViewport.height || 0);
     const rawLeft = parseFloat(container.style.left);
     const rawTop = parseFloat(container.style.top);
-    const rect = container.getBoundingClientRect && container.getBoundingClientRect();
+    const rect = _getNekoDesktopVirtualElementRect(container);
     const currentLeft = Number.isFinite(rawLeft) ? rawLeft : (rect ? rect.left : 0);
     const currentTop = Number.isFinite(rawTop) ? rawTop : (rect ? rect.top : 0);
     container.style.left = `${Math.round(_clampNekoIdleCat1EdgePeekCoordinate(currentLeft, 0, viewportW - w))}px`;
@@ -662,11 +685,12 @@ function _clearNekoIdleCat1EdgePeekForTierExit(container) {
 
     const w = container.offsetWidth || 64;
     const h = container.offsetHeight || 64;
-    const viewportW = Math.max(w, window.innerWidth || 0);
-    const viewportH = Math.max(h, window.innerHeight || 0);
+    const virtualViewport = _getNekoDesktopVirtualViewportSize();
+    const viewportW = Math.max(w, virtualViewport.width || 0);
+    const viewportH = Math.max(h, virtualViewport.height || 0);
     const rawLeft = parseFloat(container.style.left);
     const rawTop = parseFloat(container.style.top);
-    const rect = container.getBoundingClientRect && container.getBoundingClientRect();
+    const rect = _getNekoDesktopVirtualElementRect(container);
     const currentLeft = Number.isFinite(rawLeft) ? rawLeft : (rect ? rect.left : 0);
     const currentTop = Number.isFinite(rawTop) ? rawTop : (rect ? rect.top : 0);
     container.style.left = `${Math.round(_clampNekoIdleCat1EdgePeekCoordinate(currentLeft, 0, viewportW - w))}px`;
@@ -1161,14 +1185,15 @@ function _reassertNekoIdleCat1LayerForFollow(container) {
 function _getNekoIdleScreenRectFromCompactSurfaceRect(rect) {
     const normalized = _normalizeNekoIdleScreenRect(rect);
     if (!normalized) return null;
+    const virtualOrigin = _getNekoDesktopVirtualViewportOrigin();
     const explicitLeft = Number(rect && rect.screenLeft);
     const explicitTop = Number(rect && rect.screenTop);
     const left = Number.isFinite(explicitLeft)
         ? explicitLeft
-        : (Number.isFinite(window.screenX) ? window.screenX : 0) + normalized.left;
+        : virtualOrigin.x + normalized.left;
     const top = Number.isFinite(explicitTop)
         ? explicitTop
-        : (Number.isFinite(window.screenY) ? window.screenY : 0) + normalized.top;
+        : virtualOrigin.y + normalized.top;
     return {
         left: Math.round(left),
         top: Math.round(top),
@@ -1249,9 +1274,7 @@ function _setNekoIdleCat1CompactMirrorActive(button, container, active, options 
     }
 
     const surfaceScreenRect = _getNekoIdleScreenRectFromCompactSurfaceRect(options.surfaceRect);
-    const catRect = typeof container.getBoundingClientRect === 'function'
-        ? container.getBoundingClientRect()
-        : null;
+    const catRect = _getNekoDesktopVirtualElementRect(container);
     if (!surfaceScreenRect || !catRect || catRect.width <= 0 || catRect.height <= 0) return false;
     const target = options.target || null;
     const anchorRatio = target && Number.isFinite(Number(target.anchorRatio))
@@ -1862,7 +1885,7 @@ function _dropNekoIdleCat1FromCompactTopEdge(button, target, nowMs) {
     _resetNekoIdleCat1WalkSpeed(state);
     _resetNekoIdleCat1CompactFollowState(state, { keepDropCooldown: true });
 
-    const rect = container.getBoundingClientRect();
+    const rect = _getNekoDesktopVirtualElementRect(container);
     if (rect && rect.width > 0 && rect.height > 0) {
         const nextPosition = _clampNekoIdleCat1Position(
             rect.left,
