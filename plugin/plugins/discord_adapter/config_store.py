@@ -48,6 +48,10 @@ class DiscordConfigStore:
             "reconnect_backoff_seconds": 3.0,
             "max_reconnect_attempts": 5,
             "proxy_url": "",
+            # 主动对话：频道空闲超过 N 秒后让 LLM 主动发一条。0 = 关闭。
+            "proactive_idle_seconds": 0,
+            # 每个频道触发过一次后，至少再过 N 秒才再次触发（防刷屏）。
+            "proactive_cooldown_seconds": 3600,
         }
 
     async def exists(self) -> bool:
@@ -118,6 +122,12 @@ class DiscordConfigStore:
         )
         normalized["max_reconnect_attempts"] = self._bounded_int(
             raw.get("max_reconnect_attempts"), 5, 1, 50
+        )
+        normalized["proactive_idle_seconds"] = self._bounded_int(
+            raw.get("proactive_idle_seconds"), 0, 0, 86400
+        )
+        normalized["proactive_cooldown_seconds"] = self._bounded_int(
+            raw.get("proactive_cooldown_seconds"), 3600, 60, 86400
         )
         return normalized
 

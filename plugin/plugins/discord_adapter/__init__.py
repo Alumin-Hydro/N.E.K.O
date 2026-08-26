@@ -25,6 +25,7 @@ from .gateway_client import DiscordGatewayClient
 from .memory_bridge import DiscordMemoryBridge
 from .permission import PermissionManager
 from .rest_client import DiscordRestClient
+from .sandbox import execute_code as sandbox_execute_code
 
 UI_ASSET_VERSION = "0.1.0"
 
@@ -646,6 +647,34 @@ class DiscordAdapterPlugin(NekoPluginBase):
                         f"拉取 main_server 工具列表失败（本次会话无工具）: {type(exc).__name__}: {exc}"
                     )
 
+                # 本地工具：execute_code（沙箱）— 只给 admin 用，避免任意人让 bot 跑代码。
+                # 判断：当前消息发送者是不是 admin。
+                is_admin_user = False
+                try:
+                    if self.permission_mgr is not None:
+                        is_admin_user = bool(self.permission_mgr.is_admin(sender_id))
+                except Exception:
+                    is_admin_user = False
+                if is_admin_user:
+                    tools.append(
+                        ToolDefinition(
+                            name="execute_code",
+                            description="在沙盒中执行一小段代码并返回输出。用于计算、数据处理、格式转换等。禁网，10s 超时。",
+                            parameters={
+                                "type": "object",
+                                "properties": {
+                                    "language": {
+                                        "type": "string",
+                                        "description": "python 或 javascript",
+                                    },
+                                    "code": {"type": "string", "description": "源代码"},
+                                },
+                                "required": ["language", "code"],
+                            },
+                            metadata={"source": "discord_adapter:local"},
+                        )
+                    )
+
                 user_session.set_tools(tools)
 
                 async def _on_tool_call(tool_call):
@@ -670,6 +699,28 @@ class DiscordAdapterPlugin(NekoPluginBase):
                                 call_id=tool_call.call_id,
                                 name=tool_call.name,
                                 output="没有找到相关记忆",
+                            )
+
+                    # 本地工具：execute_code（仅 admin 可见，见上方 tools.append）
+                    if tool_call.name == "execute_code":
+                        language = tool_call.arguments.get("language", "")
+                        code = tool_call.arguments.get("code", "")
+                        try:
+                            output = await sandbox_execute_code(language, code)
+                            return ToolResult(
+                                call_id=tool_call.call_id,
+                                name=tool_call.name,
+                                output=output,
+                            )
+                        except Exception as exc:
+                            err = f"{type(exc).__name__}: {exc}"
+                            self.logger.warning(f"execute_code 失败: {err}")
+                            return ToolResult(
+                                call_id=tool_call.call_id,
+                                name=tool_call.name,
+                                output=f"执行失败: {err}",
+                                is_error=True,
+                                error_message=err,
                             )
 
                     # 远程工具：直接 POST 到 main_server 给的 callback_url，
@@ -942,6 +993,87 @@ class DiscordAdapterPlugin(NekoPluginBase):
                     await self._finalize_session(session_key, reason="idle_timeout")
             finally:
                 await self._release_session_lock(session_key, session_lock)
+
+        # 主动对话：频道空闲超过 proactive_idle_seconds 但还没被回收时，
+        # 让 LLM 主动发一条消息（防刷屏有 cooldown）。
+        try:
+            await self._maybe_proactive_tick(now)
+        except Exception as exc:
+            self.logger.warning(
+                f"proactive tick 失败（跳过本轮）: {type(exc).__name__}: {exc}"
+            )
+
+    async def _maybe_proactive_tick(self, now: float) -> None:
+        idle_threshold = int(self._settings.get("proactive_idle_seconds") or 0)
+        if idle_threshold <= 0:
+            return
+        cooldown = int(self._settings.get("proactive_cooldown_seconds") or 3600)
+        # 只在会话还没被回收前触发（< SESSION_IDLE_TIMEOUT_SECONDS）。
+        for session_key, session_data in list(self._channel_sessions.items()):
+            last_activity_at = session_data.get("last_activity_at") or now
+            idle_for = now - last_activity_at
+            if idle_for < idle_threshold:
+                continue
+            if idle_for >= self.SESSION_IDLE_TIMEOUT_SECONDS:
+                continue  # 已被 idle 回收路径处理
+            last_proactive = float(session_data.get("last_proactive_at") or 0.0)
+            if now - last_proactive < cooldown:
+                continue
+            # 标记 proactive 时间，防并发重复触发
+            session_data["last_proactive_at"] = now
+            asyncio.create_task(
+                self._trigger_proactive(session_key),
+                name=f"discord_proactive:{session_key}",
+            )
+
+    async def _trigger_proactive(self, session_key: str) -> None:
+        """让该频道的 LLM 生成一条主动消息并发送。"""
+        session_data = self._channel_sessions.get(session_key)
+        if not session_data:
+            return
+        user_session = session_data.get("session")
+        if user_session is None:
+            return
+        try:
+            reply_chunks: list[str] = []
+
+            async def _collect(text: str, _is_first: bool):
+                reply_chunks.append(text)
+
+            # 保存旧 callback，挂上自己的收集 callback
+            prev_cb = getattr(user_session, "on_text_delta", None)
+            try:
+                user_session.on_text_delta = _collect
+                prompt = (
+                    "[系统提示] 你已经有一会儿没和用户说话了。如果你想主动说点什么"
+                    "（打招呼、分享想法、延续之前的话题、或单纯打个招呼都可以），"
+                    "请直接说。如果你没什么想说的，请只回复 [PASS] 两个词，"
+                    "不要有任何其他内容。"
+                )
+                await asyncio.wait_for(
+                    user_session.stream_text(prompt),
+                    timeout=self._ai_turn_timeout_seconds,
+                )
+                completed = await self._wait_session_response_complete(user_session)
+                if not completed:
+                    return
+                reply_text = "".join(reply_chunks).strip()
+            finally:
+                if prev_cb is not None:
+                    user_session.on_text_delta = prev_cb
+
+            if not reply_text or "[PASS]" in reply_text:
+                return
+            # 从 session_key 反推 channel_id（"discord:<id>" 或 "discord:dm:<id>"）
+            channel_id = session_key.split(":")[-1]
+            await self._send_reply(channel_id, reply_text)
+            self.logger.info(
+                f"[Proactive] sent proactive message to {session_key}: {reply_text[:80]}"
+            )
+        except Exception as exc:
+            self.logger.warning(
+                f"[Proactive] {session_key} 触发失败: {type(exc).__name__}: {exc}"
+            )
 
     async def _flush_all_sessions(self, reason: str):
         """回收所有会话"""
