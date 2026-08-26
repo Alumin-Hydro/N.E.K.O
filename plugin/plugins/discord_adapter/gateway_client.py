@@ -58,11 +58,15 @@ class _WebSocketConnection:
             path += "?" + parsed.query
 
         # Use synchronous socket in a thread to avoid frozen-runtime asyncio issues
+        import logging
+        logger = logging.getLogger("neko.discord_ws")
+        logger.info("[WS] Starting sync connect in thread...")
 
         def _sync_connect():
             import socket
             import ssl
 
+            logger.info("[WS] Thread: creating SSL context...")
             ssl_ctx = ssl.create_default_context()
 
             if proxy_url:
@@ -70,10 +74,11 @@ class _WebSocketConnection:
                 proxy_host = proxy_parsed.hostname or "127.0.0.1"
                 proxy_port = proxy_parsed.port or 7890
 
-                # TCP to proxy
+                logger.info(f"[WS] Thread: TCP connect to proxy {proxy_host}:{proxy_port}...")
                 sock = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
+                logger.info("[WS] Thread: proxy TCP connected")
 
-                # HTTP CONNECT tunnel
+                logger.info(f"[WS] Thread: HTTP CONNECT to {host}:{port}...")
                 connect_req = (
                     f"CONNECT {host}:{port} HTTP/1.1\r\n"
                     f"Host: {host}:{port}\r\n"
@@ -81,7 +86,6 @@ class _WebSocketConnection:
                 )
                 sock.sendall(connect_req.encode())
 
-                # Read proxy response
                 resp = b""
                 while b"\r\n\r\n" not in resp:
                     chunk = sock.recv(4096)
@@ -89,18 +93,22 @@ class _WebSocketConnection:
                         raise RuntimeError("Proxy closed connection during CONNECT")
                     resp += chunk
                 status_line = resp.split(b"\r\n")[0].decode(errors="replace")
+                logger.info(f"[WS] Thread: CONNECT response: {status_line}")
                 if b"200" not in status_line.encode():
                     sock.close()
                     raise RuntimeError(f"Proxy CONNECT failed: {status_line}")
 
-                # TLS over tunnel
+                logger.info("[WS] Thread: TLS handshake...")
                 tls_sock = ssl_ctx.wrap_socket(sock, server_hostname=host)
+                logger.info("[WS] Thread: TLS OK")
             else:
-                # Direct TCP + TLS
+                logger.info(f"[WS] Thread: direct TCP to {host}:{port}...")
                 sock = socket.create_connection((host, port), timeout=timeout)
+                logger.info("[WS] Thread: TLS handshake...")
                 tls_sock = ssl_ctx.wrap_socket(sock, server_hostname=host)
+                logger.info("[WS] Thread: TLS OK")
 
-            # WebSocket handshake
+            logger.info("[WS] Thread: WebSocket handshake...")
             key = base64.b64encode(os.urandom(16)).decode()
             request = (
                 f"GET {path} HTTP/1.1\r\n"
@@ -113,7 +121,6 @@ class _WebSocketConnection:
             )
             tls_sock.sendall(request.encode())
 
-            # Read HTTP response
             resp = b""
             while b"\r\n\r\n" not in resp:
                 chunk = tls_sock.recv(4096)
@@ -122,21 +129,24 @@ class _WebSocketConnection:
                     raise RuntimeError("Connection closed during WebSocket handshake")
                 resp += chunk
             status_line = resp.split(b"\r\n")[0].decode(errors="replace")
+            logger.info(f"[WS] Thread: WS upgrade: {status_line}")
             if b"101" not in status_line.encode():
                 tls_sock.close()
                 raise RuntimeError(f"WebSocket upgrade failed: {status_line}")
 
-            # Verify Sec-WebSocket-Acept (non-fatal)
             accept = base64.b64encode(
                 hashlib.sha1((key + _WS_GUID).encode()).digest()
             ).decode()
             if accept.encode().lower() not in resp.lower():
                 pass
 
+            logger.info("[WS] Thread: connect complete")
             return tls_sock
 
         # Run sync connect in thread (Python 3.9+)
+        logger.info("[WS] Awaiting asyncio.to_thread...")
         tls_sock = await asyncio.to_thread(_sync_connect)
+        logger.info("[WS] asyncio.to_thread returned")
 
         # Wrap socket in asyncio streams (optional, mainly for API compat)
         reader = asyncio.StreamReader()
