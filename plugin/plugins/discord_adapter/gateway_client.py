@@ -41,12 +41,7 @@ _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 class _WebSocketConnection:
-    """Minimal RFC 6455 client WebSocket over asyncio streams."""
-
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        self._reader = reader
-        self._writer = writer
-        self._closed = False
+    """Minimal RFC 6455 client WebSocket over sync socket + asyncio queue."""
 
     @classmethod
     async def connect(
@@ -154,7 +149,93 @@ class _WebSocketConnection:
         )
         writer = asyncio.StreamWriter(transport, protocol, reader, loop)
 
-        return cls(reader, writer)
+        return cls(reader, writer, tls_sock)
+
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, sock=None):
+        self._reader = reader
+        self._writer = writer
+        self._sock = sock  # underlying sync socket for direct reads
+        self._closed = False
+        self._recv_queue: asyncio.Queue = asyncio.Queue()
+        self._recv_thread = None
+        self._recv_thread_stop = False
+
+    def _start_recv_thread(self):
+        """Start background thread to read from sync socket and feed asyncio queue."""
+        import threading
+
+        def _recv_loop():
+            while not self._recv_thread_stop and not self._closed:
+                try:
+                    # Read frame header (2 bytes)
+                    hdr = self._sock.recv(2)
+                    if not hdr or len(hdr) < 2:
+                        break
+                    b1, b2 = hdr[0], hdr[1]
+                    fin = bool(b1 & 0x80)
+                    opcode = b1 & 0x0F
+                    masked = bool(b2 & 0x80)
+                    length = b2 & 0x7F
+
+                    if length == 126:
+                        ext = self._sock.recv(2)
+                        if not ext:
+                            break
+                        length = int.from_bytes(ext, "big")
+                    elif length == 127:
+                        ext = self._sock.recv(8)
+                        if not ext:
+                            break
+                        length = int.from_bytes(ext, "big")
+
+                    mask_key = self._sock.recv(4) if masked else b""
+                    payload = b""
+                    while len(payload) < length:
+                        chunk = self._sock.recv(length - len(payload))
+                        if not chunk:
+                            break
+                        payload += chunk
+                    if len(payload) < length:
+                        break
+
+                    if masked:
+                        payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+
+                    if opcode == 0x8:  # close
+                        self._closed = True
+                        self._recv_queue.put_nowait(None)
+                        break
+                    if opcode == 0x9:  # ping -> pong (send via sync socket directly)
+                        pong = bytearray([0x8A])
+                        if masked:
+                            pong.extend(mask_key)
+                        pong.extend(payload)
+                        try:
+                            self._sock.sendall(bytes(pong))
+                        except Exception:
+                            pass
+                        continue
+                    if opcode == 0xA:  # pong
+                        continue
+                    if opcode in (0x1, 0x2):  # text or binary
+                        if not fin:
+                            self._recv_queue.put_nowait(
+                                RuntimeError("Fragmented frames not supported")
+                            )
+                            break
+                        try:
+                            text = payload.decode("utf-8", errors="replace")
+                            self._recv_queue.put_nowait(text)
+                        except Exception as e:
+                            self._recv_queue.put_nowait(e)
+                            break
+                except Exception as e:
+                    self._recv_queue.put_nowait(e)
+                    break
+            self._recv_queue.put_nowait(None)
+
+        self._recv_thread = threading.Thread(target=_recv_loop, daemon=True)
+        self._recv_thread.start()
 
     async def send_text(self, data: str) -> None:
         """Send a text frame (opcode 0x1)."""
@@ -173,60 +254,38 @@ class _WebSocketConnection:
         mask_key = os.urandom(4)
         header.extend(mask_key)
         masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
-        self._writer.write(bytes(header) + masked)
-        await self._writer.drain()
+        # Use sync socket directly to avoid asyncio stream issues in frozen runtime
+        self._sock.sendall(bytes(header) + masked)
 
     async def recv_text(self) -> Optional[str]:
         """Receive one text frame. Returns None on close."""
+        if self._recv_thread is None:
+            self._start_recv_thread()
         while True:
-            header = await self._reader.readexactly(2)
-            fin = bool(header[0] & 0x80)
-            opcode = header[0] & 0x0F
-            masked = bool(header[1] & 0x80)
-            length = header[1] & 0x7F
-
-            if length == 126:
-                length = struct.unpack(">H", await self._reader.readexactly(2))[0]
-            elif length == 127:
-                length = struct.unpack(">Q", await self._reader.readexactly(8))[0]
-
-            mask_key = await self._reader.readexactly(4) if masked else b""
-            payload = await self._reader.readexactly(length)
-            if masked:
-                payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
-
-            if opcode == 0x8:  # close
+            try:
+                item = await asyncio.wait_for(self._recv_queue.get(), timeout=60.0)
+            except asyncio.TimeoutError:
+                # Send ping to keep alive
+                continue
+            if item is None:
                 self._closed = True
                 return None
-            if opcode == 0x9:  # ping -> pong
-                pong = bytearray([0x8A])
-                if masked:
-                    pong.extend(mask_key)
-                pong.extend(payload)
-                self._writer.write(bytes(pong))
-                await self._writer.drain()
-                continue
-            if opcode == 0xA:  # pong
-                continue
-            if opcode in (0x1, 0x2):  # text or binary
-                if not fin:
-                    # Continuation frames not supported; Discord doesn't fragment.
-                    raise RuntimeError("Fragmented frames not supported")
-                return payload.decode("utf-8", errors="replace")
+            if isinstance(item, Exception):
+                raise item
+            return item
 
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        self._recv_thread_stop = True
         try:
-            # Send close frame
-            self._writer.write(bytes([0x88, 0x80]) + os.urandom(4))
-            await self._writer.drain()
+            # Send close frame via sync socket
+            self._sock.sendall(bytes([0x88, 0x80]) + os.urandom(4))
         except Exception:
             pass
         try:
-            self._writer.close()
-            await self._writer.wait_closed()
+            self._sock.close()
         except Exception:
             pass
 
