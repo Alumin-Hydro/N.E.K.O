@@ -156,13 +156,17 @@ class DiscordGatewayClient:
 
     async def _connect_once(self) -> None:
         url = self._resume_url if (self._session_id and self._resume_url) else GATEWAY_URL
-        connect_kwargs: dict[str, Any] = {"max_size": 16 * 1024 * 1024}
+        connect_kwargs: dict[str, Any] = {
+            "max_size": 16 * 1024 * 1024,
+            "open_timeout": 20.0,
+        }
 
         if self._proxy_url:
             # websockets 15.x natively supports HTTP CONNECT proxies.
             connect_kwargs["proxy"] = self._proxy_url
             self._log("info", f"Using proxy: {self._proxy_url}")
 
+        self._log("info", f"Connecting to {url} (proxy={'yes' if self._proxy_url else 'no'})...")
         async with websockets.connect(url, **connect_kwargs) as ws:
             self._ws = ws
             # --- Hello ---
