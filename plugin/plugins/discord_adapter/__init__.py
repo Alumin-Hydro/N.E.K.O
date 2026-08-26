@@ -1285,6 +1285,16 @@ class DiscordAdapterPlugin(NekoPluginBase):
             self.logger.warning(
                 "Discord Bot Token 未配置，请在插件前端面板中填写"
             )
+        else:
+            # 凭证已配置则自动开始监听，免手动触发
+            try:
+                async with self._lifecycle_lock:
+                    await self._start_runtime_locked()
+                self.logger.info("Discord 适配器已自动开始监听（凭证已配置）")
+            except Exception as exc:
+                self.logger.warning(
+                    f"自动启动监听失败（可手动 start_listening 重试）: {type(exc).__name__}: {exc}"
+                )
 
         self.register_static_ui(
             "static",
