@@ -62,88 +62,97 @@ class _WebSocketConnection:
         if parsed.query:
             path += "?" + parsed.query
 
-        ssl_ctx = ssl.create_default_context()
+        # Use synchronous socket in a thread to avoid frozen-runtime asyncio issues
+        import concurrent.futures
 
-        if proxy_url:
-            # HTTP CONNECT tunnel through proxy
-            proxy_parsed = urlparse(proxy_url)
-            proxy_host = proxy_parsed.hostname or "127.0.0.1"
-            proxy_port = proxy_parsed.port or 7890
+        def _sync_connect():
+            import socket
+            import ssl
 
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(proxy_host, proxy_port),
-                timeout=timeout,
-            )
+            ssl_ctx = ssl.create_default_context()
 
-            # Send CONNECT request
-            connect_req = (
-                f"CONNECT {host}:{port} HTTP/1.1\r\n"
-                f"Host: {host}:{port}\r\n"
+            if proxy_url:
+                proxy_parsed = urlparse(proxy_url)
+                proxy_host = proxy_parsed.hostname or "127.0.0.1"
+                proxy_port = proxy_parsed.port or 7890
+
+                # TCP to proxy
+                sock = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
+
+                # HTTP CONNECT tunnel
+                connect_req = (
+                    f"CONNECT {host}:{port} HTTP/1.1\r\n"
+                    f"Host: {host}:{port}\r\n"
+                    "\r\n"
+                )
+                sock.sendall(connect_req.encode())
+
+                # Read proxy response
+                resp = b""
+                while b"\r\n\r\n" not in resp:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        raise RuntimeError("Proxy closed connection during CONNECT")
+                    resp += chunk
+                status_line = resp.split(b"\r\n")[0].decode(errors="replace")
+                if b"200" not in status_line.encode():
+                    sock.close()
+                    raise RuntimeError(f"Proxy CONNECT failed: {status_line}")
+
+                # TLS over tunnel
+                tls_sock = ssl_ctx.wrap_socket(sock, server_hostname=host)
+            else:
+                # Direct TCP + TLS
+                sock = socket.create_connection((host, port), timeout=timeout)
+                tls_sock = ssl_ctx.wrap_socket(sock, server_hostname=host)
+
+            # WebSocket handshake
+            key = base64.b64encode(os.urandom(16)).decode()
+            request = (
+                f"GET {path} HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n"
                 "\r\n"
             )
-            writer.write(connect_req.encode())
-            await writer.drain()
+            tls_sock.sendall(request.encode())
 
-            # Read proxy response
-            proxy_resp = await asyncio.wait_for(
-                reader.readuntil(b"\r\n\r\n"), timeout=timeout
-            )
-            status_line = proxy_resp.split(b"\r\n")[0].decode(errors="replace")
-            if b"200" not in status_line.encode():
-                writer.close()
-                await writer.wait_closed()
-                raise RuntimeError(f"Proxy CONNECT failed: {status_line}")
+            # Read HTTP response
+            resp = b""
+            while b"\r\n\r\n" not in resp:
+                chunk = tls_sock.recv(4096)
+                if not chunk:
+                    tls_sock.close()
+                    raise RuntimeError("Connection closed during WebSocket handshake")
+                resp += chunk
+            status_line = resp.split(b"\r\n")[0].decode(errors="replace")
+            if b"101" not in status_line.encode():
+                tls_sock.close()
+                raise RuntimeError(f"WebSocket upgrade failed: {status_line}")
 
-            # Upgrade to TLS over the tunnel
-            loop = asyncio.get_event_loop()
-            transport = writer.transport
-            protocol = transport.get_protocol()
-            new_transport = await loop.start_tls(
-                transport,
-                protocol,
-                ssl_ctx,
-                server_side=False,
-                server_hostname=host,
-            )
-            reader = asyncio.StreamReader()
-            protocol._stream_reader = reader
-            writer = asyncio.StreamWriter(new_transport, protocol, reader, loop)
-        else:
-            # Direct TCP + TLS
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port, ssl=ssl_ctx, server_hostname=host),
-                timeout=timeout,
-            )
+            # Verify Sec-WebSocket-Acept (non-fatal)
+            accept = base64.b64encode(
+                hashlib.sha1((key + _WS_GUID).encode()).digest()
+            ).decode()
+            if accept.encode().lower() not in resp.lower():
+                pass
 
-        # HTTP Upgrade handshake
-        key = base64.b64encode(os.urandom(16)).decode()
-        request = (
-            f"GET {path} HTTP/1.1\r\n"
-            f"Host: {host}\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {key}\r\n"
-            "Sec-WebSocket-Version: 13\r\n"
-            "\r\n"
+            return tls_sock
+
+        # Run sync connect in thread pool
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            tls_sock = await loop.run_in_executor(pool, _sync_connect)
+
+        # Wrap socket in asyncio streams
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        transport, _ = await loop.create_connection(
+            lambda: protocol, sock=tls_sock
         )
-        writer.write(request.encode())
-        await writer.drain()
-
-        # Read HTTP response headers
-        response = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=timeout)
-        status_line = response.split(b"\r\n")[0].decode(errors="replace")
-        if b"101" not in status_line.encode():
-            writer.close()
-            await writer.wait_closed()
-            raise RuntimeError(f"WebSocket upgrade failed: {status_line}")
-
-        # Verify Sec-WebSocket-Accept
-        accept = base64.b64encode(
-            hashlib.sha1((key + _WS_GUID).encode()).digest()
-        ).decode()
-        if accept.encode().lower() not in response.lower():
-            # Non-fatal: some servers omit or reorder headers; log and continue.
-            pass
+        writer = asyncio.StreamWriter(transport, protocol, reader, loop)
 
         return cls(reader, writer)
 
