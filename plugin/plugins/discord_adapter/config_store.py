@@ -47,7 +47,7 @@ class DiscordConfigStore:
             "max_attachments_per_message": 3,
             "reconnect_backoff_seconds": 3.0,
             "max_reconnect_attempts": 5,
-            "proxy_url": "",
+            "proxy_url": "http://127.0.0.1:7890",
             # 主动对话：频道空闲超过 N 秒后让 LLM 主动发一条。0 = 关闭。
             "proactive_idle_seconds": 0,
             # 每个频道触发过一次后，至少再过 N 秒才再次触发（防刷屏）。

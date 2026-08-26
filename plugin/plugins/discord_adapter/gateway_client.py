@@ -49,7 +49,12 @@ class _WebSocketConnection:
         self._closed = False
 
     @classmethod
-    async def connect(cls, url: str, timeout: float = 20.0) -> "_WebSocketConnection":
+    async def connect(
+        cls,
+        url: str,
+        timeout: float = 20.0,
+        proxy_url: Optional[str] = None,
+    ) -> "_WebSocketConnection":
         parsed = urlparse(url)
         host = parsed.hostname or "gateway.discord.gg"
         port = parsed.port or (443 if parsed.scheme == "wss" else 80)
@@ -57,12 +62,58 @@ class _WebSocketConnection:
         if parsed.query:
             path += "?" + parsed.query
 
-        # TCP + TLS
         ssl_ctx = ssl.create_default_context()
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port, ssl=ssl_ctx, server_hostname=host),
-            timeout=timeout,
-        )
+
+        if proxy_url:
+            # HTTP CONNECT tunnel through proxy
+            proxy_parsed = urlparse(proxy_url)
+            proxy_host = proxy_parsed.hostname or "127.0.0.1"
+            proxy_port = proxy_parsed.port or 7890
+
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(proxy_host, proxy_port),
+                timeout=timeout,
+            )
+
+            # Send CONNECT request
+            connect_req = (
+                f"CONNECT {host}:{port} HTTP/1.1\r\n"
+                f"Host: {host}:{port}\r\n"
+                "\r\n"
+            )
+            writer.write(connect_req.encode())
+            await writer.drain()
+
+            # Read proxy response
+            proxy_resp = await asyncio.wait_for(
+                reader.readuntil(b"\r\n\r\n"), timeout=timeout
+            )
+            status_line = proxy_resp.split(b"\r\n")[0].decode(errors="replace")
+            if b"200" not in status_line.encode():
+                writer.close()
+                await writer.wait_closed()
+                raise RuntimeError(f"Proxy CONNECT failed: {status_line}")
+
+            # Upgrade to TLS over the tunnel
+            loop = asyncio.get_event_loop()
+            transport = writer.transport
+            protocol = transport.get_protocol()
+            new_transport = await loop.start_tls(
+                transport,
+                protocol,
+                ssl_ctx,
+                server_side=False,
+                server_hostname=host,
+            )
+            reader = asyncio.StreamReader()
+            protocol._stream_reader = reader
+            writer = asyncio.StreamWriter(new_transport, protocol, reader, loop)
+        else:
+            # Direct TCP + TLS
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port, ssl=ssl_ctx, server_hostname=host),
+                timeout=timeout,
+            )
 
         # HTTP Upgrade handshake
         key = base64.b64encode(os.urandom(16)).decode()
@@ -297,12 +348,11 @@ class DiscordGatewayClient:
         url = self._resume_url if (self._session_id and self._resume_url) else GATEWAY_URL
         self._log("info", f"Connecting to {url} (proxy={'yes' if self._proxy_url else 'no'})...")
 
-        # Note: proxy support not implemented in pure-stdlib version.
-        # If proxy is configured, log a warning and continue direct.
+        # Note: proxy support implemented via HTTP CONNECT tunnel.
         if self._proxy_url:
-            self._log("warning", f"Proxy configured but not supported in stdlib client: {self._proxy_url}")
+            self._log("info", f"Using HTTP proxy: {self._proxy_url}")
 
-        ws = await _WebSocketConnection.connect(url, timeout=20.0)
+        ws = await _WebSocketConnection.connect(url, timeout=20.0, proxy_url=self._proxy_url)
         self._ws = ws
         try:
             # --- Hello ---
