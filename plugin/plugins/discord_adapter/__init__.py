@@ -25,7 +25,6 @@ from .gateway_client import DiscordGatewayClient
 from .memory_bridge import DiscordMemoryBridge
 from .permission import PermissionManager
 from .rest_client import DiscordRestClient
-from .sandbox import execute_code as sandbox_execute_code
 
 UI_ASSET_VERSION = "0.1.0"
 
@@ -592,87 +591,61 @@ class DiscordAdapterPlugin(NekoPluginBase):
                     on_text_delta=on_text_delta,
                 )
 
-                # 注册 LLM 工具（recall_memory + send_image + send_file + execute_code）
+                # 注册 LLM 工具：从 main_server 拉取该角色已注册的工具列表
+                # （meme_manager / image_generator / music 等 @llm_tool 注册的）。
+                # 远程工具通过 callback_url 直接 POST 回插件进程执行，不在这里
+                # 重复实现。recall_memory 是 builtin 由 memory_bridge 处理。
                 from main_logic.tool_calling import ToolDefinition, ToolResult
 
-                tools = [
-                    ToolDefinition(
-                        name="recall_memory",
-                        description="回忆过去的对话记忆。当你需要想起之前和用户聊过的内容时使用。",
-                        parameters={
-                            "type": "object",
-                            "properties": {
-                                "query": {
-                                    "type": "string",
-                                    "description": "要检索的记忆关键词或主题",
-                                },
-                                "time": {
-                                    "type": "string",
-                                    "description": "可选的时间范围描述，如'昨天'、'上周'",
-                                },
-                            },
-                            "required": [],
-                        },
-                        metadata={"source": "discord_adapter"},
-                    ),
-                    ToolDefinition(
-                        name="send_image",
-                        description="发送一张图片到当前 Discord 频道。支持图片 URL 或 base64 数据。",
-                        parameters={
-                            "type": "object",
-                            "properties": {
-                                "url_or_b64": {
-                                    "type": "string",
-                                    "description": "图片的 http/https URL 或 base64 编码字符串",
-                                },
-                                "caption": {
-                                    "type": "string",
-                                    "description": "图片说明文字（可选）",
-                                },
-                            },
-                            "required": ["url_or_b64"],
-                        },
-                        metadata={"source": "discord_adapter"},
-                    ),
-                    ToolDefinition(
-                        name="send_file",
-                        description="发送一个文件到当前 Discord 频道。支持文件 URL 或本地路径。",
-                        parameters={
-                            "type": "object",
-                            "properties": {
-                                "path_or_url": {
-                                    "type": "string",
-                                    "description": "文件的 http/https URL 或本地文件路径",
-                                },
-                                "filename": {
-                                    "type": "string",
-                                    "description": "显示的文件名（可选，默认从 URL/路径推断）",
-                                },
-                            },
-                            "required": ["path_or_url"],
-                        },
-                        metadata={"source": "discord_adapter"},
-                    ),
-                    ToolDefinition(
-                        name="execute_code",
-                        description="在沙盒中执行一小段代码并返回输出。用于计算、数据处理、格式转换等。",
-                        parameters={
-                            "type": "object",
-                            "properties": {
-                                "language": {
-                                    "type": "string",
-                                    "description": "编程语言：python 或 javascript",
-                                },
-                                "code": {
-                                    "type": "string",
-                                    "description": "要执行的源代码",
-                                },
-                            },
-                            "required": ["language", "code"],
-                        },
-                        metadata={"source": "discord_adapter"},
-                    ),
-                ]
+                main_server_base = "http://127.0.0.1:48911"
+                tools: list[ToolDefinition] = []
+                remote_callbacks: dict[str, str] = {}  # name -> callback_url
+                try:
+                    import httpx
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        resp = await client.get(
+                            f"{main_server_base}/api/tools",
+                            params={"role": her_name},
+                        )
+                        if resp.status_code == 200:
+                            body = resp.json() or {}
+                            by_role = body.get("tools_by_role") or {}
+                            for t in by_role.get(her_name, []) or []:
+                                name = t.get("name") or ""
+                                if not name:
+                                    continue
+                                # recall_memory 由我们自己的 memory_bridge 处理，跳过
+                                if name == "recall_memory":
+                                    continue
+                                tools.append(
+                                    ToolDefinition(
+                                        name=name,
+                                        description=t.get("description") or "",
+                                        # 远程工具的 schema 由注册方拥有；这里给一个
+                                        # 通用 object schema，LLM 仍能按描述推断参数。
+                                        parameters={"type": "object", "properties": {}},
+                                        metadata={
+                                            "source": t.get("source") or "",
+                                            "callback_url": t.get("callback_url") or "",
+                                            "is_remote": bool(t.get("is_remote")),
+                                        },
+                                    )
+                                )
+                                if t.get("callback_url"):
+                                    remote_callbacks[name] = t["callback_url"]
+                            self.logger.info(
+                                f"Loaded {len(tools)} tools from main_server for role={her_name}: "
+                                f"{[t.name for t in tools]}"
+                            )
+                        else:
+                            self.logger.warning(
+                                f"GET /api/tools HTTP {resp.status_code}: {resp.text[:200]}"
+                            )
+                except Exception as exc:
+                    self.logger.warning(
+                        f"拉取 main_server 工具列表失败（本次会话无工具）: {type(exc).__name__}: {exc}"
+                    )
+
                 user_session.set_tools(tools)
 
                 async def _on_tool_call(tool_call):
@@ -699,102 +672,48 @@ class DiscordAdapterPlugin(NekoPluginBase):
                                 output="没有找到相关记忆",
                             )
 
-                    elif tool_call.name == "send_image":
-                        url_or_b64 = tool_call.arguments.get("url_or_b64", "")
-                        caption = tool_call.arguments.get("caption", "")
+                    # 远程工具：直接 POST 到 main_server 给的 callback_url，
+                    # 由插件（meme_manager / image_generator / ...）自己执行。
+                    callback_url = remote_callbacks.get(tool_call.name)
+                    if callback_url:
                         try:
-                            # 下载或解码
-                            if url_or_b64.startswith(("http://", "https://")):
-                                file_bytes = await self._download_url_bytes(url_or_b64)
-                                filename = url_or_b64.split("/")[-1].split("?")[0] or "image.png"
-                            else:
-                                import base64
-                                file_bytes = base64.b64decode(url_or_b64)
-                                filename = "image.png"
-
-                            # 推断 content type
-                            ct = "image/png"
-                            if filename.lower().endswith((".jpg", ".jpeg")):
-                                ct = "image/jpeg"
-                            elif filename.lower().endswith(".gif"):
-                                ct = "image/gif"
-                            elif filename.lower().endswith(".webp"):
-                                ct = "image/webp"
-
-                            await self.rest_client.create_message_with_attachment(
-                                channel_id=session_key.split(":")[-1],
-                                content=caption,
-                                file_bytes=file_bytes,
-                                filename=filename,
-                                content_type=ct,
-                            )
+                            import httpx
+                            async with httpx.AsyncClient(timeout=60.0) as client:
+                                resp = await client.post(
+                                    callback_url,
+                                    json={
+                                        "name": tool_call.name,
+                                        "arguments": tool_call.arguments or {},
+                                        "call_id": tool_call.call_id,
+                                        "raw_arguments": getattr(
+                                            tool_call, "raw_arguments", None
+                                        ),
+                                    },
+                                )
+                            body = resp.json() if resp.content else {}
+                            if not isinstance(body, dict):
+                                body = {"output": body}
                             return ToolResult(
                                 call_id=tool_call.call_id,
                                 name=tool_call.name,
-                                output="图片已发送",
+                                output=body.get("output", body),
+                                is_error=bool(body.get("is_error", False))
+                                or resp.status_code >= 400,
+                                error_message=str(body.get("error") or "")
+                                if body.get("is_error")
+                                else "",
                             )
                         except Exception as exc:
-                            self.logger.warning(f"send_image 失败: {type(exc).__name__}: {exc}")
+                            err = f"{type(exc).__name__}: {exc}"
+                            self.logger.warning(
+                                f"远程工具 {tool_call.name} 调用失败: {err}"
+                            )
                             return ToolResult(
                                 call_id=tool_call.call_id,
                                 name=tool_call.name,
-                                output=f"发送图片失败: {type(exc).__name__}",
+                                output={"error": err},
                                 is_error=True,
-                            )
-
-                    elif tool_call.name == "send_file":
-                        path_or_url = tool_call.arguments.get("path_or_url", "")
-                        filename = tool_call.arguments.get("filename", "")
-                        try:
-                            if path_or_url.startswith(("http://", "https://")):
-                                file_bytes = await self._download_url_bytes(path_or_url)
-                                if not filename:
-                                    filename = path_or_url.split("/")[-1].split("?")[0] or "file.bin"
-                            else:
-                                import pathlib
-                                p = pathlib.Path(path_or_url)
-                                file_bytes = p.read_bytes()
-                                if not filename:
-                                    filename = p.name
-
-                            await self.rest_client.create_message_with_attachment(
-                                channel_id=session_key.split(":")[-1],
-                                content="",
-                                file_bytes=file_bytes,
-                                filename=filename,
-                                content_type="application/octet-stream",
-                            )
-                            return ToolResult(
-                                call_id=tool_call.call_id,
-                                name=tool_call.name,
-                                output=f"文件 {filename} 已发送",
-                            )
-                        except Exception as exc:
-                            self.logger.warning(f"send_file 失败: {type(exc).__name__}: {exc}")
-                            return ToolResult(
-                                call_id=tool_call.call_id,
-                                name=tool_call.name,
-                                output=f"发送文件失败: {type(exc).__name__}",
-                                is_error=True,
-                            )
-
-                    elif tool_call.name == "execute_code":
-                        language = tool_call.arguments.get("language", "")
-                        code = tool_call.arguments.get("code", "")
-                        try:
-                            output = await sandbox_execute_code(language, code)
-                            return ToolResult(
-                                call_id=tool_call.call_id,
-                                name=tool_call.name,
-                                output=output,
-                            )
-                        except Exception as exc:
-                            self.logger.warning(f"execute_code 失败: {type(exc).__name__}: {exc}")
-                            return ToolResult(
-                                call_id=tool_call.call_id,
-                                name=tool_call.name,
-                                output=f"执行失败: {type(exc).__name__}",
-                                is_error=True,
+                                error_message=err,
                             )
 
                     return ToolResult(
@@ -971,21 +890,6 @@ class DiscordAdapterPlugin(NekoPluginBase):
         return system_prompt
 
     # ===== Reply sending =====
-
-    async def _download_url_bytes(self, url: str, max_bytes: int = 10 * 1024 * 1024) -> bytes:
-        """Download bytes from a URL with size cap (for send_image/send_file tools)."""
-        import httpx
-        async with httpx.AsyncClient(timeout=30.0, proxy=self._settings.get("proxy_url") or None) as client:
-            async with client.stream("GET", url) as resp:
-                resp.raise_for_status()
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in resp.aiter_bytes(65536):
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise ValueError(f"Download exceeds {max_bytes} bytes")
-                    chunks.append(chunk)
-                return b"".join(chunks)
 
     async def _send_reply(self, channel_id: str, reply_text: str) -> None:
         """AI 回复 → Markdown 图片转 embed → 分段 → REST 发回原频道。"""
