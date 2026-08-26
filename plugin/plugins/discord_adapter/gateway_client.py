@@ -58,7 +58,6 @@ class _WebSocketConnection:
             path += "?" + parsed.query
 
         # Use synchronous socket in a thread to avoid frozen-runtime asyncio issues
-        import concurrent.futures
 
         def _sync_connect():
             import socket
@@ -136,18 +135,16 @@ class _WebSocketConnection:
 
             return tls_sock
 
-        # Run sync connect in thread pool
-        loop = asyncio.get_event_loop()
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            tls_sock = await loop.run_in_executor(pool, _sync_connect)
+        # Run sync connect in thread (Python 3.9+)
+        tls_sock = await asyncio.to_thread(_sync_connect)
 
-        # Wrap socket in asyncio streams
+        # Wrap socket in asyncio streams (optional, mainly for API compat)
         reader = asyncio.StreamReader()
         protocol = asyncio.StreamReaderProtocol(reader)
-        transport, _ = await loop.create_connection(
+        transport, _ = await asyncio.get_event_loop().create_connection(
             lambda: protocol, sock=tls_sock
         )
-        writer = asyncio.StreamWriter(transport, protocol, reader, loop)
+        writer = asyncio.StreamWriter(transport, protocol, reader, asyncio.get_event_loop())
 
         return cls(reader, writer, tls_sock)
 
