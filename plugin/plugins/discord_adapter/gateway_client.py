@@ -148,20 +148,12 @@ class _WebSocketConnection:
         tls_sock = await asyncio.to_thread(_sync_connect)
         logger.info("[WS] asyncio.to_thread returned")
 
-        # Wrap socket in asyncio streams (optional, mainly for API compat)
-        reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
-        transport, _ = await asyncio.get_event_loop().create_connection(
-            lambda: protocol, sock=tls_sock
-        )
-        writer = asyncio.StreamWriter(transport, protocol, reader, asyncio.get_event_loop())
+        # Do NOT wrap in asyncio streams — frozen runtime may misbehave.
+        # Use sync socket directly for both send and recv.
+        return cls(tls_sock)
 
-        return cls(reader, writer, tls_sock)
-
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, sock=None):
-        self._reader = reader
-        self._writer = writer
-        self._sock = sock  # underlying sync socket for direct reads
+    def __init__(self, sock):
+        self._sock = sock  # underlying sync socket for direct reads/writes
         self._closed = False
         self._recv_queue: asyncio.Queue = asyncio.Queue()
         self._recv_thread = None
@@ -170,19 +162,24 @@ class _WebSocketConnection:
     def _start_recv_thread(self):
         """Start background thread to read from sync socket and feed asyncio queue."""
         import threading
+        import logging
+        logger = logging.getLogger("neko.discord_ws")
 
         def _recv_loop():
+            logger.info("[WS] Recv thread: started")
             while not self._recv_thread_stop and not self._closed:
                 try:
                     # Read frame header (2 bytes)
                     hdr = self._sock.recv(2)
                     if not hdr or len(hdr) < 2:
+                        logger.info("[WS] Recv thread: connection closed (no data)")
                         break
                     b1, b2 = hdr[0], hdr[1]
                     fin = bool(b1 & 0x80)
                     opcode = b1 & 0x0F
                     masked = bool(b2 & 0x80)
                     length = b2 & 0x7F
+                    logger.info(f"[WS] Recv thread: frame opcode={opcode} len={length}")
 
                     if length == 126:
                         ext = self._sock.recv(2)
@@ -265,21 +262,99 @@ class _WebSocketConnection:
         self._sock.sendall(bytes(header) + masked)
 
     async def recv_text(self) -> Optional[str]:
-        """Receive one text frame. Returns None on close."""
-        if self._recv_thread is None:
-            self._start_recv_thread()
-        while True:
+        """Receive one text frame. Returns None on close.
+
+        Spawns a fresh thread per frame read to avoid frozen-runtime
+        executor/thread-pool scheduling issues.
+        """
+        import logging
+        logger = logging.getLogger("neko.discord_ws")
+
+        if self._closed:
+            return None
+
+        logger.info("[WS] recv_text: spawning frame reader thread...")
+
+        def _read_one_frame():
+            """Read exactly one WS frame from socket. Runs in thread."""
             try:
-                item = await asyncio.wait_for(self._recv_queue.get(), timeout=60.0)
-            except asyncio.TimeoutError:
-                # Send ping to keep alive
-                continue
-            if item is None:
-                self._closed = True
-                return None
-            if isinstance(item, Exception):
-                raise item
-            return item
+                hdr = self._sock.recv(2)
+                if not hdr or len(hdr) < 2:
+                    logger.info("[WS] Frame reader: connection closed")
+                    return None
+
+                b1, b2 = hdr[0], hdr[1]
+                fin = bool(b1 & 0x80)
+                opcode = b1 & 0x0F
+                masked = bool(b2 & 0x80)
+                length = b2 & 0x7F
+                logger.info(f"[WS] Frame reader: opcode={opcode} len={length}")
+
+                if length == 126:
+                    ext = self._sock.recv(2)
+                    if not ext:
+                        return None
+                    length = int.from_bytes(ext, "big")
+                elif length == 127:
+                    ext = self._sock.recv(8)
+                    if not ext:
+                        return None
+                    length = int.from_bytes(ext, "big")
+
+                mask_key = self._sock.recv(4) if masked else b""
+                payload = b""
+                while len(payload) < length:
+                    chunk = self._sock.recv(length - len(payload))
+                    if not chunk:
+                        return None
+                    payload += chunk
+                if len(payload) < length:
+                    return None
+
+                if masked:
+                    payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+
+                if opcode == 0x8:  # close
+                    self._closed = True
+                    return None
+                if opcode == 0x9:  # ping -> pong
+                    pong = bytearray([0x8A])
+                    if masked:
+                        pong.extend(mask_key)
+                    pong.extend(payload)
+                    try:
+                        self._sock.sendall(bytes(pong))
+                    except Exception:
+                        pass
+                    return ""  # empty string = ping handled, continue
+                if opcode == 0xA:  # pong
+                    return ""
+
+                if opcode in (0x1, 0x2):  # text or binary
+                    if not fin:
+                        raise RuntimeError("Fragmented frames not supported")
+                    return payload.decode("utf-8", errors="replace")
+
+                return ""  # unknown opcode, skip
+
+            except Exception as e:
+                logger.info(f"[WS] Frame reader error: {e}")
+                return e
+
+        # Run in fresh thread each time — use run_in_executor with explicit
+        # None executor to force default ThreadPoolExecutor creation.
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _read_one_frame)
+
+        if result is None:
+            self._closed = True
+            return None
+        if isinstance(result, Exception):
+            raise result
+        if result == "":
+            # ping/pong/unknown, read next frame
+            return await self.recv_text()
+        return result
 
     async def close(self) -> None:
         if self._closed:
