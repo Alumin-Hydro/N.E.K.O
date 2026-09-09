@@ -193,6 +193,18 @@ describe('App', () => {
   const renderInputApp = (
     props: React.ComponentProps<typeof App> = {},
   ) => render(<App compactChatState="input" {...props} />);
+  const pressEnter = (target: Element, options: { shiftKey?: boolean } = {}) => {
+    fireEvent.keyDown(target, {
+      key: 'Enter',
+      code: 'Enter',
+      shiftKey: options.shiftKey ?? false,
+    });
+    fireEvent.keyUp(target, {
+      key: 'Enter',
+      code: 'Enter',
+      shiftKey: options.shiftKey ?? false,
+    });
+  };
   const queryAvatarToolVisualOverlay = () => document.body.querySelector<HTMLElement>('.avatar-tool-visual-overlay');
   const queryAvatarToolImpactEffect = () => document.body.querySelector<HTMLElement>(
     '.avatar-tool-visual-overlay-hammer, .avatar-tool-impact-effect',
@@ -416,7 +428,7 @@ describe('App', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Emoji' }));
       const toolGroup = screen.getByRole('group', { name: 'Tool icons' });
-      expect(Array.from(toolGroup.querySelectorAll<HTMLButtonElement>('.composer-icon-button'))
+      expect(Array.from(toolGroup.querySelectorAll<HTMLButtonElement>('.composer-icon-button[data-avatar-tool-id]'))
         .map(button => button.getAttribute('aria-label'))).toEqual(['棒棒糖', '猫爪', '锤子']);
       fireEvent.click(screen.getByRole('button', { name: '棒棒糖' }));
 
@@ -448,6 +460,50 @@ describe('App', () => {
     } finally {
       restoreLive2dBounds();
     }
+  });
+
+  it('lets the full chat configure the avatar tools shown in its emoji menu', async () => {
+    const onAvatarToolStateChange = vi.fn();
+    const { container } = render(
+      <App
+        chatSurfaceMode="full"
+        assistantName="Neko"
+        onAvatarToolStateChange={onAvatarToolStateChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Emoji' }));
+    const toolGroup = screen.getByRole('group', { name: 'Tool icons' });
+    expect(toolGroup.querySelectorAll('[data-avatar-tool-id]')).toHaveLength(3);
+    expect(toolGroup).toHaveAttribute('data-avatar-tool-button-count', '4');
+    expect(toolGroup.querySelector('.full-avatar-tool-settings-divider')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Edit quick tools' })).toHaveClass(
+      'composer-icon-button',
+      'full-avatar-tool-settings-button',
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit quick tools' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Manage tools' });
+    expect(dialog.querySelector('[data-avatar-tool-library-id="rps"]')).not.toBeNull();
+
+    fireEvent.click(dialog.querySelector('.avatar-tool-manager-remove') as HTMLButtonElement);
+    fireEvent.click(dialog.querySelector('[data-avatar-tool-library-id="rps"]') as HTMLButtonElement);
+    fireEvent.click(dialog.querySelector('.avatar-tool-manager-action.primary') as HTMLButtonElement);
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Manage tools' })).toBeNull());
+    expect(Array.from(toolGroup.querySelectorAll<HTMLElement>('[data-avatar-tool-id]'))
+      .map(button => button.dataset.avatarToolId)).toEqual(['rps', 'fist', 'hammer']);
+    expect(JSON.parse(window.localStorage.getItem(ACTIVE_AVATAR_TOOLS_STORAGE_KEY) || '[]'))
+      .toEqual(['rps', 'fist', 'hammer']);
+
+    fireEvent.click(container.querySelector('[data-avatar-tool-id="rps"]') as HTMLButtonElement);
+    await waitFor(() => expect(onAvatarToolStateChange).toHaveBeenLastCalledWith(expect.objectContaining({
+      active: true,
+      toolId: 'rps',
+      roundChoiceResultLabels: expect.objectContaining({
+        avatar_win: 'Neko wins',
+      }),
+    })));
   });
 
   it('publishes only the strict desktop descriptor from the full chat surface', async () => {
@@ -3986,6 +4042,273 @@ describe('App', () => {
     }
   });
 
+  it('restores the compact empty state when active-route sync opens after the game turn starts', async () => {
+    vi.useFakeTimers();
+    const gameLine = '哈，这球终于被我拿下了！';
+    const gameMessage = parseChatMessage({
+      id: 'assistant-badminton-exit-line',
+      role: 'assistant',
+      author: 'YUI',
+      time: '12:23',
+      createdAt: 2,
+      turnId: 'badminton-exit-turn',
+      blocks: [{ type: 'text', text: gameLine }],
+      status: 'streaming',
+    });
+
+    try {
+      const { container, rerender } = render(<App chatSurfaceMode="compact" messages={[]} />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(container.querySelector('.compact-chat-capsule-text')).toHaveTextContent(
+        DEFAULT_CHAT_EMPTY_STATE_FALLBACK,
+      );
+
+      act(() => {
+        window.dispatchEvent(new CustomEvent('neko-assistant-turn-start', {
+          detail: {
+            turnId: 'badminton-exit-turn',
+            source: 'visible_gemini_bubble',
+            meta: {
+              source: 'game_route',
+              kind: 'badminton',
+              session_id: 'badminton-session',
+              mirror: {
+                kind: 'badminton',
+                session_id: 'badminton-session',
+                event: {},
+              },
+            },
+          },
+        }));
+        window.dispatchEvent(new CustomEvent('neko-game-window-state-change', {
+          detail: {
+            action: 'opened',
+            gameType: 'badminton',
+            sessionId: 'badminton-session',
+          },
+        }));
+      });
+      rerender(<App chatSurfaceMode="compact" messages={[gameMessage]} />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20);
+      });
+      expect(container.querySelector('.compact-chat-capsule-text')?.textContent ?? '').toBe('');
+
+      act(() => {
+        window.dispatchEvent(new CustomEvent('neko-game-window-state-change', {
+          detail: {
+            action: 'closed',
+            gameType: 'badminton',
+            sessionId: 'badminton-session',
+          },
+        }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+
+      expect(container.querySelector('.compact-chat-capsule-text')).toHaveTextContent(
+        DEFAULT_CHAT_EMPTY_STATE_FALLBACK,
+      );
+      expect(container.querySelector('.compact-chat-capsule-text')).not.toHaveTextContent(gameLine);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('restores the compact empty state from an identity-less reconnect close for a tracked game', async () => {
+    vi.useFakeTimers();
+    const gameLine = '比赛已经结束啦！';
+
+    try {
+      const { container } = render(<App chatSurfaceMode="compact" messages={[]} />);
+
+      act(() => {
+        window.dispatchEvent(new CustomEvent('neko-assistant-turn-start', {
+          detail: {
+            turnId: 'reconnected-badminton-turn',
+            source: 'gemini_response_first_chunk',
+            meta: {
+              source: 'game_route',
+              kind: 'badminton',
+              session_id: 'reconnected-badminton-session',
+              mirror: {
+                kind: 'badminton',
+                session_id: 'reconnected-badminton-session',
+                event: {},
+              },
+            },
+          },
+        }));
+        window.dispatchEvent(new CustomEvent('neko-compact-caption-update', {
+          detail: {
+            turnId: 'reconnected-badminton-turn',
+            segmentId: 'reconnected-badminton-turn:segment:1',
+            text: gameLine,
+          },
+        }));
+        window.dispatchEvent(new CustomEvent('neko-assistant-speech-unavailable', {
+          detail: {
+            turnId: 'reconnected-badminton-turn',
+            source: 'test',
+          },
+        }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(container.querySelector('.compact-chat-capsule-text')?.textContent ?? '').not.toBe('');
+
+      act(() => {
+        window.dispatchEvent(new CustomEvent('neko-game-window-state-change', {
+          detail: {
+            action: 'closed',
+            gameType: '',
+            sessionId: '',
+          },
+        }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+
+      expect(container.querySelector('.compact-chat-capsule-text')).toHaveTextContent(
+        DEFAULT_CHAT_EMPTY_STATE_FALLBACK,
+      );
+      expect(container.querySelector('.compact-chat-capsule-text')).not.toHaveTextContent(gameLine);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('restores the compact empty state after a text-less assistant turn fully ends', async () => {
+    vi.useFakeTimers();
+
+    try {
+      const { container } = render(<App chatSurfaceMode="compact" messages={[]} />);
+
+      act(() => {
+        window.dispatchEvent(new CustomEvent('neko-assistant-turn-start', {
+          detail: {
+            turnId: 'badminton-postgame-turn',
+            source: 'test',
+          },
+        }));
+        window.dispatchEvent(new CustomEvent('neko-assistant-turn-ending', {
+          detail: {
+            turnId: 'badminton-postgame-turn',
+            source: 'turn_end_flush',
+          },
+        }));
+        window.dispatchEvent(new CustomEvent('neko-assistant-turn-end', {
+          detail: {
+            turnId: 'badminton-postgame-turn',
+            source: 'turn_end',
+          },
+        }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+
+      expect(container.querySelector('.compact-chat-capsule-text')).toHaveTextContent(
+        DEFAULT_CHAT_EMPTY_STATE_FALLBACK,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not bind an ordinary assistant caption to a stale active game session', async () => {
+    vi.useFakeTimers();
+    const normalLine = '这是一条与小游戏无关的正常回复。';
+
+    try {
+      const { container } = render(<App chatSurfaceMode="compact" messages={[]} />);
+
+      act(() => {
+        window.dispatchEvent(new CustomEvent('neko-game-window-state-change', {
+          detail: {
+            action: 'opened',
+            gameType: 'badminton',
+            sessionId: 'stale-game-session',
+          },
+        }));
+        window.dispatchEvent(new CustomEvent('neko-assistant-turn-start', {
+          detail: {
+            turnId: 'ordinary-assistant-turn',
+            source: 'gemini_response_first_chunk',
+          },
+        }));
+        window.dispatchEvent(new CustomEvent('neko-compact-caption-update', {
+          detail: {
+            turnId: 'ordinary-assistant-turn',
+            segmentId: 'ordinary-assistant-turn:segment:1',
+            text: normalLine,
+          },
+        }));
+        window.dispatchEvent(new CustomEvent('neko-assistant-speech-unavailable', {
+          detail: {
+            turnId: 'ordinary-assistant-turn',
+            source: 'test',
+          },
+        }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      const visibleBeforeSync = container.querySelector('.compact-chat-capsule-text')?.textContent ?? '';
+      expect(visibleBeforeSync.length).toBeGreaterThan(0);
+      expect(normalLine.startsWith(visibleBeforeSync)).toBe(true);
+
+      act(() => {
+        window.dispatchEvent(new CustomEvent('neko-game-window-state-change', {
+          detail: {
+            action: 'closed',
+            gameType: '',
+            sessionId: '',
+          },
+        }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+
+      const visibleAfterSync = container.querySelector('.compact-chat-capsule-text')?.textContent ?? '';
+      expect(visibleAfterSync.length).toBeGreaterThanOrEqual(visibleBeforeSync.length);
+      expect(normalLine.startsWith(visibleAfterSync)).toBe(true);
+
+      act(() => {
+        window.dispatchEvent(new CustomEvent('neko-game-window-state-change', {
+          detail: {
+            action: 'opened',
+            gameType: 'badminton',
+            sessionId: 'overlapping-game-session',
+          },
+        }));
+        window.dispatchEvent(new CustomEvent('neko-game-window-state-change', {
+          detail: {
+            action: 'closed',
+            gameType: 'badminton',
+            sessionId: 'overlapping-game-session',
+          },
+        }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+
+      const visibleAfterRealClose = container.querySelector('.compact-chat-capsule-text')?.textContent ?? '';
+      expect(visibleAfterRealClose.length).toBeGreaterThanOrEqual(visibleAfterSync.length);
+      expect(normalLine.startsWith(visibleAfterRealClose)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not flash the previous sentence when the next assistant sentence streams under a new turn id', async () => {
     vi.useFakeTimers();
     const firstSentence = '第一句话已经说完了，不能在第二句话开始时闪回来。';
@@ -6869,6 +7192,12 @@ describe('App', () => {
     expect(compactChatStyles).not.toContain('Neko ChillReunion Round');
   });
 
+  it('can switch conversation content to the default UI font', () => {
+    expect(compactChatStyles).toMatch(
+      /:root\[data-neko-chat-font-preset="system"\]\s*\{[\s\S]*?--neko-chat-content-font:\s*var\(--neko-ui-font\);/,
+    );
+  });
+
   it('gives the compact surface the full chat liquid-glass edge hierarchy', () => {
     const steadyFrameRule = compactChatStyles.match(/\.compact-chat-surface-frame\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
     expect(compactChatStyles).toContain('--compact-chat-surface-edge-top: rgba(255, 255, 255, 0.7);');
@@ -6891,15 +7220,24 @@ describe('App', () => {
     );
   });
 
-  it('frosts the backdrop without increasing the compact surface opacity', () => {
+  it('frosts the backdrop while strengthening compact surface opacity', () => {
     expect(compactChatStyles).toMatch(
       /\.compact-chat-surface-frame\s*\{[\s\S]*?background-clip: padding-box;[\s\S]*?background-color: rgba\(255, 255, 255, 0\.035\);[\s\S]*?backdrop-filter: blur\(36px\) saturate\(0\.9\) contrast\(0\.78\) brightness\(1\.08\);/,
     );
     expect(compactChatStyles).toContain(
-      'linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(242, 249, 255, 0.19) 46%, rgba(219, 238, 253, 0.24))',
+      'linear-gradient(180deg, rgba(255, 255, 255, 0.58), rgba(242, 249, 255, 0.42) 46%, rgba(219, 238, 253, 0.48))',
     );
     expect(compactChatStyles).toContain(
-      'linear-gradient(180deg, rgba(31, 48, 66, 0.72), rgba(15, 29, 46, 0.68) 58%, rgba(8, 17, 30, 0.62))',
+      'linear-gradient(180deg, rgba(31, 48, 66, 0.80), rgba(15, 29, 46, 0.76) 58%, rgba(8, 17, 30, 0.72))',
+    );
+    expect(compactChatStyles).toContain(
+      '--compact-chat-capsule-surface-bg:\n    linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(242, 249, 255, 0.68) 46%, rgba(219, 238, 253, 0.72));',
+    );
+    expect(compactChatStyles).toContain(
+      '--compact-chat-capsule-surface-bg:\n    linear-gradient(180deg, rgba(31, 48, 66, 0.86), rgba(15, 29, 46, 0.82) 58%, rgba(8, 17, 30, 0.78));',
+    );
+    expect(compactChatStyles).toMatch(
+      /\.compact-chat-surface-frame\[data-compact-chat-state="default"\]::before,[\s\S]*?\.compact-chat-surface-frame\[data-compact-chat-state="options"\]::before,[\s\S]*?\.compact-chat-surface-frame\[data-compact-chat-state="input"\]::before\s*\{[\s\S]*?background: var\(--compact-chat-capsule-surface-bg\);/,
     );
   });
 
@@ -6922,6 +7260,27 @@ describe('App', () => {
     );
     expect(compactChatStyles).toMatch(
       /\.compact-export-history-scroll-content\s*\{[\s\S]*?width: 100%;[\s\S]*?padding-right: var\(--compact-export-history-shadow-gutter-right\);[\s\S]*?padding-left: var\(--compact-export-history-shadow-gutter-left\);/,
+    );
+  });
+
+  it('keeps link and music cards inside narrow message bubbles', () => {
+    expect(compactChatStyles).toMatch(
+      /\.message-stack\s*\{[\s\S]*?max-width: min\(86%, 320px\);[\s\S]*?min-width: 0;/,
+    );
+    expect(compactChatStyles).toMatch(
+      /\.message-bubble\s*\{[\s\S]*?min-width: 0;[\s\S]*?max-width: 100%;/,
+    );
+    expect(compactChatStyles).toMatch(
+      /\.message-block\s*\{[\s\S]*?min-width: 0;[\s\S]*?max-width: 100%;/,
+    );
+    expect(compactChatStyles).toMatch(
+      /\.message-block-link\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\);[\s\S]*?width: 100%;[\s\S]*?min-width: min\(220px, 100%\);[\s\S]*?max-width: 100%;/,
+    );
+    expect(compactChatStyles).toMatch(
+      /\.message-link-thumb\s*\{[\s\S]*?min-width: 0;[\s\S]*?max-width: 100%;/,
+    );
+    expect(compactChatStyles).toMatch(
+      /\.message-link-copy\s*\{[\s\S]*?min-width: 0;[\s\S]*?max-width: 100%;/,
     );
   });
 
@@ -8014,9 +8373,51 @@ describe('App', () => {
     expect(queryAvatarToolVisualOverlay()).not.toBeNull();
   });
 
-  it('dispatches compact surface drag prime and renderer drag events from the input body', () => {
+  it('keeps compact editable pointer drags reserved for text selection', () => {
     render(<App chatSurfaceMode="compact" compactChatState="input" />);
-    const input = document.body.querySelector('.composer-input') as HTMLTextAreaElement;
+    const textarea = document.body.querySelector('.composer-input') as HTMLTextAreaElement;
+    const input = document.createElement('input');
+    const editable = document.createElement('div');
+    editable.setAttribute('contenteditable', 'true');
+    const inputFrame = document.body.querySelector('.compact-chat-surface-frame') as HTMLDivElement;
+    inputFrame.append(input, editable);
+    fireEvent.change(textarea, { target: { value: '第一行\n第二行\n第三行' } });
+    const dragEvents: Event[] = [];
+    const recordDragEvent = (event: Event) => dragEvents.push(event);
+    const eventNames = [
+      'neko:compact-surface-drag-prime',
+      'neko:compact-surface-drag-grab',
+      'neko:compact-surface-drag-move',
+      'neko:compact-surface-drag-end',
+      'neko:compact-surface-drag-prime-end',
+    ];
+    eventNames.forEach((eventName) => window.addEventListener(eventName, recordDragEvent));
+    try {
+      [textarea, input, editable].forEach((target, index) => {
+        const pointerId = 50 + index;
+        fireEvent.pointerDown(target, {
+          pointerId, clientX: 120, clientY: 40, screenX: 420, screenY: 340,
+          button: 0, buttons: 1, pointerType: 'mouse',
+        });
+        fireEvent.pointerMove(document, {
+          pointerId, clientX: 190, clientY: 62, screenX: 490, screenY: 362,
+          buttons: 1, pointerType: 'mouse',
+        });
+        fireEvent.pointerUp(document, {
+          pointerId, clientX: 190, clientY: 62, screenX: 490, screenY: 362,
+          buttons: 0, pointerType: 'mouse',
+        });
+      });
+
+      expect(dragEvents).toHaveLength(0);
+    } finally {
+      eventNames.forEach((eventName) => window.removeEventListener(eventName, recordDragEvent));
+    }
+  });
+
+  it('dispatches compact surface drag prime and renderer drag events from the input frame', () => {
+    render(<App chatSurfaceMode="compact" compactChatState="input" />);
+    const inputFrame = document.body.querySelector('.compact-chat-surface-frame') as HTMLDivElement;
     const primes: Array<Record<string, number>> = [];
     const primeEnds: Array<Record<string, number>> = [];
     const grabs: Array<Record<string, number>> = [];
@@ -8033,7 +8434,7 @@ describe('App', () => {
     window.addEventListener('neko:compact-surface-drag-move', onMove);
     window.addEventListener('neko:compact-surface-drag-end', onEnd);
     try {
-      fireEvent.pointerDown(input, {
+      fireEvent.pointerDown(inputFrame, {
         pointerId: 51, clientX: 160, clientY: 46, screenX: 460, screenY: 340,
         button: 0, buttons: 1, pointerType: 'mouse',
       });
@@ -8098,7 +8499,7 @@ describe('App', () => {
 
   it('dispatches compact surface drag cleanup from document pointercancel', () => {
     render(<App chatSurfaceMode="compact" compactChatState="input" />);
-    const input = document.body.querySelector('.composer-input') as HTMLTextAreaElement;
+    const inputFrame = document.body.querySelector('.compact-chat-surface-frame') as HTMLDivElement;
     const primeEnds: Array<Record<string, number>> = [];
     const ends: Array<Record<string, number | string>> = [];
     const onPrimeEnd = (event: Event) => primeEnds.push((event as CustomEvent).detail);
@@ -8106,7 +8507,7 @@ describe('App', () => {
     window.addEventListener('neko:compact-surface-drag-prime-end', onPrimeEnd);
     window.addEventListener('neko:compact-surface-drag-end', onEnd);
     try {
-      fireEvent.pointerDown(input, {
+      fireEvent.pointerDown(inputFrame, {
         pointerId: 61, clientX: 120, clientY: 40, screenX: 320, screenY: 240,
         button: 0, buttons: 1, pointerType: 'mouse',
       });
@@ -8136,7 +8537,7 @@ describe('App', () => {
 
   it('finishes a replaced compact surface drag before priming the next pointer', () => {
     render(<App chatSurfaceMode="compact" compactChatState="input" />);
-    const input = document.body.querySelector('.composer-input') as HTMLTextAreaElement;
+    const inputFrame = document.body.querySelector('.compact-chat-surface-frame') as HTMLDivElement;
     const minimize = document.body.querySelector('.compact-chat-minimize-ball') as HTMLButtonElement;
     const primes: Array<Record<string, number>> = [];
     const primeEnds: Array<Record<string, number>> = [];
@@ -8161,7 +8562,7 @@ describe('App', () => {
     window.addEventListener('neko:compact-surface-drag-prime-end', onPrimeEnd);
     window.addEventListener('neko:compact-surface-drag-end', onEnd);
     try {
-      fireEvent.pointerDown(input, {
+      fireEvent.pointerDown(inputFrame, {
         pointerId: 71, clientX: 150, clientY: 50, screenX: 450, screenY: 340,
         button: 0, buttons: 1, pointerType: 'mouse',
       });
@@ -8965,8 +9366,175 @@ describe('App', () => {
     const input = screen.getByPlaceholderText('Type a message...');
     fireEvent.change(input, { target: { value: 'Test send' } });
     fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    expect(onComposerSubmit).not.toHaveBeenCalled();
+    fireEvent.keyUp(input, { key: 'Enter', code: 'Enter' });
 
     expect(onComposerSubmit).toHaveBeenCalledWith({ text: 'Test send' });
+  });
+
+  it('submits plain Enter when WebKit inserts a line break before keyup', () => {
+    const onComposerSubmit = vi.fn();
+    renderInputApp({ onComposerSubmit });
+
+    const input = screen.getByPlaceholderText('Type a message...');
+    fireEvent.change(input, { target: { value: 'Send without newline' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    fireEvent.input(input, {
+      target: { value: 'Send without\nnewline' },
+      inputType: 'insertLineBreak',
+    });
+    fireEvent.keyUp(input, { key: 'Enter', code: 'Enter' });
+
+    expect(onComposerSubmit).toHaveBeenCalledWith({ text: 'Send without newline' });
+    expect(input).toHaveValue('');
+  });
+
+  it('uses the value diff fallback when WebKit omits inputType for a line break', () => {
+    const onComposerSubmit = vi.fn();
+    renderInputApp({ onComposerSubmit });
+
+    const input = screen.getByPlaceholderText('Type a message...');
+    fireEvent.change(input, { target: { value: 'Fallback send' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    fireEvent.input(input, {
+      target: { value: 'Fallback\n send' },
+    });
+    fireEvent.keyUp(input, { key: 'Enter', code: 'Enter' });
+
+    expect(onComposerSubmit).toHaveBeenCalledWith({ text: 'Fallback send' });
+  });
+
+  it('treats an inputType-less text replacement as an IME candidate commit', () => {
+    const onComposerSubmit = vi.fn();
+    renderInputApp({ onComposerSubmit });
+
+    const input = screen.getByPlaceholderText('Type a message...');
+    fireEvent.change(input, { target: { value: '候选' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    fireEvent.input(input, {
+      target: { value: 'candidate' },
+    });
+    fireEvent.keyUp(input, { key: 'Enter', code: 'Enter' });
+
+    expect(onComposerSubmit).not.toHaveBeenCalled();
+    expect(input).toHaveValue('candidate');
+
+    pressEnter(input);
+    expect(onComposerSubmit).toHaveBeenCalledWith({ text: 'candidate' });
+  });
+
+  it('keeps a Shift+Enter line break without submitting', () => {
+    const onComposerSubmit = vi.fn();
+    renderInputApp({ onComposerSubmit });
+
+    const input = screen.getByPlaceholderText('Type a message...');
+    fireEvent.change(input, { target: { value: 'First line' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', shiftKey: true });
+    fireEvent.input(input, {
+      target: { value: 'First line\n' },
+      inputType: 'insertLineBreak',
+    });
+    fireEvent.keyUp(input, { key: 'Enter', code: 'Enter', shiftKey: true });
+
+    expect(onComposerSubmit).not.toHaveBeenCalled();
+    expect(input).toHaveValue('First line\n');
+  });
+
+  it('uses the first Enter to confirm active IME text and the second Enter to submit', () => {
+    const onComposerSubmit = vi.fn();
+    renderInputApp({ onComposerSubmit });
+
+    const input = screen.getByPlaceholderText('Type a message...');
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: '你好' } });
+    fireEvent.keyDown(input, {
+      key: 'Enter',
+      code: 'Enter',
+      isComposing: true,
+    });
+    fireEvent.compositionEnd(input);
+    fireEvent.submit(input.closest('form')!);
+    fireEvent.keyUp(input, { key: 'Enter', code: 'Enter' });
+
+    expect(onComposerSubmit).not.toHaveBeenCalled();
+    expect(input).toHaveValue('你好');
+
+    pressEnter(input);
+    expect(onComposerSubmit).toHaveBeenCalledWith({ text: '你好' });
+  });
+
+  it('treats macOS WebKit keyCode 229 as IME confirmation until keyup', () => {
+    const onComposerSubmit = vi.fn();
+    renderInputApp({ onComposerSubmit });
+
+    const input = screen.getByPlaceholderText('Type a message...');
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: '你好' } });
+    fireEvent.keyDown(input, {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 229,
+      isComposing: true,
+    });
+    fireEvent.compositionEnd(input);
+    fireEvent.input(input, {
+      target: { value: '你好' },
+      inputType: 'insertText',
+    });
+    fireEvent.submit(input.closest('form')!);
+    fireEvent.keyUp(input, { key: 'Enter', code: 'Enter' });
+
+    expect(onComposerSubmit).not.toHaveBeenCalled();
+    expect(input).toHaveValue('你好');
+
+    pressEnter(input);
+    expect(onComposerSubmit).toHaveBeenCalledWith({ text: '你好' });
+  });
+
+  it('submits on the first Enter after an IME commit completed without Enter', () => {
+    const onComposerSubmit = vi.fn();
+    renderInputApp({ onComposerSubmit });
+
+    const input = screen.getByPlaceholderText('Type a message...');
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: '你好' } });
+    fireEvent.compositionEnd(input);
+
+    pressEnter(input);
+    expect(onComposerSubmit).toHaveBeenCalledWith({ text: '你好' });
+  });
+
+  it('does not submit an ASCII candidate committed without composition metadata', () => {
+    const onComposerSubmit = vi.fn();
+    renderInputApp({ onComposerSubmit });
+
+    const input = screen.getByPlaceholderText('Type a message...');
+    fireEvent.change(input, { target: { value: 'ok' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    fireEvent.input(input, {
+      target: { value: 'ok' },
+      inputType: 'insertText',
+    });
+    fireEvent.submit(input.closest('form')!);
+    fireEvent.keyUp(input, { key: 'Enter', code: 'Enter' });
+
+    expect(onComposerSubmit).not.toHaveBeenCalled();
+    expect(input).toHaveValue('ok');
+
+    pressEnter(input);
+    expect(onComposerSubmit).toHaveBeenCalledWith({ text: 'ok' });
+  });
+
+  it('allows an explicit pointer send while an IME composition is active', () => {
+    const onComposerSubmit = vi.fn();
+    renderInputApp({ onComposerSubmit });
+
+    const input = screen.getByPlaceholderText('Type a message...');
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: '你好' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }), { detail: 1 });
+
+    expect(onComposerSubmit).toHaveBeenCalledWith({ text: '你好' });
   });
 
   it('disables composer submission while the home tutorial owns interaction', () => {
@@ -9013,7 +9581,7 @@ describe('App', () => {
 
     const input = screen.getByPlaceholderText('Type a message...');
     fireEvent.change(input, { target: { value: 'No local optimistic bubble' } });
-    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    pressEnter(input);
 
     expect(onComposerSubmit).toHaveBeenCalledWith({ text: 'No local optimistic bubble' });
     expect(screen.queryByText('No local optimistic bubble')).not.toBeInTheDocument();

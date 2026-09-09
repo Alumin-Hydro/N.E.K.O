@@ -628,14 +628,25 @@ async function openModelManagerForCharacterForm(form, fallbackName) {
     if (!window._openSettingsWindows) window._openSettingsWindows = {};
     const existingWindow = window._openSettingsWindows[url];
     if (existingWindow && !existingWindow.closed) {
+        if (form && form._autoCreatedDetachedName) {
+            await rollbackAutoCreatedCatgirl(form, form._autoCreatedDetachedName);
+        }
         if (form && form._autoCreated) form._autoCreatedDependentPopup = existingWindow;
-        existingWindow.focus();
+        if (typeof window.requestOpenedWindowRestoreIfMinimized === 'function') {
+            window.requestOpenedWindowRestoreIfMinimized(existingWindow);
+        }
         return;
     }
     delete window._openSettingsWindows[url];
 
-    const popup = window.open(url, '_blank',
-        'toolbar=no,location=no,status=no,menubar=no,scrollbars=yes,resizable=yes,width=' + screen.availWidth + ',height=' + screen.availHeight + ',top=0,left=0');
+    const modelManagerFeatures =
+        'toolbar=no,location=no,status=no,menubar=no,scrollbars=yes,resizable=yes,width=' + screen.availWidth + ',height=' + screen.availHeight + ',top=0,left=0';
+    let reusedModelManagerWindow = false;
+    const popup = typeof window.openOrFocusWindow === 'function'
+        ? window.openOrFocusWindow(url, 'neko_model_manager_singleton', modelManagerFeatures, {
+            onReuse: () => { reusedModelManagerWindow = true; }
+        })
+        : window.open(url, 'neko_model_manager_singleton', modelManagerFeatures);
     if (!popup) {
         if (typeof showAlert === 'function') await showAlert(window.t ? window.t('character.allowPopups') : '请允许弹窗！');
         // 弹窗被拦截：回滚本次及此前重命名遗留的 detached 临时角色，避免用户直接刷新/关页时残留空记录
@@ -644,11 +655,15 @@ async function openModelManagerForCharacterForm(form, fallbackName) {
         }
         return;
     }
+    if (reusedModelManagerWindow) {
+        if (form && (form._autoCreated || form._autoCreatedDetachedName)) {
+            await rollbackAutoCreatedCatgirl(form);
+        }
+        return;
+    }
 
     window._openSettingsWindows[url] = popup;
     if (form && form._autoCreated) form._autoCreatedDependentPopup = popup;
-    popup.moveTo(0, 0);
-    popup.resizeTo(screen.availWidth, screen.availHeight);
     const timer = setInterval(() => {
         if (!popup.closed) {
             if (form && popup._modelManagerHasSaved) form._autoCreatedDependentPopupSaved = true;
@@ -679,6 +694,7 @@ const CHARACTER_PROFILE_RESERVED_ROUTE_NAMES = new Set([
     'vrm_emotion_manager',
     'mmd_emotion_manager',
     'voice_clone',
+    'voice_identity',
     'api_key',
     'character_card_manager',
     'cloudsave_manager',
@@ -808,6 +824,7 @@ function renderCardMetaBlock(container, name, isNew, rawData) {
     if (isNew || !name) {
         const placeholder = document.createElement('div');
         placeholder.className = 'card-meta-placeholder';
+        placeholder.dataset.i18n = 'character.cardNotCreated';
         placeholder.textContent = window.t ? window.t('character.cardNotCreated') : '尚未创建角色卡';
         container.appendChild(placeholder);
         return;
@@ -823,6 +840,7 @@ function renderCardMetaBlock(container, name, isNew, rawData) {
 
         const title = document.createElement('div');
         title.className = 'card-meta-title';
+        title.dataset.i18n = 'character.cardMeta';
         title.textContent = window.t ? window.t('character.cardMeta') : '卡面信息';
         container.appendChild(title);
 
@@ -831,6 +849,7 @@ function renderCardMetaBlock(container, name, isNew, rawData) {
         originRow.className = 'card-meta-row card-meta-origin';
         const originLabel = document.createElement('span');
         originLabel.className = 'card-meta-label';
+        originLabel.dataset.i18n = 'character.cardOriginLabel';
         originLabel.textContent = window.t ? window.t('character.cardOriginLabel') : '来源';
         const originValue = document.createElement('span');
         originValue.className = 'card-meta-origin-badge origin-' + origin;
@@ -838,6 +857,7 @@ function renderCardMetaBlock(container, name, isNew, rawData) {
             : origin === 'steam' ? 'character.cardOriginSteam'
                 : 'character.cardOriginSelf';
         const originText = window.t ? window.t(originKey) : (origin === 'imported' ? '导入' : origin === 'steam' ? '创意工坊' : '本地');
+        originValue.dataset.i18n = originKey;
         originValue.textContent = originText;
         originRow.appendChild(originLabel);
         originRow.appendChild(originValue);
@@ -848,6 +868,7 @@ function renderCardMetaBlock(container, name, isNew, rawData) {
         authorRow.className = 'card-meta-row card-meta-author';
         const authorLabel = document.createElement('span');
         authorLabel.className = 'card-meta-label';
+        authorLabel.dataset.i18n = 'character.cardAuthor';
         authorLabel.textContent = window.t ? window.t('character.cardAuthor') : '作者';
         authorRow.appendChild(authorLabel);
 
@@ -857,6 +878,7 @@ function renderCardMetaBlock(container, name, isNew, rawData) {
             authorInput.className = 'card-meta-author-input';
             authorInput.value = author;
             authorInput.maxLength = 64;
+            authorInput.dataset.i18nPlaceholder = 'character.cardAuthorPlaceholder';
             authorInput.placeholder = window.t ? window.t('character.cardAuthorPlaceholder') : '请输入作者';
             let saving = false;
             const saveAuthor = async () => {
@@ -890,6 +912,7 @@ function renderCardMetaBlock(container, name, isNew, rawData) {
             authorValue.className = 'card-meta-value card-meta-readonly';
             authorValue.textContent = author || '-';
             authorValue.title = window.t ? window.t('character.cardAuthorReadonly') : '导入/工坊角色卡的作者不可修改';
+            authorValue.dataset.i18nTitle = 'character.cardAuthorReadonly';
             authorRow.appendChild(authorValue);
         }
         container.appendChild(authorRow);
@@ -900,6 +923,7 @@ function renderCardMetaBlock(container, name, isNew, rawData) {
             timeRow.className = 'card-meta-row card-meta-time';
             const timeLabel = document.createElement('span');
             timeLabel.className = 'card-meta-label';
+            timeLabel.dataset.i18n = 'character.cardCreatedAt';
             timeLabel.textContent = window.t ? window.t('character.cardCreatedAt') : '创建时间';
             const timeValue = document.createElement('span');
             timeValue.className = 'card-meta-value';

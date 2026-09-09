@@ -8,6 +8,8 @@ from tests.static_app_parts import read_js_parts
 from main_routers import pages_router
 from tests.unit.avatar_ui_buttons_source import read_avatar_ui_buttons_source
 
+from tests.node_harness import run_node_script
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 AVATAR_UI_BUTTONS_DIR = PROJECT_ROOT / "static" / "avatar" / "avatar-ui-buttons"
@@ -21,8 +23,9 @@ def _run_node_harness(script: str) -> subprocess.CompletedProcess[str]:
     node_path = shutil.which("node")
     if not node_path:
         pytest.skip("node not found")
-    return subprocess.run(
-        [node_path, "-e", script],
+    return run_node_script(
+        node_path,
+        script,
         cwd=PROJECT_ROOT,
         text=True,
         capture_output=True,
@@ -65,6 +68,7 @@ def test_cat1_return_button_assets_are_version_tracked():
     assert CAT1_EAT_SOUND_PATH in pages_router._YUI_GUIDE_ASSET_VERSION_PATHS
     assert CAT1_CHAT_HISS_STICKER_PATH in pages_router._YUI_GUIDE_ASSET_VERSION_PATHS
     assert CAT1_CHAT_HISS_SOUND_PATH in pages_router._YUI_GUIDE_ASSET_VERSION_PATHS
+    assert CAT1_CHAT_HISS_STICKER_PATH in pages_router._REACT_CHAT_ASSET_VERSION_PATHS
     assert CAT1_ASSET_PATH.is_file()
     assert CAT1_PLAY_ASSET_PATH.is_file()
     assert CAT1_EAT_SOUND_PATH.is_file()

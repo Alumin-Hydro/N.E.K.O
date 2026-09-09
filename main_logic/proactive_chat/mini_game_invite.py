@@ -38,6 +38,7 @@ from config.prompts.prompts_proactive import (
     MINI_GAME_INVITE_KEYWORDS,
     MINI_GAME_INVITE_LINES_BY_GAME,
     MINI_GAME_INVITE_OPTION_LABELS,
+    normalize_mini_game_invite_locale,
 )
 from config.prompts.prompts_sys import _loc
 from utils.logger_config import get_module_logger
@@ -51,8 +52,11 @@ from .contracts import (
     _proactive_pass_body,
 )
 from .state import (
+    _enter_proactive_phase2,
     _ensure_proactive_chat_totals_loaded,
     _get_proactive_chat_total,
+    _proactive_feed_rejected_for_takeover,
+    _proactive_turn_still_owned,
     _record_invite_delivery_persistent,
     _record_proactive_chat,
     _was_invite_ever_delivered,
@@ -496,12 +500,7 @@ async def _attempt_mini_game_invite_delivery(
             import random as _random
             if _random.random() >= MINI_GAME_INVITE_TRIGGER_PROBABILITY:
                 return None
-    template = _loc(MINI_GAME_INVITE_LINES_BY_GAME[game_type], invite_lang)
-    safe_master = (master_name or '').strip()
-    try:
-        invite_text = template.format(master_name=safe_master).strip()
-    except Exception:
-        invite_text = template.replace('{master_name}', safe_master).strip()
+    invite_text = _render_mini_game_invite_line(game_type, invite_lang, master_name)
     if not invite_text:
         return None
 
@@ -511,21 +510,57 @@ async def _attempt_mini_game_invite_delivery(
             message="mini-game invite skipped: prepare_proactive_delivery refused",
         )
     proactive_sid = mgr.current_speech_id
-    from main_logic.session_state import SessionEvent as _SE
-    await mgr.state.fire(_SE.PROACTIVE_PHASE2)
+    if not await _enter_proactive_phase2(
+        mgr,
+        proactive_sid,
+        log=logger,
+    ):
+        return _proactive_pass_body(
+            PROACTIVE_REASON_DELIVERY_PREEMPTED,
+            message="mini-game invite skipped: user engaged before Phase 2",
+        )
+    expected_user_engagement_time = getattr(
+        mgr,
+        "last_user_engagement_time",
+        None,
+    )
+    tts_accepted = True
     try:
         feed = getattr(mgr, 'feed_tts_chunk', None)
         if callable(feed):
-            await feed(invite_text, expected_speech_id=proactive_sid)
+            tts_accepted = await feed(
+                invite_text,
+                expected_speech_id=proactive_sid,
+                expected_user_engagement_time=expected_user_engagement_time,
+            )
     except Exception as exc:
         logger.warning(
             "[%s] mini-game invite feed_tts_chunk failed: %s", lanlan_name, exc,
         )
+    if tts_accepted is False and _proactive_feed_rejected_for_takeover(
+        mgr,
+        proactive_sid,
+        expected_user_engagement_time,
+    ):
+        if _proactive_turn_still_owned(mgr, proactive_sid):
+            await mgr.handle_new_message()
+        return _proactive_pass_body(
+            PROACTIVE_REASON_DELIVERY_PREEMPTED,
+            message="mini-game invite skipped: user became active before TTS",
+        )
+    if tts_accepted is False:
+        logger.warning(
+            "[%s] mini-game invite TTS enqueue failed; committing text without audio",
+            lanlan_name,
+        )
     committed = await mgr.finish_proactive_delivery(
         invite_text,
         expected_speech_id=proactive_sid,
+        expected_user_engagement_time=expected_user_engagement_time,
     )
     if not committed:
+        if _proactive_turn_still_owned(mgr, proactive_sid):
+            await mgr.handle_new_message()
         return _proactive_pass_body(
             PROACTIVE_REASON_DELIVERY_PREEMPTED,
             message="mini-game invite skipped: user took over before delivery",
@@ -659,6 +694,32 @@ async def _run_mini_game_invite_short_circuit(
     )
 
 
+def _render_mini_game_invite_line(
+    game_type: str, invite_lang: str, master_name: str,
+) -> str:
+    """Render the canned invite line for one game.
+
+    ``invite_lang`` is normalized to a prompt-dict key *here* rather than at the
+    call site. ``MINI_GAME_INVITE_LINES_BY_GAME`` carries a ``zh-TW`` row, and an
+    unnormalized tag (``zh_TW`` / ``zh-Hant`` / ``tchinese``) degrades through
+    ``_loc``'s Chinese fallback to the Simplified line — a wrong-script invite, not
+    an error, so nothing downstream would ever notice.
+
+    Extracted from ``_attempt_mini_game_invite_delivery`` so this is reachable
+    without standing up an activity snapshot and a delivery-capable manager: the
+    locale behaviour is otherwise only testable through the whole invite flow.
+    """
+    template = _loc(
+        MINI_GAME_INVITE_LINES_BY_GAME[game_type],
+        normalize_mini_game_invite_locale(invite_lang),
+    )
+    safe_master = (master_name or '').strip()
+    try:
+        return template.format(master_name=safe_master).strip()
+    except Exception:
+        return template.replace('{master_name}', safe_master).strip()
+
+
 def _build_mini_game_invite_options_payload(
     *,
     invite_lang: str,
@@ -669,9 +730,13 @@ def _build_mini_game_invite_options_payload(
 
     Labels go through i18n (the accept/decline/later options); choice is the
     wire-format identifier (used when the frontend button click posts back to
-    the endpoint) and stays unchanged."""
+    the endpoint) and stays unchanged.
+
+    ``invite_lang`` is normalized to a prompt-dict key first: the lookup is an
+    exact ``.get``, so an unnormalized tag (``zh_TW`` / ``zh-Hant`` / ``tchinese``)
+    would silently fall through to the Simplified labels."""
     labels = MINI_GAME_INVITE_OPTION_LABELS.get(
-        invite_lang,
+        normalize_mini_game_invite_locale(invite_lang),
         MINI_GAME_INVITE_OPTION_LABELS.get('zh', {}),
     )
     options = [

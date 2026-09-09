@@ -92,6 +92,84 @@ __FETCH_JS__
 }
 """
 
+_AUTOSTART_ELIGIBLE_SETUP_JS = """
+    window.__requestLog = [];
+    window.nekoAutostartProvider = {
+        getStatus: async function() {
+            return {
+                ok: true,
+                supported: true,
+                enabled: false,
+                authoritative: true,
+                provider: 'backend',
+            };
+        },
+        enable: async function() {
+            throw new Error('enable should not be called');
+        },
+    };
+"""
+
+_AUTOSTART_ELIGIBLE_FETCH_JS = """
+    window.__requestLog.push({
+        url: requestUrl,
+        method: method,
+        body: body,
+    });
+
+    if (requestUrl === '/api/autostart-prompt/state') {
+        return jsonResponse({
+            state: {
+                status: 'observing',
+                never_remind: false,
+                deferred_until: 0,
+                autostart_enabled: false,
+                can_never_remind: false,
+            },
+        });
+    }
+    if (requestUrl === '/api/autostart-prompt/heartbeat') {
+        return jsonResponse({
+            ok: true,
+            should_prompt: true,
+            prompt_reason: 'usage_timeout',
+            prompt_token: 'tutorial-race-token',
+            state: {
+                status: 'observing',
+                never_remind: false,
+                deferred_until: 0,
+                autostart_enabled: false,
+                can_never_remind: false,
+            },
+        });
+    }
+    if (requestUrl === '/api/autostart-prompt/shown') {
+        return jsonResponse({
+            ok: true,
+            already_acknowledged: false,
+            state: {
+                status: 'prompted',
+                never_remind: false,
+                deferred_until: 0,
+                autostart_enabled: false,
+                can_never_remind: false,
+            },
+        });
+    }
+    if (requestUrl === '/api/autostart-prompt/decision') {
+        return jsonResponse({
+            ok: true,
+            state: {
+                status: 'deferred',
+                never_remind: false,
+                deferred_until: Date.now() + 1000,
+                autostart_enabled: false,
+                can_never_remind: false,
+            },
+        });
+    }
+"""
+
 
 def _expand_script_dependencies(script_names: tuple[str, ...]) -> tuple[str, ...]:
     expanded = []
@@ -195,6 +273,11 @@ def _bootstrap_home_runtime_page(
     script_names.append("app/app-prompt-shared.js")
     script_names.append("tutorial/core/home-tutorial-runtime.js")
     if include_autostart_prompt or include_autostart_provider:
+        setup_js = setup_js + """
+            if (typeof window.__NEKO_TUTORIAL_STARTUP_SETTLED__ !== 'boolean') {
+                window.__NEKO_TUTORIAL_STARTUP_SETTLED__ = true;
+            }
+        """
         script_names.append("app/app-autostart-prompt.js")
     _bootstrap_page(
         mock_page,
@@ -447,6 +530,360 @@ def test_autostart_prompt_offers_never_after_backend_allows_it(
 
     assert autostart_decisions
     assert autostart_decisions[-1]["body"]["decision"] == "never"
+
+
+@pytest.mark.frontend
+def test_autostart_prompt_waits_for_tutorial_release_and_teardown(
+    mock_page: Page,
+):
+    _bootstrap_home_runtime_page(
+        mock_page,
+        include_common_dialogs=True,
+        include_autostart_prompt=True,
+        setup_js="""
+            window.__requestLog = [];
+            window.__NEKO_TUTORIAL_STARTUP_SETTLED__ = false;
+            window.isNekoHomeTutorialPending = true;
+            window.nekoAutostartProvider = {
+                getStatus: async function() {
+                    return {
+                        ok: true,
+                        supported: true,
+                        enabled: false,
+                        authoritative: true,
+                        provider: 'backend',
+                    };
+                },
+                enable: async function() {
+                    throw new Error('enable should not be called');
+                },
+            };
+        """,
+        fetch_js="""
+            window.__requestLog.push({
+                url: requestUrl,
+                method: method,
+                body: body,
+            });
+
+            if (requestUrl === '/api/autostart-prompt/state') {
+                return jsonResponse({
+                    state: {
+                        status: 'observing',
+                        never_remind: false,
+                        deferred_until: 0,
+                        autostart_enabled: false,
+                        can_never_remind: false,
+                    },
+                });
+            }
+            if (requestUrl === '/api/autostart-prompt/heartbeat') {
+                return jsonResponse({
+                    ok: true,
+                    should_prompt: true,
+                    prompt_reason: 'usage_timeout',
+                    prompt_token: 'tutorial-race-token',
+                    state: {
+                        status: 'observing',
+                        never_remind: false,
+                        deferred_until: 0,
+                        autostart_enabled: false,
+                        can_never_remind: false,
+                    },
+                });
+            }
+            if (requestUrl === '/api/autostart-prompt/shown') {
+                return jsonResponse({
+                    ok: true,
+                    already_acknowledged: false,
+                    state: {
+                        status: 'prompted',
+                        never_remind: false,
+                        deferred_until: 0,
+                        autostart_enabled: false,
+                        can_never_remind: false,
+                    },
+                });
+            }
+            if (requestUrl === '/api/autostart-prompt/decision') {
+                return jsonResponse({
+                    ok: true,
+                    state: {
+                        status: 'deferred',
+                        never_remind: false,
+                        deferred_until: Date.now() + 1000,
+                        autostart_enabled: false,
+                        can_never_remind: false,
+                    },
+                });
+            }
+        """,
+    )
+
+    mock_page.wait_for_function(
+        """
+        () => window.__requestLog.some(
+            (entry) => entry.url === '/api/autostart-prompt/heartbeat'
+        )
+        """
+    )
+    expect(mock_page.locator(".modal-dialog-autostart-retention")).to_have_count(0)
+    assert not any(
+        entry["url"] == "/api/autostart-prompt/shown"
+        for entry in mock_page.evaluate("() => window.__requestLog")
+    )
+
+    mock_page.evaluate(
+        """
+        () => {
+            window.isNekoHomeTutorialPending = false;
+            window.isInTutorial = false;
+            window.universalTutorialManager.isTutorialRunning = false;
+            window.universalTutorialManager.activeAvatarFloatingGuideRound = null;
+            let resolveTeardown;
+            const teardownPromise = new Promise((resolve) => {
+                resolveTeardown = resolve;
+            });
+            window.universalTutorialManager._teardownPromise = teardownPromise;
+            window.__finishTutorialTeardown = function() {
+                resolveTeardown();
+                teardownPromise.finally(() => {
+                    window.universalTutorialManager._teardownPromise = null;
+                });
+            };
+            window.__NEKO_TUTORIAL_STARTUP_SETTLED__ = true;
+            window.dispatchEvent(new CustomEvent('neko:startup-greeting-release', {
+                detail: { released: true, reason: 'tutorial-completed' },
+            }));
+        }
+        """
+    )
+
+    mock_page.wait_for_timeout(350)
+    expect(mock_page.locator(".modal-dialog-autostart-retention")).to_have_count(0)
+    assert not any(
+        entry["url"] == "/api/autostart-prompt/shown"
+        for entry in mock_page.evaluate("() => window.__requestLog")
+    )
+
+    mock_page.evaluate("() => window.__finishTutorialTeardown()")
+    expect(mock_page.locator(".modal-dialog-autostart-retention")).to_have_count(1, timeout=5000)
+    shown_requests = [
+        entry for entry in mock_page.evaluate("() => window.__requestLog")
+        if entry["url"] == "/api/autostart-prompt/shown"
+    ]
+    assert len(shown_requests) == 1
+    mock_page.locator(".modal-dialog-autostart-retention .modal-btn").first.click()
+    expect(mock_page.locator(".modal-overlay-autostart-retention")).to_have_count(0, timeout=5000)
+
+
+@pytest.mark.frontend
+def test_autostart_prompt_waits_for_tutorial_when_prerequisite_rejects(
+    mock_page: Page,
+):
+    _bootstrap_home_runtime_page(
+        mock_page,
+        include_autostart_prompt=True,
+        setup_js=_AUTOSTART_ELIGIBLE_SETUP_JS + """
+            window.__NEKO_TUTORIAL_STARTUP_SETTLED__ = false;
+            window.__promptCalls = 0;
+            window.waitForStorageLocationStartupBarrier = async function() {
+                throw new Error('storage gate failed');
+            };
+            window.showDecisionPrompt = async function() {
+                window.__promptCalls += 1;
+                return null;
+            };
+        """,
+        fetch_js=_AUTOSTART_ELIGIBLE_FETCH_JS,
+    )
+
+    mock_page.wait_for_function(
+        """
+        () => window.__requestLog.some(
+            (entry) => entry.url === '/api/autostart-prompt/heartbeat'
+        )
+        """
+    )
+    mock_page.wait_for_timeout(350)
+    assert mock_page.evaluate("() => window.__promptCalls") == 0
+
+    mock_page.evaluate(
+        """
+        () => {
+            window.__NEKO_TUTORIAL_STARTUP_SETTLED__ = true;
+            window.dispatchEvent(new CustomEvent('neko:startup-greeting-release', {
+                detail: { released: true, reason: 'no-avatar-floating-round' },
+            }));
+        }
+        """
+    )
+    mock_page.wait_for_function("() => window.__promptCalls === 1", timeout=5000)
+
+
+@pytest.mark.frontend
+def test_autostart_prompt_waits_for_pending_tutorial_start(
+    mock_page: Page,
+):
+    _bootstrap_home_runtime_page(
+        mock_page,
+        include_autostart_prompt=True,
+        setup_js=_AUTOSTART_ELIGIBLE_SETUP_JS + """
+            window.__NEKO_TUTORIAL_STARTUP_SETTLED__ = true;
+            window.__promptCalls = 0;
+            window.universalTutorialManager.pendingTutorialStartSource = 'manual';
+            window.showDecisionPrompt = async function() {
+                window.__promptCalls += 1;
+                return null;
+            };
+        """,
+        fetch_js=_AUTOSTART_ELIGIBLE_FETCH_JS,
+    )
+
+    mock_page.wait_for_function(
+        """
+        () => window.__requestLog.some(
+            (entry) => entry.url === '/api/autostart-prompt/heartbeat'
+        )
+        """
+    )
+    mock_page.wait_for_timeout(350)
+    assert mock_page.evaluate("() => window.__promptCalls") == 0
+
+    mock_page.evaluate(
+        "() => { window.universalTutorialManager.pendingTutorialStartSource = null; }"
+    )
+    mock_page.wait_for_function("() => window.__promptCalls === 1", timeout=5000)
+
+
+@pytest.mark.frontend
+def test_autostart_prompt_on_shown_closes_and_releases_token_when_tutorial_starts(
+    mock_page: Page,
+):
+    _bootstrap_home_runtime_page(
+        mock_page,
+        include_common_dialogs=True,
+        include_autostart_prompt=True,
+        setup_js=_AUTOSTART_ELIGIBLE_SETUP_JS + """
+            window.__NEKO_TUTORIAL_STARTUP_SETTLED__ = true;
+            window.__audioStarts = 0;
+            window.__autostartPromptOpened = 0;
+            window.__autostartPromptClosed = 0;
+            window.i18next = { language: 'en' };
+            window.Audio = function() {
+                this.pause = function() {};
+                this.play = function() {
+                    window.__audioStarts += 1;
+                    return Promise.resolve();
+                };
+                this.currentTime = 0;
+            };
+            window.addEventListener('neko:decision-prompt-opened', function(event) {
+                if (event.detail && event.detail.skin === 'autostart-retention') {
+                    window.__autostartPromptOpened += 1;
+                    if (window.__autostartPromptOpened === 1) {
+                        window.isInTutorial = true;
+                        window.universalTutorialManager.isTutorialRunning = true;
+                    }
+                }
+            });
+            window.addEventListener('neko:decision-prompt-closed', function(event) {
+                if (event.detail && event.detail.skin === 'autostart-retention') {
+                    window.__autostartPromptClosed += 1;
+                }
+            });
+        """,
+        fetch_js=_AUTOSTART_ELIGIBLE_FETCH_JS,
+    )
+
+    mock_page.wait_for_function(
+        "() => window.__autostartPromptOpened === 1",
+        timeout=5000,
+    )
+    expect(mock_page.locator(".modal-overlay-autostart-retention")).to_have_count(0, timeout=5000)
+    assert mock_page.evaluate("() => window.__autostartPromptClosed") == 1
+    assert mock_page.evaluate("() => window.__audioStarts") == 0
+    assert not any(
+        entry["url"] == "/api/autostart-prompt/shown"
+        for entry in mock_page.evaluate("() => window.__requestLog")
+    )
+
+    mock_page.evaluate(
+        """
+        () => {
+            window.isInTutorial = false;
+            window.universalTutorialManager.isTutorialRunning = false;
+            window.dispatchEvent(new CustomEvent('neko:user-content-sent'));
+        }
+        """
+    )
+    mock_page.wait_for_function(
+        "() => window.__autostartPromptOpened === 2",
+        timeout=5000,
+    )
+    expect(mock_page.locator(".modal-overlay-autostart-retention")).to_have_count(1)
+    shown_requests = [
+        entry for entry in mock_page.evaluate("() => window.__requestLog")
+        if entry["url"] == "/api/autostart-prompt/shown"
+    ]
+    assert len(shown_requests) == 1
+    mock_page.locator(".modal-dialog-autostart-retention .modal-btn").first.click()
+    expect(mock_page.locator(".modal-overlay-autostart-retention")).to_have_count(0, timeout=5000)
+
+
+@pytest.mark.frontend
+def test_autostart_prompt_stays_open_until_user_decides_when_tutorial_rearms(
+    mock_page: Page,
+):
+    _bootstrap_home_runtime_page(
+        mock_page,
+        include_common_dialogs=True,
+        include_autostart_prompt=True,
+        setup_js=_AUTOSTART_ELIGIBLE_SETUP_JS + """
+            window.__NEKO_TUTORIAL_STARTUP_SETTLED__ = true;
+            window.__audioStops = 0;
+            window.i18next = { language: 'en' };
+            window.Audio = function() {
+                this.currentTime = 0;
+                this.play = function() {
+                    return Promise.resolve();
+                };
+                this.pause = function() {
+                    window.__audioStops += 1;
+                };
+            };
+        """,
+        fetch_js=_AUTOSTART_ELIGIBLE_FETCH_JS,
+    )
+
+    expect(mock_page.locator(".modal-overlay-autostart-retention")).to_have_count(1, timeout=5000)
+    mock_page.wait_for_function(
+        """
+        () => window.__requestLog.some(
+            (entry) => entry.url === '/api/autostart-prompt/shown'
+        )
+        """,
+        timeout=5000,
+    )
+
+    mock_page.evaluate(
+        """
+        () => {
+            window.__NEKO_TUTORIAL_STARTUP_SETTLED__ = false;
+            window.isNekoHomeTutorialPending = true;
+            window.dispatchEvent(new CustomEvent('neko:startup-greeting-release', {
+                detail: { released: false, reason: 'tutorial-manager-resize-init' },
+            }));
+        }
+        """
+    )
+
+    expect(mock_page.locator(".modal-overlay-autostart-retention")).to_have_count(1)
+    assert mock_page.evaluate("() => window.__audioStops") == 0
+
+    mock_page.locator(".modal-dialog-autostart-retention .modal-btn").first.click()
+    expect(mock_page.locator(".modal-overlay-autostart-retention")).to_have_count(0, timeout=5000)
+    assert mock_page.evaluate("() => window.__audioStops") == 1
 
 
 @pytest.mark.frontend
@@ -2324,8 +2761,13 @@ def test_day4_chat_settings_opens_settings_then_tours_sidebar(mock_page: Page):
                     secondary: config.secondary || null,
                 };
             };
-            director.moveCursorToElement = async (element, durationMs) => {
-                calls.push({ type: 'move', id: element && element.id, durationMs });
+            director.moveCursorToElement = async (element, durationMs, options) => {
+                calls.push({
+                    type: 'move',
+                    id: element && element.id,
+                    durationMs,
+                    exactDuration: !!(options && options.exactDuration),
+                });
                 return true;
             };
             director.cursor = {
@@ -2378,6 +2820,12 @@ def test_day4_chat_settings_opens_settings_then_tours_sidebar(mock_page: Page):
         "persistentId": "live2d-btn-settings",
         "primaryId": "chat-settings-button",
     })
+    assert {
+        "type": "move",
+        "id": "live2d-btn-settings",
+        "durationMs": 760,
+        "exactDuration": True,
+    } in result
     assert {"type": "click"} in result
     assert any(call["type"] == "ellipse" and call["radiusX"] > 0 and call["radiusY"] > 0 for call in result)
 
@@ -2402,7 +2850,11 @@ def test_day4_model_behavior_moves_from_chat_sidebar_to_animation_sidebar(mock_p
             };
             document.getElementById('animation-settings-panel')._anchorElement = document.getElementById('animation-settings-button');
         """,
-        script_names=("tutorial/yui-guide/overlay.js", *_YUI_DIRECTOR_SCRIPTS),
+        script_names=(
+            "tutorial/yui-guide/overlay.js",
+            *_YUI_DIRECTOR_SCRIPTS,
+            "tutorial/yui-guide/days/day4-companion-guide.js",
+        ),
     )
 
     result = mock_page.evaluate(
@@ -2410,7 +2862,18 @@ def test_day4_model_behavior_moves_from_chat_sidebar_to_animation_sidebar(mock_p
         async () => {
             window.__calls = [];
             const director = window.createYuiGuideDirector({ page: 'home' });
+            const modelBehaviorScene = window.YuiGuideDailyGuides[4].round.scenes.find(
+                (candidate) => candidate.id === 'day4_model_behavior'
+            );
             let releaseNarration;
+            director.currentSceneId = 'day4_chat_settings';
+            director.clearExternalizedChatGuideTarget = (options) => {
+                window.__calls.push({
+                    type: 'clear-external',
+                    clearCursor: !!(options && options.clearCursor),
+                    preservePcOverlayCursor: !!(options && options.preservePcOverlayCursor),
+                });
+            };
             director.appendGuideChatMessage = () => window.__calls.push({ type: 'message' });
             director.applyGuideEmotion = (emotion) => window.__calls.push({ type: 'emotion', emotion });
             director.enableInterrupts = () => window.__calls.push({ type: 'interrupts' });
@@ -2472,14 +2935,7 @@ def test_day4_model_behavior_moves_from_chat_sidebar_to_animation_sidebar(mock_p
                 }, 20);
             });
 
-            await director.playAvatarFloatingScene({
-                id: 'day4_model_behavior',
-                text: '如果你想要看到更精致、细节更满满的我，或者想要更丝滑、更流畅的动作体验，都可以在这里进行调整哦！不管哪一种，我都会展现出最可爱的一面哒~',
-                voiceKey: 'avatar_floating_day4_model_behavior',
-                target: 'settings-sidepanel:animation-settings',
-                cursorAction: 'tour',
-                operation: 'show-settings-sidepanel:animation-settings',
-            }, 4, 2, 8);
+            await director.playAvatarFloatingScene(modelBehaviorScene, 4, 2, 8);
             return window.__calls;
         }
         """
@@ -2500,6 +2956,11 @@ def test_day4_model_behavior_moves_from_chat_sidebar_to_animation_sidebar(mock_p
         ("highlight", "day4_model_behavior-animation-settings-button", "animation-settings-button", "live2d-btn-settings"),
         ("highlight", "day4_model_behavior-animation-settings-panel", "animation-settings-panel", "live2d-btn-settings"),
     ]
+    assert {
+        "type": "clear-external",
+        "clearCursor": True,
+        "preservePcOverlayCursor": True,
+    } in result
     assert result.index({"type": "move", "id": "animation-settings-button", "durationMs": 620}) < result.index({
         "type": "api:ensureSidePanel",
         "panelType": "animation-settings",
@@ -5534,17 +5995,21 @@ def test_externalized_chat_capsule_spotlight_keeps_last_rect_when_target_tempora
 
 
 @pytest.mark.frontend
-def test_externalized_chat_capsule_input_spotlight_uses_capsule_body_rect_without_variant(mock_page: Page):
+def test_externalized_chat_capsule_input_spotlight_scopes_text_alignment_away_from_niri(mock_page: Page):
     _bootstrap_page(
         mock_page,
         setup_js="""
             window.history.pushState({}, '', '/chat');
             window.localStorage.setItem('yuiGuidePcOverlayRunId', 'test-run');
             window.__externalChatOverlayUpdates = [];
+            window.__waylandWorkAreaCarrier = true;
+            window.__niriWaylandRuntime = true;
             window.nekoTutorialOverlay = {
                 getWindowMetricsSync: () => ({
                     bounds: { x: 100, y: 50, width: 1200, height: 800 },
                     contentBounds: { x: 100, y: 50, width: 1200, height: 800 },
+                    waylandWorkAreaCarrier: window.__waylandWorkAreaCarrier,
+                    niriWaylandRuntime: window.__niriWaylandRuntime,
                     zoomFactor: 1,
                 }),
                 update: (payload) => {
@@ -5568,7 +6033,7 @@ def test_externalized_chat_capsule_input_spotlight_uses_capsule_body_rect_withou
                         <button
                             class="compact-chat-capsule-button"
                             data-compact-hit-region-id="capsule:text"
-                            style="position:fixed; left:780px; top:408px; width:180px; height:38px;"
+                            style="position:fixed; left:650px; top:408px; width:310px; height:38px;"
                         ></button>
                     </div>
                 </div>
@@ -5580,27 +6045,49 @@ def test_externalized_chat_capsule_input_spotlight_uses_capsule_body_rect_withou
     result = mock_page.evaluate(
         """
         async () => {
-            window.postMessage({
+            const sendSpotlight = (timestamp) => window.postMessage({
                 __nekoTutorialOverlayRelay: true,
                 payload: {
                     action: 'yui_guide_set_chat_spotlight',
                     kind: 'capsule-input',
-                    timestamp: Date.now(),
+                    timestamp,
                     tutorialRunId: 'test-run',
                 },
             }, '*');
+            const timestamp = Date.now();
+            sendSpotlight(timestamp);
             await new Promise((resolve) => setTimeout(resolve, 160));
-            const updates = window.__externalChatOverlayUpdates || [];
-            return updates.filter((entry) => entry.payload && entry.payload.spotlights);
+            const niriUpdates = (window.__externalChatOverlayUpdates || [])
+                .filter((entry) => entry.payload && entry.payload.spotlights);
+            const niriSpotlight = niriUpdates[niriUpdates.length - 1].payload.spotlights[0];
+
+            window.__niriWaylandRuntime = false;
+            sendSpotlight(timestamp + 1);
+            await new Promise((resolve) => setTimeout(resolve, 160));
+            const waylandUpdates = (window.__externalChatOverlayUpdates || [])
+                .filter((entry) => entry.payload && entry.payload.spotlights);
+            const waylandSpotlight = waylandUpdates[waylandUpdates.length - 1].payload.spotlights[0];
+
+            window.__waylandWorkAreaCarrier = false;
+            sendSpotlight(timestamp + 2);
+            await new Promise((resolve) => setTimeout(resolve, 160));
+            const x11Updates = (window.__externalChatOverlayUpdates || [])
+                .filter((entry) => entry.payload && entry.payload.spotlights);
+            const x11Spotlight = x11Updates[x11Updates.length - 1].payload.spotlights[0];
+            return { niriSpotlight, waylandSpotlight, x11Spotlight };
         }
         """
     )
 
     assert result
-    spotlight = result[-1]["payload"]["spotlights"][0]
-    assert spotlight["id"] == "external-chat-capsule-input"
-    assert spotlight["x"] == 692
-    assert spotlight["width"] == 446
+    assert result["niriSpotlight"]["id"] == "external-chat-capsule-input"
+    assert result["niriSpotlight"]["x"] == 692
+    assert result["niriSpotlight"]["width"] == 446
+    assert result["waylandSpotlight"]["x"] == 722
+    assert result["waylandSpotlight"]["width"] == 446
+    assert result["x11Spotlight"]["x"] == 692
+    assert result["x11Spotlight"]["width"] == 446
+    assert result["niriSpotlight"] == result["x11Spotlight"]
 
 
 @pytest.mark.frontend
@@ -13118,7 +13605,7 @@ def test_day1_screen_entry_starts_from_intro_basic_voice_anchor(mock_page: Page)
         setup_js="""
             window.history.pushState({}, '', '/');
             document.body.innerHTML = `
-                <button id="live2d-btn-screen" style="position:absolute; left:320px; top:180px; width:44px; height:44px;"></button>
+                <button id="live2d-btn-mic" style="position:absolute; left:320px; top:180px; width:44px; height:44px;"></button>
             `;
         """,
         script_names=("tutorial/yui-guide/overlay.js", *_YUI_DIRECTOR_SCRIPTS),
@@ -13128,11 +13615,14 @@ def test_day1_screen_entry_starts_from_intro_basic_voice_anchor(mock_page: Page)
         """
         () => {
             const director = window.createYuiGuideDirector({ page: 'home' });
-            director.avatarFloatingSceneCursorAnchorPoints.day1_intro_basic_voice = { x: 242, y: 202 };
-            const screenButton = document.getElementById('live2d-btn-screen');
+            director.rememberAvatarFloatingSceneCursorAnchorPoint(
+                'day1_intro_basic_voice',
+                { x: 242, y: 202 }
+            );
+            const micButton = document.getElementById('live2d-btn-mic');
             return director.resolveAvatarFloatingCursorStartPoint(
                 { id: 'day1_screen_entry' },
-                [screenButton],
+                [micButton],
                 'day1_intro_basic_voice'
             );
         }

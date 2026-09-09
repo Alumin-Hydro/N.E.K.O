@@ -50,6 +50,7 @@ VRMManager.prototype.setupFloatingButtons = function() {
     const prefix = this._avatarPrefix;
 
     const applyResponsiveFloatingLayout = () => {
+        this.syncResponsiveButtonVisibility(buttonsContainer);
         if (isYuiGuideFloatingToolbarSuppressed()) {
             buttonsContainer.style.display = 'none';
             buttonsContainer.style.visibility = 'hidden';
@@ -194,6 +195,11 @@ VRMManager.prototype.setupFloatingButtons = function() {
                 window.dispatchEvent(new CustomEvent('live2d-goodbye-click'));
                 return;
             }
+            else if (config.id === 'social') {
+                // 与 Live2D 共用 opener（app-ui.js 监听 live2d-social-click）
+                window.dispatchEvent(new CustomEvent('live2d-social-click'));
+                return;
+            }
 
             btn.style.background = targetActive ? 'var(--neko-btn-bg-active, rgba(255,255,255,0.75))' : 'var(--neko-btn-bg-hover, rgba(255,255,255,0.8))';
         });
@@ -201,9 +207,9 @@ VRMManager.prototype.setupFloatingButtons = function() {
         // 先将主按钮添加到包装器（所有按钮都需要）
         btnWrapper.appendChild(btn);
 
-        // 麦克风静音按钮（仅非手机模式下的麦克风按钮）
+        // 语音会话快捷控制（仅非手机模式下的麦克风按钮）
         if (config.id === 'mic' && config.hasPopup && config.separatePopupTrigger && !window.isMobileWidth()) {
-            this.createMicMuteButton(btnWrapper);
+            this.createVoiceSessionQuickControls(btnWrapper);
         }
 
         // 处理弹窗
@@ -367,6 +373,7 @@ VRMManager.prototype.setupFloatingButtons = function() {
             triggerImg: (config.hasPopup && config.separatePopupTrigger && !window.isMobileWidth()) ? triggerImg : null
         };
     });
+    applyResponsiveFloatingLayout();
 
     // 处理"请她离开"事件
     // 注意：返回按钮的位置、显示、以及浮动按钮的隐藏均由 app-ui 统一处理，
@@ -525,7 +532,8 @@ VRMManager.prototype._startUIUpdateLoop = function() {
 
     const getVisibleButtonCount = () => {
         const mobile = window.isMobileWidth && window.isMobileWidth();
-        return [{ id: 'mic' }, { id: 'screen' }, { id: 'agent' }, { id: 'settings' }, { id: 'goodbye' }]
+        return [{ id: 'mic' }, { id: 'screen', mobileOnly: true }, { id: 'agent' }, { id: 'social' }, { id: 'settings' }, { id: 'goodbye' }]
+            .filter(c => !(c.mobileOnly && !mobile))
             .filter(c => !(mobile && (c.id === 'agent' || c.id === 'goodbye'))).length;
     };
     const baseButtonSize = 48;
@@ -745,23 +753,35 @@ VRMManager.prototype._startUIUpdateLoop = function() {
                         lockIcon.style.visibility = shouldShowLock ? 'visible' : 'hidden';
                         lockIcon.style.opacity = shouldShowLock ? '' : '0';
 
+                    }
+                }
+                if (lockIcon) {
+                    const isLockVisible = !this._isInReturnState &&
+                        lockIcon.style.display !== 'none' && lockIcon.style.visibility !== 'hidden';
+                    if (isLockVisible) {
                         const lockRect = lockIcon.getBoundingClientRect();
-                        let isLockOverlapped = false;
-                        document.querySelectorAll('[id^="vrm-popup-"]').forEach(popup => {
-                            if (popup.style.display === 'flex' && popup.style.opacity === '1') {
-                                const popupRect = popup.getBoundingClientRect();
-                                if (lockRect.right > popupRect.left && lockRect.left < popupRect.right &&
-                                    lockRect.bottom > popupRect.top && lockRect.top < popupRect.bottom) {
-                                    isLockOverlapped = true;
-                                }
-                            }
-                        });
+                        const popupUi = window.AvatarPopupUI || null;
+                        const isLockOverlapped = popupUi && typeof popupUi.isRectOverlappedByVisibleOverlay === 'function'
+                            ? popupUi.isRectOverlappedByVisibleOverlay(lockRect, 'vrm')
+                            : Array.from(document.querySelectorAll('[id^="vrm-popup-"], [data-neko-sidepanel-owner^="vrm-popup-"]')).some(element => {
+                                const style = window.getComputedStyle(element);
+                                const computedOpacity = Number.parseFloat(style.opacity || '1');
+                                const targetOpacity = Number.parseFloat(element.style.opacity || style.opacity || '1');
+                                if (style.display === 'none' || style.visibility === 'hidden' ||
+                                    (computedOpacity <= 0 && targetOpacity <= 0)) return false;
+                                const overlayRect = element.getBoundingClientRect();
+                                return lockRect.right > overlayRect.left && lockRect.left < overlayRect.right &&
+                                    lockRect.bottom > overlayRect.top && lockRect.top < overlayRect.bottom;
+                            });
                         // 与角色形象半透明状态完全同步：容器淡化(opacity<1)时锁图标镜像同一透明度
                         const vrmFadeContainer = document.getElementById('vrm-container');
                         const vrmFadeOpacity = vrmFadeContainer ? parseFloat(vrmFadeContainer.style.opacity) : NaN;
                         lockIcon.style.opacity = (Number.isFinite(vrmFadeOpacity) && vrmFadeOpacity < 1)
                             ? String(vrmFadeOpacity)
                             : (isLockOverlapped ? '0.3' : '');
+                        lockIcon.style.pointerEvents = isLockOverlapped ? 'none' : 'auto';
+                    } else {
+                        lockIcon.style.pointerEvents = 'none';
                     }
                 }
                 buttonsContainer.style.transform = `scale(${scale})`;

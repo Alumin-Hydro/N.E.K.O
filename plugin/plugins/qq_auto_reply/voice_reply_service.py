@@ -14,10 +14,24 @@ import websockets
 
 from utils.api_config_loader import get_free_voices
 from utils.config_manager import get_reserved
-from utils.tts.native_voice_registry import get_active_realtime_native_provider_for_ui
-from utils.tts.providers.gemini import normalize_gemini_tts_voice
-from utils.voice_clone import MimoVoiceCloneClient, MimoVoiceCloneError, MinimaxVoiceCloneClient, MinimaxVoiceCloneError
-from utils.voice_config import read_legacy_voice_id
+try:
+    from utils.tts.native_voice_registry import get_active_realtime_native_provider_for_ui
+except (ImportError, ModuleNotFoundError):
+    get_active_realtime_native_provider_for_ui = None
+try:
+    from utils.tts.providers.gemini import normalize_gemini_tts_voice
+except (ImportError, ModuleNotFoundError):
+    normalize_gemini_tts_voice = None
+try:
+    from utils.voice_clone import MimoVoiceCloneClient, MimoVoiceCloneError, MinimaxVoiceCloneClient, MinimaxVoiceCloneError
+except (ImportError, ModuleNotFoundError):
+    MimoVoiceCloneClient = MinimaxVoiceCloneClient = None
+    class _MissingVoiceCloneError(Exception): pass
+    MimoVoiceCloneError = MinimaxVoiceCloneError = _MissingVoiceCloneError
+try:
+    from utils.voice_config import read_legacy_voice_id
+except (ImportError, ModuleNotFoundError):
+    read_legacy_voice_id = None
 
 
 class QQVoiceReplyService:
@@ -54,7 +68,7 @@ class QQVoiceReplyService:
             current_character = catgirls.get(current_name) if isinstance(catgirls, dict) else None
             if not isinstance(current_character, dict):
                 return ""
-            return read_legacy_voice_id(get_reserved(current_character, "voice_id", default="", legacy_keys=("voice_id",)))
+            return read_legacy_voice_id(get_reserved(current_character, "voice_id", default="", legacy_keys=("voice_id",))) if read_legacy_voice_id else ""
         except Exception as exc:
             self.plugin.logger.warning(f"读取当前猫娘 voice_id 失败: {exc}")
             return ""
@@ -116,7 +130,10 @@ class QQVoiceReplyService:
         try:
             from utils.config_manager import get_config_manager
             from utils.tts.providers.stepfun import STEPFUN_TTS_DEFAULT_VOICE
-            from main_logic.tts_client.workers.step import _adjust_free_tts_url, _build_step_tts_create_data
+            from main_logic.tts_client.workers.free import (
+                _adjust_free_tts_url,
+                _build_step_tts_create_data,
+            )
 
             config_manager = get_config_manager()
 
@@ -142,7 +159,7 @@ class QQVoiceReplyService:
 
             voices = config_manager.get_voices_for_current_api()
             voice_id = await self.get_current_voice_id()
-            if not voice_id:
+            if not voice_id and get_active_realtime_native_provider_for_ui:
                 active_native = get_active_realtime_native_provider_for_ui(config_manager)
                 if active_native:
                     voice_id = active_native
@@ -176,6 +193,8 @@ class QQVoiceReplyService:
                 else:
                     mimo_base_url = str((voice_data or {}).get("mimo_base_url") or "").strip()
                 sample_bytes = base64.b64decode(sample_b64)
+                if not MimoVoiceCloneClient:
+                    raise RuntimeError("MIMO_VOICE_CLONE_UNAVAILABLE")
                 mimo_client = MimoVoiceCloneClient(api_key=mimo_api_key, base_url=mimo_base_url or None)
                 audio_data = await mimo_client.synthesize_preview(
                     sample_bytes,
@@ -190,6 +209,8 @@ class QQVoiceReplyService:
                     raise RuntimeError("MINIMAX_API_KEY_MISSING")
                 from utils.voice_clone import get_minimax_base_url
                 minimax_base_url = (voice_data or {}).get("minimax_base_url") or get_minimax_base_url(provider)
+                if not MinimaxVoiceCloneClient:
+                    raise RuntimeError("MINIMAX_VOICE_CLONE_UNAVAILABLE")
                 minimax_client = MinimaxVoiceCloneClient(api_key=minimax_api_key, base_url=minimax_base_url)
                 audio_data = await minimax_client.synthesize_preview(voice_id=voice_id, text=text)
                 return audio_data, "audio/mpeg"
@@ -197,8 +218,8 @@ class QQVoiceReplyService:
             if not audio_api_key:
                 raise RuntimeError("TTS_AUDIO_API_KEY_MISSING")
 
-            active_native_provider = get_active_realtime_native_provider_for_ui(config_manager)
-            if active_native_provider:
+            active_native_provider = get_active_realtime_native_provider_for_ui(config_manager) if get_active_realtime_native_provider_for_ui else None
+            if active_native_provider and normalize_gemini_tts_voice:
                 native_voice_id, recognized = normalize_gemini_tts_voice(voice_id)
                 if active_native_provider == "gemini" and recognized:
                     from main_routers.characters_router import _synthesize_gemini_native_voice_preview
@@ -329,47 +350,73 @@ class QQVoiceReplyService:
         await asyncio.to_thread(output_path.write_bytes, audio_bytes)
         return output_path.resolve().as_uri(), mime_type
 
-    async def deliver_private_reply(self, target_qq: str, text: str, *, voice_text: str = "", fallback_to_text_on_voice_failure: bool) -> None:
+    @staticmethod
+    def _confirm_send(result) -> bool:
+        """Falsy result == the send was never confirmed.
+
+        Both clients report a receipt for every sender now (Open Platform
+        message id; NapCat echo round-trip), so there is no "no channel"
+        case left to special-case — and no per-call flag to forget on a
+        fallback path."""
+        return bool(result)
+
+    async def deliver_private_reply(self, target_qq: str, text: str, *, voice_text: str = "", fallback_to_text_on_voice_failure: bool) -> bool:
         normalized_text = self.plugin._validate_outbound_message(text)
         mode = self.plugin._get_reply_mode()
         if mode == "text":
-            await self.plugin.qq_client.send_message(target_qq, normalized_text)
-            return
+            return self._confirm_send(
+                await self.plugin.qq_client.send_message(target_qq, normalized_text)
+            )
         # both 模式：LLM 自主决定 → 有 <record> 则语音，否则纯文字
         if mode == "both":
             voice_content = (voice_text or "").strip()
             if voice_content:
                 # LLM 指定了语音内容
+                text_ok = False
                 if normalized_text:
-                    await self.plugin.qq_client.send_message(target_qq, normalized_text)
+                    text_ok = self._confirm_send(
+                        await self.plugin.qq_client.send_message(target_qq, normalized_text)
+                    )
                 try:
                     file_uri, _ = await self.synthesize_reply_voice_file(voice_content)
-                    await self.plugin.qq_client.send_private_record(target_qq, file_uri)
-                    return
+                    return self._confirm_send(
+                        await self.plugin.qq_client.send_private_record(target_qq, file_uri),
+                    ) or text_ok
                 except Exception:
                     self.plugin.logger.warning("QQ both-语音私聊发送失败，已保留文本", exc_info=True)
-                    return
+                    return text_ok
             else:
                 # 无 <record> 标签 → 纯文字
-                await self.plugin.qq_client.send_message(target_qq, normalized_text)
-                return
+                return self._confirm_send(
+                    await self.plugin.qq_client.send_message(target_qq, normalized_text)
+                )
         try:
             file_uri, _ = await self.synthesize_reply_voice_file(normalized_text)
-            if mode == "voice":
-                await self.plugin.qq_client.send_private_record(target_qq, file_uri)
-                return
-            await self.plugin.qq_client.send_private_record(target_qq, file_uri)
+            voice_ok = self._confirm_send(
+                await self.plugin.qq_client.send_private_record(target_qq, file_uri),
+            )
+            if voice_ok:
+                return True
+            if mode == "voice" and fallback_to_text_on_voice_failure:
+                # 开放平台失败吞异常返回 None（不 raise）：未确认同样要走
+                # 文本回退，不能把"没发出去"当结论直接返回。
+                self.plugin.logger.warning("QQ 纯语音私聊发送未确认，回退文本")
+                return self._confirm_send(
+                    await self.plugin.qq_client.send_message(target_qq, normalized_text)
+                )
+            return False
         except Exception:
             if mode == "voice" and fallback_to_text_on_voice_failure:
                 self.plugin.logger.warning("QQ 纯语音私聊发送失败，回退文本", exc_info=True)
-                await self.plugin.qq_client.send_message(target_qq, normalized_text)
-                return
+                return self._confirm_send(
+                    await self.plugin.qq_client.send_message(target_qq, normalized_text)
+                )
             if mode == "both" and normalized_text:
                 self.plugin.logger.warning("QQ 复合私聊中的语音发送失败，已保留文本", exc_info=True)
-                return
+                return False
             raise
 
-    async def deliver_group_reply(self, group_id: str, text: str, *, reply_message_id: str = "", at_user_id: str = "", keyboard: str = "", voice_text: str = "", fallback_to_text_on_voice_failure: bool) -> None:
+    async def deliver_group_reply(self, group_id: str, text: str, *, reply_message_id: str = "", at_user_id: str = "", keyboard: str = "", voice_text: str = "", fallback_to_text_on_voice_failure: bool) -> bool:
         normalized_text = self.plugin._validate_outbound_message(text)
         mode = self.plugin._get_reply_mode()
         text_segments: list[dict[str, Any]] = []
@@ -379,36 +426,57 @@ class QQVoiceReplyService:
             text_segments.append({"type": "at", "data": {"qq": str(at_user_id)}})
         text_segments.append({"type": "text", "data": {"text": f" {normalized_text}" if at_user_id else normalized_text}})
         if mode == "text":
-            await self.plugin.qq_client.send_group_message_segments(group_id, text_segments, keyboard=keyboard)
-            return
+            return self._confirm_send(
+                await self.plugin.qq_client.send_group_message_segments(group_id, text_segments, keyboard=keyboard),
+            )
         # both 模式：LLM 自主决定 → 有 <record> 则语音，否则纯文字
         if mode == "both":
             voice_content = (voice_text or "").strip()
             if voice_content:
+                text_ok = False
                 if normalized_text:
-                    await self.plugin.qq_client.send_group_message_segments(group_id, text_segments, keyboard=keyboard)
+                    text_ok = self._confirm_send(
+                        await self.plugin.qq_client.send_group_message_segments(group_id, text_segments, keyboard=keyboard),
+                    )
                 try:
                     file_uri, _ = await self.synthesize_reply_voice_file(voice_content)
-                    await self.plugin.qq_client.send_group_record(group_id, file_uri, reply_message_id=reply_message_id, at_user_id=at_user_id)
-                    return
+                    return self._confirm_send(
+                        await self.plugin.qq_client.send_group_record(group_id, file_uri, reply_message_id=reply_message_id, at_user_id=at_user_id),
+                    ) or text_ok
                 except Exception:
                     self.plugin.logger.warning("QQ both-语音群聊发送失败，已保留文本", exc_info=True)
-                    return
+                    return text_ok
             else:
-                await self.plugin.qq_client.send_group_message_segments(group_id, text_segments, keyboard=keyboard)
-                return
+                return self._confirm_send(
+                    await self.plugin.qq_client.send_group_message_segments(group_id, text_segments, keyboard=keyboard),
+                )
         try:
             file_uri, _ = await self.synthesize_reply_voice_file(normalized_text)
-            if mode == "voice":
-                await self.plugin.qq_client.send_group_record(group_id, file_uri, reply_message_id=reply_message_id, at_user_id=at_user_id)
-                return
-            await self.plugin.qq_client.send_group_record(group_id, file_uri, reply_message_id=reply_message_id, at_user_id=at_user_id)
+            voice_ok = self._confirm_send(
+                await self.plugin.qq_client.send_group_record(group_id, file_uri, reply_message_id=reply_message_id, at_user_id=at_user_id),
+            )
+            if voice_ok:
+                return True
+            if mode == "voice" and fallback_to_text_on_voice_failure:
+                # 对偶私聊路径：未确认（开放平台吞异常返回 None）也回退文本。
+                # 回退的这条同样要带 keyboard——否则语音一失败，用户拿到的
+                # 是一句"想看哪个？"却一个按钮都没有。
+                self.plugin.logger.warning("QQ 纯语音群聊发送未确认，回退文本")
+                return self._confirm_send(
+                    await self.plugin.qq_client.send_group_message_segments(
+                        group_id, text_segments, keyboard=keyboard,
+                    ),
+                )
+            return False
         except Exception:
             if mode == "voice" and fallback_to_text_on_voice_failure:
                 self.plugin.logger.warning("QQ 纯语音群聊发送失败，回退文本", exc_info=True)
-                await self.plugin.qq_client.send_group_message_segments(group_id, text_segments)
-                return
+                return self._confirm_send(
+                    await self.plugin.qq_client.send_group_message_segments(
+                        group_id, text_segments, keyboard=keyboard,
+                    ),
+                )
             if mode == "both":
                 self.plugin.logger.warning("QQ 复合群聊中的语音发送失败，已保留文本", exc_info=True)
-                return
+                return False
             raise
