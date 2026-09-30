@@ -237,6 +237,7 @@ class GlobalState:
         self._plugin_response_map_manager: Optional[Any] = None
         self._plugin_response_event_map: Optional[Any] = None
         self._plugin_response_notify_event: Optional[Any] = None
+        self._is_plugin_child_process = False
         self._plugin_comm_lock = threading.Lock()
 
         # Per-plugin downlink senders for routing plugin-to-plugin responses
@@ -645,6 +646,13 @@ class GlobalState:
         """插件响应映射（跨进程共享字典）"""
         if self._plugin_response_map is None:
             with self._plugin_comm_lock:
+                if self._plugin_response_map is None and self._is_plugin_child_process:
+                    # Plugin child without inherited proxies (spawn): only the host
+                    # writes this map, so a child-local Manager would never be fed.
+                    # Replies reach the child over ZMQ instead.
+                    self._plugin_response_map = {}
+                    if self._plugin_response_event_map is None:
+                        self._plugin_response_event_map = {}
                 if self._plugin_response_map is None:
                     # 使用 Manager 创建跨进程共享的字典
                     if self._plugin_response_map_manager is None:
@@ -655,6 +663,10 @@ class GlobalState:
                     if self._plugin_response_event_map is None:
                         self._plugin_response_event_map = self._plugin_response_map_manager.dict()
         return self._plugin_response_map
+
+    def mark_plugin_child_process(self) -> None:
+        """Mark this process as a plugin child so it never starts its own Manager."""
+        self._is_plugin_child_process = True
 
     @property
     def plugin_response_event_map(self) -> Any:
