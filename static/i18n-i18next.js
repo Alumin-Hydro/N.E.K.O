@@ -29,9 +29,9 @@
     const SUPPORTED_LANGUAGES = ['zh-CN', 'zh-TW', 'en', 'ja', 'ko', 'ru', 'es', 'pt'];
 
     // locale 资源版本（用于 cache-busting，避免客户端长期缓存旧语言包导致新增 key 不生效）
-    // 在主分支自定义道具 v3 编辑器、屏幕来源、本地语音识别、「声纹功能已关闭」等 locale 变更之上，
-    // 合入本分支 Electron 悬浮按钮「去设置页登录」提示，递增版本让长期缓存重新拉取完整语言包。
-    const LOCALE_VERSION = '2026-09-30-social-login-prompt-avatar-tool-v3-merge';
+    // 在主分支 Electron 悬浮按钮「去设置页登录」等 locale 变更之上，合入自定义道具「上次删除未完成，
+    // 无法保存」「上次修改中断且无法自动恢复」两条提示，递增版本让长期缓存重新拉取完整语言包。
+    const LOCALE_VERSION = '2026-09-30-avatar-tool-pending-recovery-social-login-merge';
     function initDecorativeImageDragGuard() {
         const markImage = (img) => {
             if (!(img instanceof HTMLImageElement)) return;
