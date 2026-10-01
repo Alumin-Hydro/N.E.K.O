@@ -5848,5 +5848,185 @@
             "roundLabel": "Ronda {{round}}",
             "noRounds": "Aún no hay rondas completadas."
         }
+    },
+    "clickGuide": {
+        "tour": "Guía interactiva",
+        "back": "Anterior",
+        "next": "Siguiente",
+        "skip": "Terminar guía",
+        "unavailable": "Este botón no está disponible por ahora. Pulsa Siguiente para continuar.",
+        "nativeFallback": "Si no puedes pulsar la bolita, elige Siguiente.",
+        "skipTools": "Omitir herramientas",
+        "toolContinueHint": "Pulsa el botón resaltado para seguir. La herramienta no se ejecutará.",
+        "finishButton": "Finalizar",
+        "close": "Cerrar",
+        "saveFailed": "No se pudo guardar. Inténtalo de nuevo.",
+        "resetButton": "Reactivar tutorial",
+        "resetSuccess": "Guía reiniciada. Recarga el inicio para empezar. El progreso de siete días no cambia.",
+        "choice": {
+            "title": "¿Qué tutorial quieres repetir?",
+            "body": "Elige la guía de clics o reinicia el tutorial narrativo de siete días. La guía de clics conserva tu progreso de siete días.",
+            "click": "Guía interactiva",
+            "sevenDay": "Tutorial de siete días"
+        },
+        "chatOverview": {
+            "title": "Chat cápsula",
+            "body": "Escribe «你好» aquí y pulsa Intro para enviarlo."
+        },
+        "chatOverviewSend": {
+            "body": "¿Listo? Pulsa Intro para enviar el mensaje."
+        },
+        "chatOverviewDraft": {
+            "body": "Ya tienes un mensaje o archivo sin enviar. Lo conservaremos; pulsa Siguiente para ver el historial."
+        },
+        "chatOverviewBack": {
+            "body": "Esta es la cápsula de chat. La conversación y el borrador no cambian; pulsa Siguiente para volver al historial."
+        },
+        "history": {
+            "title": "Historial",
+            "body": "Pulsa la barra azul sobre la cápsula para abrir la conversación."
+        },
+        "historyClose": {
+            "title": "Cerrar historial",
+            "body": "Pulsa de nuevo la barra azul para cerrar el historial y volver al chat."
+        },
+        "minimize": {
+            "title": "Minimizar chat",
+            "body": "Pulsa la bola de la izquierda para convertir el chat en una pequeña bola en el escritorio."
+        },
+        "restore": {
+            "title": "Restaurar chat",
+            "body": "Pulsa otra vez la bolita para recuperar la cápsula y seguir conversando."
+        },
+        "tools": {
+            "title": "Herramientas",
+            "body": "Coloca el cursor sobre el botón de la derecha para abrir la rueda de herramientas."
+        },
+        "toolsDraft": {
+            "body": "Con texto o archivos, el botón derecho se convierte en Enviar. Borra el texto o quita los archivos para probar la rueda, o elige Omitir herramientas y conserva el borrador."
+        },
+        "screenshot": {
+            "title": "Captura de pantalla",
+            "body": "Desplázate con la rueda o arrástrala para cambiar de herramienta. La captura se añade al mensaje."
+        },
+        "avatar": {
+            "title": "Objetos interactivos",
+            "body": "Abre estas herramientas cuando quieras jugar con tu personaje. Puedes elegir y ordenar tus favoritas."
+        },
+        "avatarTools": {
+            "title": "Tus objetos",
+            "body": "Se muestran en el orden guardado. El botón final permite editarlos. Esta patita es un objeto, distinto de Agent."
+        },
+        "translate": {
+            "title": "Traducción de subtítulos",
+            "body": "Activa la traducción de subtítulos cuando necesites entender otro idioma. Pulsa de nuevo para desactivarla."
+        },
+        "jukebox": {
+            "title": "Música",
+            "body": "La gramola te permite escuchar música mientras charlas. Dentro puedes elegir canciones y controlar la reproducción."
+        },
+        "import": {
+            "title": "Importar imagen",
+            "body": "Importar imagen te permite elegir una imagen de tu dispositivo y añadirla al chat."
+        },
+        "export": {
+            "title": "Exportar conversación",
+            "body": "Exportar te permite elegir mensajes, ver una vista previa y guardar una copia."
+        },
+        "galgame": {
+            "title": "Galgame",
+            "body": "Cambia el chat al modo Galgame, con opciones de respuesta para seguir la conversación. Pulsa de nuevo para volver al chat normal."
+        },
+        "floatingOverviewContinueHint": "Pulsa cualquier botón resaltado para seguir. La función no se abrirá.",
+        "floatingOverview": {
+            "title": "Botones junto al personaje",
+            "body": "Los botones junto al personaje abren voz, Agent, Neko Universe, ajustes y descanso."
+        },
+        "mic": {
+            "title": "Chat de voz",
+            "body": "El micrófono inicia o detiene la conversación por voz. La flecha abre las opciones de micrófono, volumen y pantalla compartida."
+        },
+        "micSettings": {
+            "title": "Ajustes de voz",
+            "body": "Pulsa la flecha junto al micrófono. Aquí también se ajustan dispositivos y volumen."
+        },
+        "screen": {
+            "title": "Compartir pantalla",
+            "body": "Elige una pantalla o ventana. El interruptor derecho inicia o detiene la sesión. Compartir es opcional."
+        },
+        "agent": {
+            "title": "Agent",
+            "body": "La patita abre Agent para ayudarte con el ordenador, el navegador y los plugins. El panel de tareas muestra el progreso y permite detenerlas."
+        },
+        "agentMaster": {
+            "title": "Interruptor de Agent",
+            "body": "Activa Agent. El panel de tareas muestra el progreso y permite detenerlas. No necesitas activarlo."
+        },
+        "social": {
+            "title": "Universo Miau",
+            "body": "Neko Universe se desbloquea para usuarios nuevos tras tres días naturales. Entra aquí cuando esté disponible."
+        },
+        "settings": {
+            "title": "Ajustes",
+            "body": "En Ajustes encontrarás el personaje, la voz, las preferencias del chat y los recuerdos."
+        },
+        "proactive": {
+            "title": "Chat proactivo",
+            "body": "Permite que tu personaje inicie conversaciones. Puedes mantener tu ajuste actual."
+        },
+        "privacy": {
+            "title": "Privacidad",
+            "body": "Controla el acceso visual proactivo. Conserva las preferencias que desees."
+        },
+        "memory": {
+            "title": "Navegador de recuerdos",
+            "body": "Consulta y gestiona recuerdos. También puedes reiniciar cada tutorial por separado."
+        },
+        "goodbye": {
+            "title": "Ir a casa",
+            "body": "Envía al personaje a descansar aquí. Puedes llamarlo de vuelta cuando quieras."
+        },
+        "return": {
+            "title": "Volver",
+            "body": "Pulsa Llamar para que el personaje vuelva a tu lado."
+        },
+        "lock": {
+            "title": "Bloquear posición",
+            "body": "El candado fija la posición del personaje. Cuando está abierto, puedes arrastrarlo y cambiar su tamaño con la rueda."
+        },
+        "finish": {
+            "title": "¡A explorar!",
+            "body": "Ya conoces lo esencial. Para repetir la guía, restablécela en Ajustes → Explorador de recuerdos."
+        },
+        "connection": {
+            "title": "Chat no disponible",
+            "body": "La ventana de chat no respondió. Ábrela y recarga el inicio para reintentar. La guía no se ha marcado como completada."
+        },
+        "closeMenu": "Cerrar menú y continuar",
+        "openedWindow": {
+            "title": "Volver al punto anterior",
+            "body": "Puedes volver a abrir esta página desde el mismo acceso cuando la necesites. Ahora pulsa el botón de cierre resaltado para volver y conocer las demás funciones.",
+            "close": "Cerrar página y continuar",
+            "pending": "Si la página pide guardar o confirmar, completa ese paso. La guía continúa cuando se cierre.",
+            "manualClose": "Esta página ya está abierta en otra ventana. Ciérrala allí y vuelve aquí; la guía continuará automáticamente.",
+            "returnToPage": "Ir a la página abierta"
+        },
+        "socialClose": {
+            "title": "Volver de la comunidad",
+            "body": "La comunidad está abierta. Pulsa × para cerrarla y volver a los accesos del personaje."
+        },
+        "micMenu": {
+            "body": "Este menú contiene micrófono, volumen y pantalla compartida. Cuando termines, ciérralo para continuar."
+        },
+        "agentMenu": {
+            "body": "Estos interruptores eligen qué herramientas puede usar Agent. El panel de tareas muestra el progreso. Puedes dejar los ajustes como están y cerrar el menú."
+        },
+        "settingsMenu": {
+            "body": "Aquí se agrupan los ajustes del personaje, la voz y el chat. Por ahora basta con conocer los accesos; podrás hacer cambios después. Cierra el menú con el botón de abajo."
+        },
+        "sections": {
+            "chat": "Cápsula de chat",
+            "floating": "Botones del personaje"
+        }
     }
 }
