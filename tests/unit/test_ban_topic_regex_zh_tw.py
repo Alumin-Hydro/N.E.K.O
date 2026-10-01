@@ -2652,15 +2652,20 @@ def test_a_whitespace_only_message_does_not_blow_up():
     from tests.wall_clock import fastest_run
 
     extract_directives(" ")  # 预热：别把首次正则编译算进计时（CodeRabbit）
-    # ⚠️ 主判据只计时**模板 2 自己**。整个 extract_directives 在纯空白上的耗时大头是
-    # 韩语模板 ``(.{1,30}?)\s*(?:이|가)?\s*…`` 的三次方（60 个空格约 7ms，模板 2 自己
-    # 约 0.7ms），拿它当判据测的是韩语模板：模板 2 前置空白**全部**去原子化后 60 个
-    # 空格也只要 21ms，原先那条 ``timings[60] < timings[30] * 25 + 0.02`` 照样通过。
-    # 实测模板 2 在 240 个空格上：原子化版本 7.5ms，全部去原子化 2.1s。0.25 秒的线
-    # 两侧分别约 30 倍、8 倍余量，不要再放宽。取多次里最快一次，滤掉调度抢占。
+    # ⚠️ 主判据只计时**模板 2 自己**。整个 extract_directives 是 21 条模板之和：写这条时
+    # 纯空白上的大头是韩语模板 ``(.{1,30}?)\s*(?:이|가)?\s*…`` 的三次方（60 个空格约
+    # 7ms，模板 2 自己约 0.7ms），模板 2 前置空白**全部**去原子化后 60 个空格也只要
+    # 21ms，原先那条 ``timings[60] < timings[30] * 25 + 0.02`` 照样通过。韩语那条后来
+    # 修掉了（见 test_directive_regex_whitespace.py），但整体计时量的仍是别人。
+    # ⚠️ 输入要**以正文起头**，不能是纯空白：话题捕获现在不许空白起头（见
+    # _PATTERNS_RAW 开头），纯空白里的每个起点一步就失败，去原子化也测不出来——
+    # 实测 ``" " * 240`` 去原子化前后都在 0.1ms 以下。从 ``工作`` 起头时只有这一个起点，
+    # 瓜分全落在它后面的空白上：原子化版本 0.6ms，全部去原子化 2.2s。0.25 秒的线两侧
+    # 分别约 400 倍、9 倍余量，不要再放宽。取多次里最快一次，滤掉调度抢占。
     pat = [p for locale, _kind, p in D.DIRECTIVE_PATTERNS if locale == "zh"][1]
-    elapsed = fastest_run(lambda: list(pat.finditer(" " * 240)), stop_below=0.25)
-    assert elapsed < 0.25, f"模板 2 在 240 个空格上最快也要 {elapsed:.3f}s，空白瓜分回溯又回来了"
+    text = "工作" + " " * 1500
+    elapsed = fastest_run(lambda: list(pat.finditer(text)), stop_below=0.25)
+    assert elapsed < 0.25, f"模板 2 在 {len(text)} 个字符上最快也要 {elapsed:.3f}s，空白瓜分回溯又回来了"
     # 端到端只留一道很松的天花板：这条路径每条用户消息同步跑。
     assert fastest_run(lambda: extract_directives(" " * 60), stop_below=0.5) < 0.5
 
@@ -2934,10 +2939,12 @@ def test_the_guanyu_template_spacing_is_atomic_too():
     assert not _splittable_whitespace_runs(head), _splittable_whitespace_runs(head)
 
     # ── 行为面：只计时模板 4 自己 ──
-    # ⚠️ 不能计时整个 extract_directives：韩语模板 ``(.{1,30}?)\s*(?:이|가)?\s*…``
-    # 在纯空白上本身就是三次方，"关于" + 80 个空格的耗时几乎全是它（本机约 20ms，
+    # ⚠️ 不能计时整个 extract_directives：写这条时韩语模板 ``(.{1,30}?)\s*(?:이|가)?\s*…``
+    # 在纯空白上是三次方，"关于" + 80 个空格的耗时几乎全是它（本机约 20ms，
     # 模板 4 自己约 2µs），拿它的倍率当判据测的是韩语模板加机器负载——CI 和 xdist
-    # 下单次采样被调度抢占就是 {40: 0.003, 80: 0.236} 这种误红。
+    # 下单次采样被调度抢占就是 {40: 0.003, 80: 0.236} 这种误红。那条后来修掉了，整条
+    # extract_directives 在空白上已是线性，但整体计时量的仍是 21 条模板之和，模板 4
+    # 自己回退时淹在里面，理由不变。
     # 模板 4 前置空白全部去原子化时，本机 80 个空格最快一次 0.96s（n^5：20→40 涨
     # 24 倍）；原子化版本约 2µs。所以 0.1 秒的线**只有快的一侧**余量充足（约五万倍），
     # 慢的一侧只有**约 10 倍**：慢 runner 上也不要把它放宽到 1 秒，否则全量回退就拦不住了。
@@ -4554,6 +4561,8 @@ def test_no_cross_line_gap_remains_anywhere_in_a_zh_template():
         # ⚠️ _ZH_OBJECTLESS_AHEAD 豁免：它是**零宽负前视**，只会「多挡一些」，
         # 拉不进任何内容。判据管的是会 consume 的那些空白。
         body = raw.replace(D._ZH_OBJECTLESS_AHEAD, "")
+        # 话题开头「不许空白起头」的 ``(?!\s)`` 同理：零宽、只挡不吃
+        body = body.replace(r"(?!\s)", "")
         body = body.replace(D._ZH_HSPACE, "")
         body = body.replace(chr(92) + "s*$", "")
         # 取反的字符类里出现 ``\s`` 是在**排除**空白，方向相反，不在此列。
