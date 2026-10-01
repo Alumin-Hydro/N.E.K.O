@@ -136,6 +136,28 @@ def plugin_needs_hot_reload_recovery(plugin_id: str) -> bool:
     return plugin_id in _hot_reload_failed
 
 
+# plugin_id (as passed to start_plugin) -> startup timeout that call granted,
+# recorded once the effective config has been read. The hot-reload watcher sizes
+# its restart drain from it instead of reading config files itself.
+_active_startup_timeouts: dict[str, float] = {}
+
+
+def active_startup_timeout(plugin_id: str) -> float | None:
+    """Startup timeout granted by an in-progress start of this plugin, if any."""
+    return _active_startup_timeouts.get(plugin_id)
+
+
+def revoke_hot_reload_recovery(plugin_id: str) -> None:
+    """Drop the recovery permission when the plugin's source is replaced.
+
+    卸载、覆盖安装、开发关联的移除/改绑都不一定经过 stop_plugin（插件没在
+    跑时根本不会调），许可就会挂在 ID 上，被之后同 ID 的另一份源码（恢复的
+    内置插件、重装的包）继承——改一下文件就把用户从没启动过的插件拉起来。
+    调用方都在操作锁内。
+    """
+    _hot_reload_failed.discard(plugin_id)
+
+
 def _resolve_python_requirements(
     conf: Any,
     config_path: Path,
@@ -1099,6 +1121,8 @@ class PluginLifecycleService:
                         runtime_cfg.get("startup_failure"),
                         plugin_id=current_plugin_id,
                     )
+            if startup_timeout_value is not None:
+                _active_startup_timeouts[original_plugin_id] = startup_timeout_value
             enabled_override = await asyncio.to_thread(
                 get_runtime_override,
                 current_plugin_id,
@@ -1448,6 +1472,8 @@ class PluginLifecycleService:
                 plugin_id=current_plugin_id,
                 error_type=type(exc).__name__,
             ) from exc
+        finally:
+            _active_startup_timeouts.pop(original_plugin_id, None)
 
     @serialized_plugin_operation
     async def stop_plugin(
@@ -1658,7 +1684,9 @@ class PluginLifecycleService:
             if development_snapshot is not None:
                 await asyncio.to_thread(development_store.validate_development_snapshot_sync, development_snapshot)
             result = await self.start_plugin(plugin_id, persist_user_intent=not only_if_running)
-        except Exception:
+        except BaseException:
+            # start_plugin already dropped the permission on entry; restore it
+            # even when cancellation lands after the stop half has run.
             if only_if_running and not _operations_shutting_down:
                 _hot_reload_failed.add(plugin_id)
             raise
@@ -1730,6 +1758,21 @@ class PluginLifecycleService:
                 # Keep the last working development instance when edits are
                 # invalid, just like the single-plugin reload path.
                 stop_outcomes.append(_ReloadOutcome(plugin_id=plugin_id, success=False, error=exc.message))
+                continue
+            except Exception as exc:
+                # An unexpected preflight error (e.g. a symlink loop making
+                # Path.resolve raise RuntimeError) must fail only this plugin:
+                # escaping would abort the batch after earlier plugins were
+                # stopped, and the start phase would never bring them back.
+                logger.error(
+                    "reload_all preflight raised unexpectedly: plugin_id={}, err_type={}, err={}",
+                    plugin_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                stop_outcomes.append(
+                    _ReloadOutcome(plugin_id=plugin_id, success=False, error=f"{type(exc).__name__}: {exc}")
+                )
                 continue
             # 这一次 stop 也要受剩余预算约束：只在开始前检查的话，一个慢关停
             # （或者调大了的 NEKO_PLUGIN_SHUTDOWN_TIMEOUT）就能让整个阶段冲破
