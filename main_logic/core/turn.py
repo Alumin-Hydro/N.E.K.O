@@ -266,7 +266,10 @@ class TurnMixin:
                     if len(self.tts_pending_chunks) == 1:
                         logger.info("TTS未就绪，开始缓存文本chunk...")
                     # 仅在回复首 chunk 尝试拉起，避免每个 chunk 都重试
-                    if is_first_chunk and self.tts_thread and not self.tts_thread.is_alive():
+                    if is_first_chunk and self.tts_thread and (
+                        not self.tts_thread.is_alive()
+                        or not self._tts_runtime_is_current(self._snapshot_tts_runtime())
+                    ):
                         self._respawn_tts_worker()
 
     def _set_conversation_turn_language(self, language: str | None) -> None:
@@ -1811,7 +1814,10 @@ class TurnMixin:
                     if len(self.tts_pending_chunks) == 1:
                         logger.info("TTS未就绪，开始缓存文本chunk...")
                     # 仅在回复首 chunk 尝试拉起，避免每个 chunk 都重试
-                    if is_first_chunk and self.tts_thread and not self.tts_thread.is_alive():
+                    if is_first_chunk and self.tts_thread and (
+                        not self.tts_thread.is_alive()
+                        or not self._tts_runtime_is_current(self._snapshot_tts_runtime())
+                    ):
                         self._respawn_tts_worker()
 
     async def send_lanlan_response(
@@ -1910,6 +1916,13 @@ class TurnMixin:
                 self._remember_recent_ai_voice_echo(text_clean)
         published_at = time.time()
         self.sync_message_queue.put({"type": "json", "data": message})
+        logger.debug(
+            "[voice-chain] stage=model_text_publish turn_id=%s request_id=%s first=%s text_len=%d",
+            effective_turn_id,
+            effective_request_id,
+            is_first_chunk,
+            len(text_clean),
+        )
         if on_published is not None:
             on_published(published_at)
         if cache_for_new_session and hasattr(self, 'is_preparing_new_session') and self.is_preparing_new_session:
@@ -2336,9 +2349,8 @@ class TurnMixin:
                 cache_for_new_session=False,
             )
 
-        self._remember_game_speech_correlation(turn_id, speech_correlation_id)
-
         if cached_chunks is not None:
+            self._remember_game_speech_correlation(turn_id, speech_correlation_id)
             # One call, one lock hold: sending frame by frame let an overlapping
             # ordinary/project TTS stream interleave between them, and the
             # frontend schedules decoded chunks in arrival order.
@@ -2387,6 +2399,7 @@ class TurnMixin:
             }
 
         await self.ensure_tts_pipeline_alive()
+        self._remember_game_speech_correlation(turn_id, speech_correlation_id)
         audio_queued = False
         capture_started = False
         completion_supported = bool(
