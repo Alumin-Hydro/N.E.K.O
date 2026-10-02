@@ -698,6 +698,7 @@ class TurnMixin:
                         self.summary_triggered_time = datetime.now()
                         self.message_cache_for_new_session = []
                         self.initial_cache_snapshot_len = 0
+                        self._primed_context_snapshot = None
                         self.initial_next_session_context_snapshot_len = 0
                         self.sync_message_queue.put({'type': 'system', 'data': 'renew session'})
 
@@ -1929,11 +1930,31 @@ class TurnMixin:
             if not hasattr(self, 'message_cache_for_new_session'):
                 self.message_cache_for_new_session = []
             # 注意：缓存使用原始文本，不翻译（用于记忆等内部处理）
-            if len(self.message_cache_for_new_session) == 0 or self.message_cache_for_new_session[-1]['role']==self.master_name:
-                self.message_cache_for_new_session.append(
-                    {"role": self.lanlan_name, "text": text_clean})
-            elif self.message_cache_for_new_session[-1]['role'] == self.lanlan_name:
-                self.message_cache_for_new_session[-1]['text'] += text_clean
+            # Only guarded proactive deliveries pass expected_speech_id. Each
+            # one gets its own entry marked as such, so the screen-history
+            # guard (NotifyMixin._convert_cache_to_str) never reads two
+            # independent deliveries, or a delivery and a reply, as one chain.
+            # A first chunk under the same speech id is a retry of that
+            # delivery (prompt_ephemeral restarts each attempt with
+            # is_first_chunk=True); it replaces the discarded attempt's text.
+            source = "proactive" if expected_speech_id is not None else None
+            cache = self.message_cache_for_new_session
+            last = cache[-1] if cache else None
+            same_kind = (
+                last is not None
+                and last['role'] == self.lanlan_name
+                and last.get('source') == source
+            )
+            if same_kind and not (source and is_first_chunk):
+                last['text'] += text_clean
+            elif same_kind and last.get('speech_id') == expected_speech_id:
+                last['text'] = text_clean
+            elif last is None or last['role'] in (self.master_name, self.lanlan_name):
+                entry = {"role": self.lanlan_name, "text": text_clean}
+                if source:
+                    entry['source'] = source
+                    entry['speech_id'] = expected_speech_id
+                cache.append(entry)
 
         # WS 发送（可能失败，但 sync/cache 已保存）
         # [DIAG] 切换猫娘后对话框空白问题：仅首 chunk 记录，避免流式刷屏
