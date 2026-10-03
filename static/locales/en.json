@@ -1334,6 +1334,7 @@
             "grok": "Grok (xAI)",
             "openrouter": "OpenRouter (Model Aggregator)",
             "orcarouter": "OrcaRouter (Claude Gateway)",
+            "requesty": "Requesty (Model Router)",
             "vllm_omni": "vLLM-Omni (TTS)",
             "gptsovits": "GPT-SoVITS (self-hosted)"
         },
@@ -1409,6 +1410,7 @@
             "grok": "Grok (xAI)",
             "openrouter": "OpenRouter",
             "orcarouter": "OrcaRouter",
+            "requesty": "Requesty",
             "vllm_omni": "vLLM-Omni (TTS)"
         },
         "freeVersionNoApiKey": "Free version does not require API Key",
@@ -4003,7 +4005,7 @@
             },
             "step6": {
                 "title": "🔑 Auxiliary API Key",
-                "desc": "If using Alibaba as auxiliary API, enter Alibaba's API Key here. If empty, uses core API key."
+                "desc": "Enter the API key for the selected auxiliary provider here. An empty key normally falls back to the core API key; providers that require a dedicated key cannot use this fallback."
             },
             "step7": {
                 "title": "🔧 Custom API Configuration",
