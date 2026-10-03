@@ -29,9 +29,8 @@
     const SUPPORTED_LANGUAGES = ['zh-CN', 'zh-TW', 'en', 'ja', 'ko', 'ru', 'es', 'pt'];
 
     // locale 资源版本（用于 cache-busting，避免客户端长期缓存旧语言包导致新增 key 不生效）
-    // 合并主分支模型选择器和 Requesty 文案时递增版本，避免网页、Electron、Docker
-    // 长期缓存旧语言包，导致新增 key 显示为字面量或继续使用过时提示。
-    const LOCALE_VERSION = '2026-10-03-requesty-model-picker-main-merge';
+    // 合并 Requesty 与存储错误文案，刷新网页和 Electron 的八语言包缓存。
+    const LOCALE_VERSION = '2026-10-04-storage-requesty-main-merge';
     function initDecorativeImageDragGuard() {
         const markImage = (img) => {
             if (!(img instanceof HTMLImageElement)) return;
