@@ -1223,14 +1223,14 @@ def test_a_run_still_in_progress_is_not_settled():
 
 async def test_open_requires_the_callers_clock(tmp_path):
     # 不传 now 时用墙钟 started_at 做起点，单调时钟驱动会整场不 fsync
-    import time as _time
-
     sp = VisitSpool(tmp_path, vid(27))
     with pytest.raises(TypeError):
         await sp.open(header(vid(27)))                          # type: ignore[call-arg]
-    mono = _time.monotonic()
+    # 固定且可精确表示的时钟，避免真实 monotonic 在到期边界的浮点舍入。
+    mono = 12345.0
     await sp.open(header(vid(27)), now=mono)
     await sp.append(line(1))
+    assert not sp.fsync_due(mono + visit_settings.VISIT_SPOOL_FSYNC_S - 0.5)
     # 恰好到点也要到期：(mono + 30) - mono 在浮点下可能是 29.999…，比较必须写成 now >= last + 30
     assert sp.fsync_due(mono + visit_settings.VISIT_SPOOL_FSYNC_S)
     await sp.close()
